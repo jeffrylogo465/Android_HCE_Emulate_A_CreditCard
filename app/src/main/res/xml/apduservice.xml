@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:description="@string/servicedesc"
-    android:apduServiceBanner="@drawable/hce_260_96"
+    android:description="@string/app_name"
     android:requireDeviceUnlock="false">
-    <aid-group android:description="@string/aiddescription"
-        android:category="payment">
-        <!-- select PPSE 2PAY.SYS.DDF01 -->
-        <aid-filter android:name="@string/hcePpse"/>
-        <aid-filter android:name="@string/aidVisaCard"/>
-        <aid-filter android:name="@string/aidMastercard"/>
+    <aid-group android:description="@string/app_name" android:category="payment">
+        <aid-filter android:name="325041592E5359532E4444463031" />
+        <aid-filter android:name="A0000000031010" />
+        <aid-filter android:name="A0000000041010" />
+        <aid-filter android:name="A00000002501" />
     </aid-group>
 </host-apdu-service>
