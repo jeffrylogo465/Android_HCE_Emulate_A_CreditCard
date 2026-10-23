@@ -71,18 +71,18 @@ public class MainActivity extends AppCompatActivity {
         snapHelper = new PagerSnapHelper();
         pager.setLayoutManager(layoutManager);
         pager.setAdapter(adapter);
-        pager.setOffscreenPageLimit(3);
         snapHelper.attachToRecyclerView(pager);
-        pager.setPageTransformer((page, position) -> {
-            float d = Math.min(Math.abs(position), 1f);
-            page.setScaleY(1f - d * 0.12f);
-            page.setAlpha(0.55f + (1f - d) * 0.45f);
-        });
 
         loadAll();
         bindCard(Math.min(prefs.getInt("selected", 0), cards.size() - 1));
+        pager.post(this::applyTransforms);
 
         pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                applyTransforms();
+            }
+
             @Override
             public void onScrollStateChanged(@NonNull RecyclerView rv, int state) {
                 if (state != RecyclerView.SCROLL_STATE_IDLE) return;
@@ -115,6 +115,20 @@ public class MainActivity extends AppCompatActivity {
         etLabel.addTextChangedListener(watcher);
         etAid.addTextChangedListener(watcher);
         etMsd.addTextChangedListener(watcher);
+    }
+
+    // ---------- card graphic effect ----------
+
+    private void applyTransforms() {
+        int centre = pager.getWidth() / 2;
+        if (centre == 0) return;
+        for (int i = 0; i < pager.getChildCount(); i++) {
+            View child = pager.getChildAt(i);
+            float mid = (child.getLeft() + child.getRight()) / 2f;
+            float dist = Math.min(Math.abs(mid - centre) / (float) centre, 1f);
+            child.setScaleY(1f - dist * 0.12f);
+            child.setAlpha(0.55f + (1f - dist) * 0.45f);
+        }
     }
 
     // ---------- storage ----------
