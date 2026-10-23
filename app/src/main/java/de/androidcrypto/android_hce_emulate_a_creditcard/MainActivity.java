@@ -1,7 +1,12 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -24,12 +29,13 @@ public class MainActivity extends AppCompatActivity {
         "ARQC / 9F26", "IAD / 9F10"
     };
 
-    /** True only for non-empty, even-length hex strings. */
+    private EditText[] fields;
+    private TextView cardLabel, cardPan, cardExp;
+
     private static boolean isHex(String s) {
         return !s.isEmpty() && s.matches("[0-9A-Fa-f]+") && s.length() % 2 == 0;
     }
 
-    /** Fields that must be valid hex for the HCE service to parse them. */
     private static boolean mustBeHex(String key) {
         return key.equals("aid") || key.equals("aip") || key.equals("afl")
             || key.equals("cid") || key.equals("atc") || key.equals("arqc")
@@ -52,7 +58,44 @@ public class MainActivity extends AppCompatActivity {
         title.setTextSize(18);
         root.addView(title);
 
-        final EditText[] fields = new EditText[KEYS.length];
+        // ---- card preview ----
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        int cp = (int) (18 * d);
+        card.setPadding(cp, cp, cp, cp);
+        GradientDrawable bg = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{0xFF1A237E, 0xFF4A148C});
+        bg.setCornerRadius(20 * d);
+        card.setBackground(bg);
+
+        cardLabel = new TextView(this);
+        cardLabel.setTextColor(Color.WHITE);
+        cardLabel.setTextSize(13);
+        cardLabel.setLetterSpacing(0.12f);
+
+        cardPan = new TextView(this);
+        cardPan.setTextColor(Color.WHITE);
+        cardPan.setTextSize(20);
+        cardPan.setTypeface(Typeface.MONOSPACE);
+        cardPan.setPadding(0, (int) (16 * d), 0, (int) (12 * d));
+
+        cardExp = new TextView(this);
+        cardExp.setTextColor(0xFFD0D0D0);
+        cardExp.setTextSize(12);
+
+        card.addView(cardLabel);
+        card.addView(cardPan);
+        card.addView(cardExp);
+
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        cardLp.setMargins(0, (int) (14 * d), 0, (int) (18 * d));
+        root.addView(card, cardLp);
+
+        // ---- fields ----
+        fields = new EditText[KEYS.length];
         for (int i = 0; i < KEYS.length; i++) {
             TextView lbl = new TextView(this);
             lbl.setText(HINTS[i]);
@@ -66,6 +109,18 @@ public class MainActivity extends AppCompatActivity {
             fields[i] = e;
         }
 
+        // live-update the card preview from label / pan / expiry
+        TextWatcher w = new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
+            public void onTextChanged(CharSequence s, int a, int b2, int c) { updateCard(); }
+            public void afterTextChanged(Editable s) {}
+        };
+        fields[0].addTextChangedListener(w);
+        fields[1].addTextChangedListener(w);
+        fields[2].addTextChangedListener(w);
+        updateCard();
+
+        // ---- save ----
         Button save = new Button(this);
         save.setText("SAVE CARD");
         save.setOnClickListener(v -> {
@@ -79,21 +134,45 @@ public class MainActivity extends AppCompatActivity {
                 }
                 ed.putString(KEYS[i], val);
             }
-            boolean ok = ed.commit();   // synchronous so we can report the result
+            boolean ok = ed.commit();
             Toast.makeText(this, ok ? "Card saved" : "Save failed",
                     Toast.LENGTH_SHORT).show();
         });
 
-        // Scrollable form on top, SAVE button pinned at the bottom.
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
-
         ScrollView sv = new ScrollView(this);
         sv.addView(root);
         outer.addView(sv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-
         outer.addView(save);
         setContentView(outer);
+    }
+
+    private void updateCard() {
+        if (cardLabel == null) return;
+
+        String lbl = fields[0].getText().toString().trim();
+        cardLabel.setText(lbl.isEmpty() ? "CARD" : lbl.toUpperCase());
+
+        String pan = fields[1].getText().toString().replaceAll("[^0-9]", "");
+        cardPan.setText(groupPan(pan));
+
+        String exp = fields[2].getText().toString().trim();
+        if (exp.length() == 4) {
+            cardExp.setText("VALID THRU " + exp.substring(2, 4) + "/" + exp.substring(0, 2));
+        } else {
+            cardExp.setText("VALID THRU --/--");
+        }
+    }
+
+    private static String groupPan(String pan) {
+        if (pan.isEmpty()) return "•••• •••• •••• ••••";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < pan.length(); i++) {
+            if (i > 0 && i % 4 == 0) sb.append(' ');
+            sb.append(pan.charAt(i));
+        }
+        return sb.toString();
     }
 }
