@@ -19,15 +19,18 @@ import androidx.appcompat.app.AppCompatActivity;
 public class MainActivity extends AppCompatActivity {
 
     private static final String[] KEYS = {
-        "label", "pan", "expiry", "serviceCode", "disc", "aid",
-        "aip", "afl", "cid", "atc", "arqc", "iad"
+        "label", "pan", "expiry", "serviceCode", "disc", "track2", "aid",
+        "aip", "afl", "cid", "atc", "arqc", "iad", "msd"
     };
     private static final String[] HINTS = {
-        "Label  (e.g. VISA CREDIT)", "PAN", "Expiry YYMM  (e.g. 3112)",
-        "Service code  (201)", "Discretionary  (track tail)", "AID",
-        "AIP  (1C00)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
-        "ARQC / 9F26", "IAD / 9F10"
+        "Label  (e.g. DISCOVER CREDIT)", "PAN  (digits only)", "Expiry YYMM  (e.g. 3109)",
+        "Service code  (201)", "Discretionary  (track tail)",
+        "Track 2 raw hex  (tag 57 - paste from real card, optional)", "AID",
+        "AIP  (1800)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
+        "ARQC / 9F26", "IAD / 9F10", "MSD mode  (1 = MSD, 0 = EMV)"
     };
+
+    private static final int IDX_MSD = 13;
 
     private EditText[] fields;
     private TextView cardLabel, cardPan, cardExp;
@@ -39,7 +42,19 @@ public class MainActivity extends AppCompatActivity {
     private static boolean mustBeHex(String key) {
         return key.equals("aid") || key.equals("aip") || key.equals("afl")
             || key.equals("cid") || key.equals("atc") || key.equals("arqc")
-            || key.equals("iad");
+            || key.equals("iad") || key.equals("track2");
+    }
+
+    private static boolean luhnOk(String digits) {
+        int sum = 0;
+        boolean dbl = false;
+        for (int i = digits.length() - 1; i >= 0; i--) {
+            int d = digits.charAt(i) - '0';
+            if (dbl) { d *= 2; if (d > 9) d -= 9; }
+            sum += d;
+            dbl = !dbl;
+        }
+        return sum % 10 == 0;
     }
 
     @Override
@@ -108,6 +123,9 @@ public class MainActivity extends AppCompatActivity {
             root.addView(e);
             fields[i] = e;
         }
+        if (fields[IDX_MSD].getText().toString().trim().isEmpty()) {
+            fields[IDX_MSD].setText("1");
+        }
 
         // live-update the card preview from label / pan / expiry
         TextWatcher w = new TextWatcher() {
@@ -124,19 +142,44 @@ public class MainActivity extends AppCompatActivity {
         Button save = new Button(this);
         save.setText("SAVE CARD");
         save.setOnClickListener(v -> {
+
+            String pan = fields[1].getText().toString().replaceAll("[^0-9]", "");
+            if (!pan.isEmpty()) {
+                if (pan.length() < 12 || pan.length() > 19) {
+                    Toast.makeText(this, "PAN must be 12-19 digits", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (!luhnOk(pan)) {
+                    Toast.makeText(this, "PAN fails Luhn check - recheck the digits", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                fields[1].setText(pan);
+            }
+
+            String exp = fields[2].getText().toString().replaceAll("[^0-9]", "");
+            if (!exp.isEmpty() && exp.length() != 4) {
+                Toast.makeText(this, "Expiry must be 4 digits, YYMM", Toast.LENGTH_LONG).show();
+                return;
+            }
+            fields[2].setText(exp);
+
+            String msd = fields[IDX_MSD].getText().toString().trim();
+            if (!msd.equals("0") && !msd.equals("1")) {
+                Toast.makeText(this, "MSD mode must be 0 or 1", Toast.LENGTH_LONG).show();
+                return;
+            }
+
             SharedPreferences.Editor ed = prefs.edit();
             for (int i = 0; i < KEYS.length; i++) {
                 String val = fields[i].getText().toString().trim();
                 if (mustBeHex(KEYS[i]) && !val.isEmpty() && !isHex(val)) {
-                    Toast.makeText(this, KEYS[i] + " must be even-length hex",
-                            Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, KEYS[i] + " must be even-length hex", Toast.LENGTH_LONG).show();
                     return;
                 }
                 ed.putString(KEYS[i], val);
             }
             boolean ok = ed.commit();
-            Toast.makeText(this, ok ? "Card saved" : "Save failed",
-                    Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, ok ? "Card saved" : "Save failed", Toast.LENGTH_SHORT).show();
         });
 
         LinearLayout outer = new LinearLayout(this);
@@ -167,7 +210,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String groupPan(String pan) {
-        if (pan.isEmpty()) return "•••• •••• •••• ••••";
+        if (pan.isEmpty()) return "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022";
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < pan.length(); i++) {
             if (i > 0 && i % 4 == 0) sb.append(' ');
