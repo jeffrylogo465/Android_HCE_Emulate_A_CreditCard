@@ -17,18 +17,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     static byte[] hex(String s) {
         int n = s.length() / 2;
         byte[] b = new byte[n];
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < n; i++) {
             b[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+        }
         return b;
     }
 
     static byte[] tlv(int tag, byte[] v) {
-        byte[] t = (tag > 0xFF)
-                ? new byte[]{(byte) (tag >> 8), (byte) tag}
-                : new byte[]{(byte) tag};
-        byte[] l = (v.length < 0x80)
-                ? new byte[]{(byte) v.length}
-                : new byte[]{(byte) 0x81, (byte) v.length};
+        byte[] t;
+        if (tag > 0xFF) {
+            t = new byte[]{(byte) (tag >> 8), (byte) tag};
+        } else {
+            t = new byte[]{(byte) tag};
+        }
+        byte[] l;
+        if (v.length < 0x80) {
+            l = new byte[]{(byte) v.length};
+        } else {
+            l = new byte[]{(byte) 0x81, (byte) v.length};
+        }
         byte[] out = new byte[t.length + l.length + v.length];
         System.arraycopy(t, 0, out, 0, t.length);
         System.arraycopy(l, 0, out, t.length, l.length);
@@ -38,10 +45,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     static byte[] cat(byte[]... arrs) {
         int len = 0;
-        for (byte[] a : arrs) len += a.length;
+        for (byte[] a : arrs) {
+            len += a.length;
+        }
         byte[] out = new byte[len];
         int p = 0;
-        for (byte[] a : arrs) { System.arraycopy(a, 0, out, p, a.length); p += a.length; }
+        for (byte[] a : arrs) {
+            System.arraycopy(a, 0, out, p, a.length);
+            p += a.length;
+        }
         return out;
     }
 
@@ -58,10 +70,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         int ins = apdu[1] & 0xFF;
         int p1  = apdu[2] & 0xFF;
 
-        if (ins == 0xA4 && p1 == 0x04) return select(apdu);
-        if (ins == 0xA8) return gpo();
-        if (ins == 0xB2) return readRecord();
-        if (ins == 0xAE) return genac();
+        if (ins == 0xA4 && p1 == 0x04) {
+            return select(apdu);
+        }
+        if (ins == 0xA8) {
+            return gpo();
+        }
+        if (ins == 0xB2) {
+            return readRecord();
+        }
+        if (ins == 0xAE) {
+            return genac();
+        }
         return SW_BAD;
     }
 
@@ -74,32 +94,30 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String label = p("label", "CARD");
 
         if (Arrays.equals(name, PPSE)) {
-            return cat(
-                tlv(0x6F, cat(
-                    tlv(0x84, PPSE),
-                    tlv(0xA5, tlv(0xBF0C,
-                        tlv(0x61, cat(
-                            tlv(0x4F, hex(aid)),
-                            tlv(0x50, label.getBytes(StandardCharsets.US_ASCII))))))
-                )), SW_OK);
+            byte[] entry = cat(
+                    tlv(0x4F, hex(aid)),
+                    tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)));
+            byte[] dir = tlv(0x61, entry);
+            byte[] fci = tlv(0xBF0C, dir);
+            byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
+            return cat(tlv(0x6F, inner), SW_OK);
         }
+
         if (Arrays.equals(name, hex(aid))) {
-            return cat(
-                tlv(0x6F, cat(
-                    tlv(0x84, hex(aid)),
-                    tlv(0xA5, cat(
-                        tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
-                        tlv(0x87, new byte[]{0x01}))))
-                )), SW_OK);
+            byte[] prop = cat(
+                    tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                    tlv(0x87, new byte[]{0x01}));
+            byte[] inner = cat(tlv(0x84, hex(aid)), tlv(0xA5, prop));
+            return cat(tlv(0x6F, inner), SW_OK);
         }
+
         return SW_BAD;
     }
 
     private byte[] gpo() {
-        return cat(tlv(0x77, cat(
-            tlv(0x82, hex(p("aip", "1C00"))),
-            tlv(0x94, hex(p("afl", "08010100")))
-        )), SW_OK);
+        byte[] aip = tlv(0x82, hex(p("aip", "1C00")));
+        byte[] afl = tlv(0x94, hex(p("afl", "08010100")));
+        return cat(tlv(0x77, cat(aip, afl)), SW_OK);
     }
 
     private byte[] readRecord() {
@@ -109,24 +127,30 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String disc = p("disc", "");
 
         String track = pan + "D" + exp + sc + disc;
-        if (track.length() % 2 != 0) track = track + "F";
+        if (track.length() % 2 != 0) {
+            track = track + "F";
+        }
+        if (pan.length() % 2 != 0) {
+            pan = pan + "F";
+        }
 
-        return cat(tlv(0x70, cat(
-            tlv(0x5A, hex(pan.length() % 2 == 0 ? pan : pan + "F")),
-            tlv(0x5F24, hex(exp + "00")),
-            tlv(0x57, hex(track))
-        )), SW_OK);
+        byte[] panT   = tlv(0x5A, hex(pan));
+        byte[] expT   = tlv(0x5F24, hex(exp + "00"));
+        byte[] trackT = tlv(0x57, hex(track));
+
+        return cat(tlv(0x70, cat(panT, expT, trackT)), SW_OK);
     }
 
     private byte[] genac() {
-        return cat(tlv(0x77, cat(
-            tlv(0x9F27, hex(p("cid", "80"))),
-            tlv(0x9F36, hex(p("atc", "001B"))),
-            tlv(0x9F26, hex(p("arqc", "0000000000000000"))),
-            tlv(0x9F10, hex(p("iad", "06010A03A0B800")))
-        )), SW_OK);
+        byte[] cidT  = tlv(0x9F27, hex(p("cid", "80")));
+        byte[] atcT  = tlv(0x9F36, hex(p("atc", "001B")));
+        byte[] arqcT = tlv(0x9F26, hex(p("arqc", "0000000000000000")));
+        byte[] iadT  = tlv(0x9F10, hex(p("iad", "06010A03A0B800")));
+
+        return cat(tlv(0x77, cat(cidT, atcT, arqcT, iadT)), SW_OK);
     }
 
     @Override
-    public void onDeactivated(int reason) { }
+    public void onDeactivated(int reason) {
+    }
 }
