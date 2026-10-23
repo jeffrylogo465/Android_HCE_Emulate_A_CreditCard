@@ -18,9 +18,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Android_HCE_Emulate_A_CreditCard"
         tools:targetApi="31">
+
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -36,11 +38,11 @@
                 <!-- category required!!! this was not included in official android HCE documentation -->
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-
             <meta-data
                 android:name="android.nfc.cardemulation.host_apdu_service"
                 android:resource="@xml/apduservice" />
         </service>
+
     </application>
 
 </manifest>
