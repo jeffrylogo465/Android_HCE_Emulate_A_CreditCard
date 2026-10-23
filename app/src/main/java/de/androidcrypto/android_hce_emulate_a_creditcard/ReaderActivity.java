@@ -317,13 +317,32 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
         byte[] response = isoDep.transceive(command);
-        if (response.length < 2) return null;
-        int sw1 = response[response.length - 2] & 0xFF;
-        int sw2 = response[response.length - 1] & 0xFF;
-        if (sw1 != 0x90 || sw2 != 0x00) return null;
-        byte[] data = new byte[response.length - 2];
-        System.arraycopy(response, 0, data, 0, data.length);
-        return data;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        while (true) {
+            if (response.length < 2) {
+                return out.size() > 0 ? out.toByteArray() : null;
+            }
+            int sw1 = response[response.length - 2] & 0xFF;
+            int sw2 = response[response.length - 1] & 0xFF;
+            out.write(response, 0, response.length - 2);
+
+            // the card has more data waiting
+            if (sw1 == 0x61) {
+                response = isoDep.transceive(new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, (byte) sw2});
+                continue;
+            }
+            // wrong length - retry with the length the card asked for
+            if (sw1 == 0x6C) {
+                byte[] retry = command.clone();
+                retry[retry.length - 1] = (byte) sw2;
+                response = isoDep.transceive(retry);
+                continue;
+            }
+            if (sw1 == 0x90 && sw2 == 0x00) {
+                return out.toByteArray();
+            }
+            return null;
+        }
     }
 
     private byte[] selectByName(byte[] name) {
