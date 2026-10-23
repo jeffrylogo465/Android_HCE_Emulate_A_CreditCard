@@ -2,7 +2,7 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#0D0F14"
+    android:background="#0E1116"
     android:fillViewport="true">
 
     <LinearLayout
@@ -12,67 +12,74 @@
         android:padding="20dp">
 
         <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Read Card"
-            android:textColor="#F3F4F6"
-            android:textSize="20sp"
-            android:textStyle="bold" />
-
-        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:letterSpacing="0.1"
-            android:text="HOLD YOUR CARD FLAT AGAINST THE BACK OF THE PHONE"
-            android:textColor="#4B5563"
-            android:textSize="9sp" />
+            android:layout_marginBottom="4dp"
+            android:letterSpacing="0.08"
+            android:text="READ CARD"
+            android:textColor="#FFFFFF"
+            android:textSize="22sp"
+            android:textStyle="bold" />
 
         <TextView
             android:id="@+id/txtReaderStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:gravity="center"
-            android:text="Waiting for card..."
-            android:textColor="#7C3AED"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="18dp"
-            android:layout_marginBottom="16dp"
-            android:background="#1B1F27" />
+            android:layout_marginBottom="20dp"
+            android:text="Hold the card flat on the back of the phone"
+            android:textColor="#6FB3FF"
+            android:textSize="14sp" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="4dp"
-            android:letterSpacing="0.1"
-            android:text="PAN"
-            android:textColor="#6B7280"
-            android:textSize="10sp" />
+            android:letterSpacing="0.12"
+            android:text="CARD NUMBER"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
 
         <TextView
             android:id="@+id/txtReaderPan"
             android:layout_width="match_parent"
-            android:layout_height="40dp"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
             android:background="@drawable/field_bg"
             android:fontFamily="monospace"
-            android:gravity="center_vertical"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:text="--"
-            android:textColor="#E5E7EB"
-            android:textSize="13sp" />
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="17sp" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginBottom="16dp"
             android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:letterSpacing="0.12"
+                    android:text="EXPIRY"
+                    android:textColor="#8A94A6"
+                    android:textSize="11sp" />
+
+                <TextView
+                    android:id="@+id/txtReaderExpiry"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/field_bg"
+                    android:fontFamily="monospace"
+                    android:padding="12dp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -83,17 +90,116 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="4dp"
-                    android:letterSpacing="0.1"
-                    android:text="EXPIRY"
-                    android:textColor="#6B7280"
-                    android:textSize="10sp" />
+                    android:letterSpacing="0.12"
+                    android:text="SERVICE CODE"
+                    android:textColor="#8A94A6"
+                    android:textSize="11sp" />
 
                 <TextView
-                    android:id="@+id/txtReaderExpiry"
+                    android:id="@+id/txtReaderService"
                     android:layout_width="match_parent"
-                    android:layout_height="40dp"
+                    android:layout_height="wrap_content"
                     android:background="@drawable/field_bg"
                     android:fontFamily="monospace"
-                    android:gravity="center_vertical"
-                    android:paddingStart="12dp"
+                    android:padding="12dp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.12"
+            android:text="DISCRETIONARY DATA"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/txtReaderDisc"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/field_bg"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.12"
+            android:text="TRACK 2"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/txtReaderTrack2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:background="@drawable/field_bg"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.12"
+            android:text="AID"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/txtReaderAid"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="22dp"
+            android:background="@drawable/field_bg"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnCancelReader"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:backgroundTint="#232A33"
+                android:text="BACK"
+                android:textColor="#E6EAF0"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnCopyReader"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:backgroundTint="#232A33"
+                android:text="COPY"
+                android:textColor="#E6EAF0"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnUseCard"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:backgroundTint="#2E7DFF"
+                android:text="USE CARD"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>
