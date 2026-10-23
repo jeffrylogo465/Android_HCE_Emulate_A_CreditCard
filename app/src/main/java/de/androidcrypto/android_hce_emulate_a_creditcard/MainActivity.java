@@ -20,17 +20,18 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String[] KEYS = {
         "label", "pan", "expiry", "serviceCode", "disc", "track2", "aid",
-        "aip", "afl", "cid", "atc", "arqc", "iad", "msd"
+        "aip", "afl", "cid", "atc", "arqc", "iad", "mkac", "msd"
     };
     private static final String[] HINTS = {
         "Label  (e.g. DISCOVER CREDIT)", "PAN  (digits only)", "Expiry YYMM  (e.g. 3109)",
         "Service code  (201)", "Discretionary  (track tail)",
         "Track 2 raw hex  (tag 57 - paste from real card, optional)", "AID",
-        "AIP  (1800)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
-        "ARQC / 9F26", "IAD / 9F10", "MSD mode  (1 = MSD, 0 = EMV)"
+        "AIP  (3800)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
+        "ARQC / 9F26", "IAD / 9F10",
+        "Issuer master key MK-AC  (hex, 16 bytes, optional)", "MSD mode  (1 = MSD, 0 = EMV)"
     };
 
-    private static final int IDX_MSD = 13;
+    private static final int IDX_MSD = 14;
 
     private EditText[] fields;
     private TextView cardLabel, cardPan, cardExp;
@@ -42,7 +43,7 @@ public class MainActivity extends AppCompatActivity {
     private static boolean mustBeHex(String key) {
         return key.equals("aid") || key.equals("aip") || key.equals("afl")
             || key.equals("cid") || key.equals("atc") || key.equals("arqc")
-            || key.equals("iad") || key.equals("track2");
+            || key.equals("iad") || key.equals("track2") || key.equals("mkac");
     }
 
     private static boolean luhnOk(String digits) {
@@ -73,7 +74,6 @@ public class MainActivity extends AppCompatActivity {
         title.setTextSize(18);
         root.addView(title);
 
-        // ---- card preview ----
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         int cp = (int) (18 * d);
@@ -109,7 +109,6 @@ public class MainActivity extends AppCompatActivity {
         cardLp.setMargins(0, (int) (14 * d), 0, (int) (18 * d));
         root.addView(card, cardLp);
 
-        // ---- fields ----
         fields = new EditText[KEYS.length];
         for (int i = 0; i < KEYS.length; i++) {
             TextView lbl = new TextView(this);
@@ -127,7 +126,6 @@ public class MainActivity extends AppCompatActivity {
             fields[IDX_MSD].setText("1");
         }
 
-        // live-update the card preview from label / pan / expiry
         TextWatcher w = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
             public void onTextChanged(CharSequence s, int a, int b2, int c) { updateCard(); }
@@ -138,7 +136,6 @@ public class MainActivity extends AppCompatActivity {
         fields[2].addTextChangedListener(w);
         updateCard();
 
-        // ---- save ----
         Button save = new Button(this);
         save.setText("SAVE CARD");
         save.setOnClickListener(v -> {
