@@ -1,95 +1,70 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import android.annotation.SuppressLint;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.pm.ActivityInfo;
-import android.os.Build;
+import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import androidx.activity.EdgeToEdge;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
-import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 public class MainActivity extends AppCompatActivity {
 
-    private TextView tvHceServiceLog;
-    private String hceServiceLog = "";
-
-    @SuppressLint("SourceLockedOrientationActivity")
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        EdgeToEdge.enable(this);
-        setContentView(R.layout.activity_main);
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.viewMainActivity), (v, insets) -> {
-            Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
-            return insets;
-        });
-        tvHceServiceLog = findViewById(R.id.tvHceServiceLog);
-
-        /**
-         * Note on this setting: Do NOT remove this setting or the app will fail when the screen goes
-         * from portrait to landscape and vice versa. The app will then run the onDestroy() method, but
-         * the BroadcastReceiver is not registered yet. The only way to solve this issue would be to
-         * use a STATIC BroadcastReceiver.
-         */
-        this.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            this.registerReceiver(mMessageReceiver, new IntentFilter("HceCcEmulatorService"), Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            LocalBroadcastManager.getInstance(MainActivity.this).registerReceiver(
-                    mMessageReceiver, new IntentFilter("HceCcEmulatorService"));
-        }
-    }
-
-    @Override
-    public void onResume() {
-        super.onResume();
-    }
-
-    @Override
-    public void onPause() {
-        super.onPause();
-    }
-
-    @Override
-    public void onStop() {
-        super.onStop();
-    }
-
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        this.unregisterReceiver(mMessageReceiver);
-    }
-
-    private void appendMessageToLog(String message, String data) {
-        hceServiceLog += message + " | " + data + "\n";
-        tvHceServiceLog.setText(hceServiceLog);
-    }
-
-    private void showAToast(Context context, String message) {
-        Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
-    }
-
-    private final BroadcastReceiver mMessageReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            // Get extra data included in the Intent
-            String message = intent.getStringExtra("Message");
-            String data = intent.getStringExtra("Data");
-            appendMessageToLog(message, data);
-        }
+    private static final String[] KEYS = {
+        "label", "pan", "expiry", "serviceCode", "disc", "aid",
+        "aip", "afl", "cid", "atc", "arqc", "iad"
+    };
+    private static final String[] HINTS = {
+        "Label  (e.g. VISA CREDIT)", "PAN", "Expiry YYMM  (e.g. 3112)",
+        "Service code  (201)", "Discretionary  (track tail)", "AID",
+        "AIP  (1C00)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
+        "ARQC / 9F26", "IAD / 9F10"
     };
 
+    @Override
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
+
+        final SharedPreferences prefs = getSharedPreferences("card", MODE_PRIVATE);
+        final float d = getResources().getDisplayMetrics().density;
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding((int) (16 * d), (int) (16 * d), (int) (16 * d), (int) (16 * d));
+
+        TextView title = new TextView(this);
+        title.setText("EMV / MSD Card Emulator");
+        title.setTextSize(18);
+        root.addView(title);
+
+        final EditText[] fields = new EditText[KEYS.length];
+        for (int i = 0; i < KEYS.length; i++) {
+            TextView lbl = new TextView(this);
+            lbl.setText(HINTS[i]);
+            lbl.setPadding(0, (int) (8 * d), 0, 0);
+            root.addView(lbl);
+
+            EditText e = new EditText(this);
+            e.setText(prefs.getString(KEYS[i], ""));
+            root.addView(e);
+            fields[i] = e;
+        }
+
+        Button save = new Button(this);
+        save.setText("SAVE CARD");
+        save.setOnClickListener(v -> {
+            SharedPreferences.Editor ed = prefs.edit();
+            for (int i = 0; i < KEYS.length; i++) {
+                ed.putString(KEYS[i], fields[i].getText().toString().trim());
+            }
+            ed.apply();
+        });
+        root.addView(save);
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(root);
+        setContentView(sv);
+    }
 }
