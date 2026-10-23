@@ -66,11 +66,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private SharedPreferences prefs() {
-        return getSharedPreferences("card", Context.MODE_PRIVATE);
+        return getSharedPreferences("hce_card", Context.MODE_PRIVATE);
+    }
+
+    private String sel() {
+        return "card" + prefs().getInt("selected", 0) + "_";
     }
 
     private String p(String k, String d) {
-        return prefs().getString(k, d);
+        return prefs().getString(sel() + k, d);
+    }
+
+    private void put(String k, String v) {
+        prefs().edit().putString(sel() + k, v).apply();
     }
 
     private boolean isMsd() {
@@ -85,7 +93,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         } catch (Exception ignored) {}
         atc = (atc + 1) & 0xFFFF;
         String h = String.format("%04X", atc);
-        prefs().edit().putString("atc", h).apply();
+        put("atc", h);
         return h;
     }
 
@@ -156,8 +164,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String track2Hex = p("track2", "").trim();
         String pan  = p("pan", "4111111111111111");
         String exp  = p("expiry", "3112");
-        String sc   = p("serviceCode", "201");
-        String disc = p("disc", "");
+        String sc   = p("service", "201");
+        String disc = p("discretionary", "");
 
         String track;
         if (!track2Hex.isEmpty()) {
