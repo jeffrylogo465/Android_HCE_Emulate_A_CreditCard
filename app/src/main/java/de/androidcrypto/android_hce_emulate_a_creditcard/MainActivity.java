@@ -1,57 +1,259 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.content.SharedPreferences;
-import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.widget.Button;
+import android.view.View;
 import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.PagerSnapHelper;
+import androidx.recyclerview.widget.RecyclerView;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String[] KEYS = {
-        "label", "pan", "expiry", "serviceCode", "disc", "track2", "aid",
-        "aip", "afl", "cid", "atc", "arqc", "iad", "mkac", "msd"
-    };
-    private static final String[] HINTS = {
-        "Label  (e.g. DISCOVER CREDIT)", "PAN  (digits only)", "Expiry YYMM  (e.g. 3109)",
-        "Service code  (201)", "Discretionary  (track tail)",
-        "Track 2 raw hex  (tag 57 - paste from real card, optional)", "AID",
-        "AIP  (3800)", "AFL  (08010100)", "CID  (80)", "ATC  (001B)",
-        "ARQC / 9F26", "IAD / 9F10",
-        "Issuer master key MK-AC  (hex, 16 bytes, optional)", "MSD mode  (1 = MSD, 0 = EMV)"
-    };
+    private static final String PREF = "hce_card";
+    private static final int MAX_CARDS = 12;
 
-    private static final int IDX_MSD = 14;
+    private SharedPreferences prefs;
+    private final List<CardAdapter.CardModel> cards = new ArrayList<>();
+    private CardAdapter adapter;
+    private RecyclerView pager;
+    private LinearLayoutManager layoutManager;
+    private PagerSnapHelper snapHelper;
+    private TextView txtCount, txtStatus;
 
-    private EditText[] fields;
-    private TextView cardLabel, cardPan, cardExp;
+    private EditText etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
+            etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd;
 
-    private static boolean isHex(String s) {
-        return !s.isEmpty() && s.matches("[0-9A-Fa-f]+") && s.length() % 2 == 0;
+    private int current = 0;
+    private boolean binding = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        if (getSupportActionBar() != null) getSupportActionBar().hide();
+
+        prefs = getSharedPreferences(PREF, MODE_PRIVATE);
+
+        pager = findViewById(R.id.pager);
+        txtCount = findViewById(R.id.txtCount);
+        txtStatus = findViewById(R.id.txtStatus);
+
+        etLabel = findViewById(R.id.etLabel);
+        etPan = findViewById(R.id.etPan);
+        etExpiry = findViewById(R.id.etExpiry);
+        etService = findViewById(R.id.etService);
+        etDiscretionary = findViewById(R.id.etDiscretionary);
+        etTrack2 = findViewById(R.id.etTrack2);
+        etAid = findViewById(R.id.etAid);
+        etAip = findViewById(R.id.etAip);
+        etAfl = findViewById(R.id.etAfl);
+        etCid = findViewById(R.id.etCid);
+        etAtc = findViewById(R.id.etAtc);
+        etArqc = findViewById(R.id.etArqc);
+        etIad = findViewById(R.id.etIad);
+        etMkac = findViewById(R.id.etMkac);
+        etMsd = findViewById(R.id.etMsd);
+
+        adapter = new CardAdapter();
+        layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
+        snapHelper = new PagerSnapHelper();
+        pager.setLayoutManager(layoutManager);
+        pager.setAdapter(adapter);
+        pager.setOffscreenPageLimit(3);
+        snapHelper.attachToRecyclerView(pager);
+        pager.setPageTransformer((page, position) -> {
+            float d = Math.min(Math.abs(position), 1f);
+            page.setScaleY(1f - d * 0.12f);
+            page.setAlpha(0.55f + (1f - d) * 0.45f);
+        });
+
+        loadAll();
+        bindCard(Math.min(prefs.getInt("selected", 0), cards.size() - 1));
+
+        pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(@NonNull RecyclerView rv, int state) {
+                if (state != RecyclerView.SCROLL_STATE_IDLE) return;
+                View v = snapHelper.findSnapView(layoutManager);
+                if (v == null) return;
+                int pos = layoutManager.getPosition(v);
+                if (pos >= 0 && pos != current) {
+                    collect();
+                    current = pos;
+                    bindCard(pos);
+                    prefs.edit().putInt("selected", pos).apply();
+                }
+            }
+        });
+
+        findViewById(R.id.btnSave).setOnClickListener(v -> onSave());
+        findViewById(R.id.btnAdd).setOnClickListener(v -> onAdd());
+
+        TextWatcher watcher = new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(Editable s) {
+                if (binding) return;
+                collect();
+                adapter.notifyItemChanged(current);
+            }
+        };
+        etPan.addTextChangedListener(watcher);
+        etExpiry.addTextChangedListener(watcher);
+        etLabel.addTextChangedListener(watcher);
+        etAid.addTextChangedListener(watcher);
+        etMsd.addTextChangedListener(watcher);
     }
 
-    private static boolean mustBeHex(String key) {
-        return key.equals("aid") || key.equals("aip") || key.equals("afl")
-            || key.equals("cid") || key.equals("atc") || key.equals("arqc")
-            || key.equals("iad") || key.equals("track2") || key.equals("mkac");
+    // ---------- storage ----------
+
+    private static String key(int i, String name) {
+        return "card" + i + "_" + name;
     }
 
-    private static boolean luhnOk(String digits) {
+    private static String t(EditText e) {
+        return e.getText().toString().trim();
+    }
+
+    private static String digits(String s) {
+        return s.replaceAll("[^0-9]", "");
+    }
+
+    private void loadAll() {
+        cards.clear();
+        int n = prefs.getInt("card_count", 0);
+        for (int i = 0; i < n; i++) {
+            CardAdapter.CardModel c = new CardAdapter.CardModel();
+            c.label = prefs.getString(key(i, "label"), "");
+            c.pan = prefs.getString(key(i, "pan"), "");
+            c.expiry = prefs.getString(key(i, "expiry"), "");
+            c.aid = prefs.getString(key(i, "aid"), "");
+            c.msd = prefs.getInt(key(i, "msd"), 1);
+            cards.add(c);
+        }
+        if (cards.isEmpty()) cards.add(new CardAdapter.CardModel());
+        adapter.setCards(cards);
+        updateCount();
+    }
+
+    private void collect() {
+        int i = current;
+        SharedPreferences.Editor e = prefs.edit();
+        e.putString(key(i, "label"), t(etLabel));
+        e.putString(key(i, "pan"), digits(t(etPan)));
+        e.putString(key(i, "expiry"), t(etExpiry));
+        e.putString(key(i, "service"), t(etService));
+        e.putString(key(i, "discretionary"), t(etDiscretionary));
+        e.putString(key(i, "track2"), t(etTrack2));
+        e.putString(key(i, "aid"), t(etAid).toUpperCase());
+        e.putString(key(i, "aip"), t(etAip).toUpperCase());
+        e.putString(key(i, "afl"), t(etAfl).toUpperCase());
+        e.putString(key(i, "cid"), t(etCid).toUpperCase());
+        e.putString(key(i, "atc"), t(etAtc).toUpperCase());
+        e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
+        e.putString(key(i, "iad"), t(etIad).toUpperCase());
+        e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
+        e.putInt(key(i, "msd"), "0".equals(t(etMsd)) ? 0 : 1);
+        e.putInt("card_count", cards.size());
+        e.putInt("selected", i);
+        e.apply();
+
+        if (i < cards.size()) {
+            CardAdapter.CardModel c = cards.get(i);
+            c.label = t(etLabel);
+            c.pan = t(etPan);
+            c.expiry = t(etExpiry);
+            c.aid = t(etAid);
+            c.msd = "0".equals(t(etMsd)) ? 0 : 1;
+        }
+    }
+
+    private void bindCard(int i) {
+        binding = true;
+        current = i;
+        etLabel.setText(prefs.getString(key(i, "label"), ""));
+        etPan.setText(prefs.getString(key(i, "pan"), ""));
+        etExpiry.setText(prefs.getString(key(i, "expiry"), ""));
+        etService.setText(prefs.getString(key(i, "service"), "201"));
+        etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
+        etTrack2.setText(prefs.getString(key(i, "track2"), ""));
+        etAid.setText(prefs.getString(key(i, "aid"), ""));
+        etAip.setText(prefs.getString(key(i, "aip"), "3801"));
+        etAfl.setText(prefs.getString(key(i, "afl"), "08010100"));
+        etCid.setText(prefs.getString(key(i, "cid"), "80"));
+        etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
+        etArqc.setText(prefs.getString(key(i, "arqc"), ""));
+        etIad.setText(prefs.getString(key(i, "iad"), ""));
+        etMkac.setText(prefs.getString(key(i, "mkac"), ""));
+        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 1)));
+        binding = false;
+        updateCount();
+        txtStatus.setText("");
+    }
+
+    private void updateCount() {
+        txtCount.setText(cards.size() == 1 ? "1 card" : cards.size() + " cards");
+    }
+
+    // ---------- actions ----------
+
+    private void onSave() {
+        String pan = digits(t(etPan));
+        if (pan.length() < 12 || pan.length() > 19 || !luhn(pan)) {
+            Toast.makeText(this, "PAN must be 12-19 digits and pass Luhn", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (t(etExpiry).length() != 4) {
+            Toast.makeText(this, "Expiry must be YYMM, e.g. 2803", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (t(etService).length() != 3) {
+            Toast.makeText(this, "Service code must be 3 digits", Toast.LENGTH_LONG).show();
+            return;
+        }
+        etPan.setText(pan);
+        collect();
+        adapter.notifyItemChanged(current);
+        txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
+        Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void onAdd() {
+        collect();
+        if (cards.size() >= MAX_CARDS) {
+            Toast.makeText(this, "Max " + MAX_CARDS + " cards", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        cards.add(new CardAdapter.CardModel());
+        prefs.edit().putInt("card_count", cards.size()).apply();
+        adapter.setCards(cards);
+        current = cards.size() - 1;
+        pager.setCurrentItem(current, true);
+        bindCard(current);
+        prefs.edit().putInt("selected", current).apply();
+    }
+
+    private static boolean luhn(String s) {
         int sum = 0;
         boolean dbl = false;
-        for (int i = digits.length() - 1; i >= 0; i--) {
-            int d = digits.charAt(i) - '0';
-            if (dbl) { d *= 2; if (d > 9) d -= 9; }
+        for (int i = s.length() - 1; i >= 0; i--) {
+            int d = s.charAt(i) - '0';
+            if (dbl) {
+                d *= 2;
+                if (d > 9) d -= 9;
+            }
             sum += d;
             dbl = !dbl;
         }
@@ -59,160 +261,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
-    protected void onCreate(Bundle b) {
-        super.onCreate(b);
-
-        final SharedPreferences prefs = getSharedPreferences("card", MODE_PRIVATE);
-        final float d = getResources().getDisplayMetrics().density;
-
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding((int) (16 * d), (int) (16 * d), (int) (16 * d), (int) (16 * d));
-
-        TextView title = new TextView(this);
-        title.setText("EMV / MSD Card Emulator");
-        title.setTextSize(18);
-        root.addView(title);
-
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        int cp = (int) (18 * d);
-        card.setPadding(cp, cp, cp, cp);
-        GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[]{0xFF1A237E, 0xFF4A148C});
-        bg.setCornerRadius(20 * d);
-        card.setBackground(bg);
-
-        cardLabel = new TextView(this);
-        cardLabel.setTextColor(Color.WHITE);
-        cardLabel.setTextSize(13);
-        cardLabel.setLetterSpacing(0.12f);
-
-        cardPan = new TextView(this);
-        cardPan.setTextColor(Color.WHITE);
-        cardPan.setTextSize(20);
-        cardPan.setTypeface(Typeface.MONOSPACE);
-        cardPan.setPadding(0, (int) (16 * d), 0, (int) (12 * d));
-
-        cardExp = new TextView(this);
-        cardExp.setTextColor(0xFFD0D0D0);
-        cardExp.setTextSize(12);
-
-        card.addView(cardLabel);
-        card.addView(cardPan);
-        card.addView(cardExp);
-
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        cardLp.setMargins(0, (int) (14 * d), 0, (int) (18 * d));
-        root.addView(card, cardLp);
-
-        fields = new EditText[KEYS.length];
-        for (int i = 0; i < KEYS.length; i++) {
-            TextView lbl = new TextView(this);
-            lbl.setText(HINTS[i]);
-            lbl.setPadding(0, (int) (8 * d), 0, 0);
-            root.addView(lbl);
-
-            EditText e = new EditText(this);
-            e.setSingleLine(true);
-            e.setText(prefs.getString(KEYS[i], ""));
-            root.addView(e);
-            fields[i] = e;
-        }
-        if (fields[IDX_MSD].getText().toString().trim().isEmpty()) {
-            fields[IDX_MSD].setText("1");
-        }
-
-        TextWatcher w = new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
-            public void onTextChanged(CharSequence s, int a, int b2, int c) { updateCard(); }
-            public void afterTextChanged(Editable s) {}
-        };
-        fields[0].addTextChangedListener(w);
-        fields[1].addTextChangedListener(w);
-        fields[2].addTextChangedListener(w);
-        updateCard();
-
-        Button save = new Button(this);
-        save.setText("SAVE CARD");
-        save.setOnClickListener(v -> {
-
-            String pan = fields[1].getText().toString().replaceAll("[^0-9]", "");
-            if (!pan.isEmpty()) {
-                if (pan.length() < 12 || pan.length() > 19) {
-                    Toast.makeText(this, "PAN must be 12-19 digits", Toast.LENGTH_LONG).show();
-                    return;
-                }
-                if (!luhnOk(pan)) {
-                    Toast.makeText(this, "PAN fails Luhn check - recheck the digits", Toast.LENGTH_LONG).show();
-                    return;
-                }
-                fields[1].setText(pan);
-            }
-
-            String exp = fields[2].getText().toString().replaceAll("[^0-9]", "");
-            if (!exp.isEmpty() && exp.length() != 4) {
-                Toast.makeText(this, "Expiry must be 4 digits, YYMM", Toast.LENGTH_LONG).show();
-                return;
-            }
-            fields[2].setText(exp);
-
-            String msd = fields[IDX_MSD].getText().toString().trim();
-            if (!msd.equals("0") && !msd.equals("1")) {
-                Toast.makeText(this, "MSD mode must be 0 or 1", Toast.LENGTH_LONG).show();
-                return;
-            }
-
-            SharedPreferences.Editor ed = prefs.edit();
-            for (int i = 0; i < KEYS.length; i++) {
-                String val = fields[i].getText().toString().trim();
-                if (mustBeHex(KEYS[i]) && !val.isEmpty() && !isHex(val)) {
-                    Toast.makeText(this, KEYS[i] + " must be even-length hex", Toast.LENGTH_LONG).show();
-                    return;
-                }
-                ed.putString(KEYS[i], val);
-            }
-            boolean ok = ed.commit();
-            Toast.makeText(this, ok ? "Card saved" : "Save failed", Toast.LENGTH_SHORT).show();
-        });
-
-        LinearLayout outer = new LinearLayout(this);
-        outer.setOrientation(LinearLayout.VERTICAL);
-        ScrollView sv = new ScrollView(this);
-        sv.addView(root);
-        outer.addView(sv, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        outer.addView(save);
-        setContentView(outer);
-    }
-
-    private void updateCard() {
-        if (cardLabel == null) return;
-
-        String lbl = fields[0].getText().toString().trim();
-        cardLabel.setText(lbl.isEmpty() ? "CARD" : lbl.toUpperCase());
-
-        String pan = fields[1].getText().toString().replaceAll("[^0-9]", "");
-        cardPan.setText(groupPan(pan));
-
-        String exp = fields[2].getText().toString().trim();
-        if (exp.length() == 4) {
-            cardExp.setText("VALID THRU " + exp.substring(2, 4) + "/" + exp.substring(0, 2));
-        } else {
-            cardExp.setText("VALID THRU --/--");
-        }
-    }
-
-    private static String groupPan(String pan) {
-        if (pan.isEmpty()) return "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < pan.length(); i++) {
-            if (i > 0 && i % 4 == 0) sb.append(' ');
-            sb.append(pan.charAt(i));
-        }
-        return sb.toString();
+    protected void onPause() {
+        super.onPause();
+        collect();
     }
 }
