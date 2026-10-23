@@ -254,7 +254,7 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putInt("card_count", cards.size()).apply();
         adapter.setCards(cards);
         current = cards.size() - 1;
-        pager.setCurrentItem(current, true);
+        pager.smoothScrollToPosition(current);
         bindCard(current);
         prefs.edit().putInt("selected", current).apply();
     }
