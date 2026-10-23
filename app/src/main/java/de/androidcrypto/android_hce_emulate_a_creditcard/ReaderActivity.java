@@ -18,6 +18,7 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 
@@ -57,6 +58,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private String lastDisc = "";
     private String lastTrack2 = "";
     private String lastAid = "";
+    private String lastArqc = "";
+    private String lastIad = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -196,6 +199,21 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                     }
                 }
             }
+           // 3b. ask the card to sign a transaction
+            byte[] cdol = firstTag(pool, 0x8C);
+            if (cdol != null) {
+                byte[] genAc = transceive(isoDep, genAcCommand(cdol));
+                if (genAc != null) {
+                    byte[] payload = firstTag(genAc, 0x80);
+                    if (payload == null) payload = genAc;
+                    if (payload.length >= 9) {
+                        lastArqc = bytesToHex(Arrays.copyOfRange(payload, 0, 8));
+                        if (payload.length > 9) {
+                            lastIad = bytesToHex(Arrays.copyOfRange(payload, 9, payload.length));
+                        }
+                    }
+                }
+            } 
             // 4. pull the fields out of everything we collected
             String pan = digitsOrEmpty(firstTag(pool, 0x5A));
             String expiry = digitsOrEmpty(firstTag(pool, 0x5F24));
@@ -284,6 +302,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 + "\nSERVICE CODE: " + emptyToDash(lastService)
                 + "\nDISCRETIONARY DATA: " + emptyToDash(lastDisc)
                 + "\nTRACK 2: " + emptyToDash(lastTrack2)
+                + "\nARQC / 9F26: " + emptyToDash(lastArqc)
+                + "\nIAD / 9F10: " + emptyToDash(lastIad)
                 + "\nAID: " + emptyToDash(lastAid);
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard != null) {
@@ -372,6 +392,18 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     }
 
     // answer the terminal data the card asked for in its PDOL
+    private byte[] genAcCommand(byte[] cdol) {
+        byte[] data = buildPdolData(cdol == null ? new byte[0] : cdol);
+        byte[] command = new byte[6 + data.length];
+        command[0] = (byte) 0x80;
+        command[1] = (byte) 0xAE;
+        command[2] = (byte) 0x80;   // 0x80 = ARQC, go online
+        command[3] = 0x00;
+        command[4] = (byte) data.length;
+        System.arraycopy(data, 0, command, 5, data.length);
+        command[command.length - 1] = 0x00;
+        return command;
+    }
     private byte[] buildPdolData(byte[] pdol) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = 0;
