@@ -15,8 +15,10 @@ import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallback {
@@ -178,8 +180,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
             // 3. start a transaction and read every record the card points at
             byte[] pdol = firstTag(pool, 0x9F38);
-            int pdolLength = pdol == null ? 0 : pdol.length;
-            byte[] gpo = transceive(isoDep, gpoCommand(pdolLength));
+            byte[] gpo = transceive(isoDep, gpoCommand(pdol));
             if (gpo != null) {
                 pool.add(gpo);
                 byte[] afl = firstTag(gpo, 0x94);
@@ -337,16 +338,63 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         return command;
     }
 
-    private byte[] gpoCommand(int pdolLength) {
-        byte[] command = new byte[7 + pdolLength];
+    private byte[] gpoCommand(byte[] pdol) {
+        byte[] data = buildPdolData(pdol == null ? new byte[0] : pdol);
+        byte[] command = new byte[7 + data.length];
         command[0] = (byte) 0x80;
         command[1] = (byte) 0xA8;
         command[2] = 0x00;
         command[3] = 0x00;
-        command[4] = (byte) (pdolLength + 2);
+        command[4] = (byte) (data.length + 2);
         command[5] = (byte) 0x83;
-        command[6] = (byte) pdolLength;
+        command[6] = (byte) data.length;
+        System.arraycopy(data, 0, command, 7, data.length);
         return command;
+    }
+
+    // answer the terminal data the card asked for in its PDOL
+    private byte[] buildPdolData(byte[] pdol) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = 0;
+        while (i + 1 < pdol.length) {
+            int tag = pdol[i++] & 0xFF;
+            if ((tag & 0x1F) == 0x1F) {
+                if (i >= pdol.length) break;
+                tag = (tag << 8) | (pdol[i++] & 0xFF);
+            }
+            if (i >= pdol.length) break;
+            int len = pdol[i++] & 0xFF;
+            byte[] value = new byte[len];
+            switch (tag) {
+                case 0x9F02: {
+                    byte[] amount = hexToBytes("000000001000");
+                    System.arraycopy(amount, 0, value, 0, Math.min(len, amount.length));
+                    break;
+                }
+                case 0x9F1A:
+                    if (len >= 2) { value[0] = 0x08; value[1] = 0x40; }
+                    break;
+                case 0x5F2A:
+                    if (len >= 2) { value[0] = 0x08; value[1] = 0x40; }
+                    break;
+                case 0x9A: {
+                    Calendar c = Calendar.getInstance();
+                    if (len >= 3) {
+                        value[0] = (byte) (c.get(Calendar.YEAR) % 100);
+                        value[1] = (byte) (c.get(Calendar.MONTH) + 1);
+                        value[2] = (byte) c.get(Calendar.DAY_OF_MONTH);
+                    }
+                    break;
+                }
+                case 0x9C:
+                    if (len >= 1) value[0] = 0x00;
+                    break;
+                default:
+                    break;
+            }
+            out.write(value, 0, value.length);
+        }
+        return out.toByteArray();
     }
 
     private byte[] readRecord(int sfi, int record) {
