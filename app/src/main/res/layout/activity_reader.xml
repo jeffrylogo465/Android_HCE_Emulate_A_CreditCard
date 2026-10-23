@@ -14,8 +14,6 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="4dp"
-            android:letterSpacing="0.08"
             android:text="READ CARD"
             android:textColor="#FFFFFF"
             android:textSize="22sp"
@@ -33,7 +31,6 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:letterSpacing="0.12"
             android:text="CARD NUMBER"
             android:textColor="#8A94A6"
             android:textSize="11sp" />
@@ -42,75 +39,49 @@
             android:id="@+id/txtReaderPan"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:background="@drawable/field_bg"
-            android:fontFamily="monospace"
             android:padding="12dp"
             android:textColor="#FFFFFF"
             android:textSize="17sp" />
 
-        <LinearLayout
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="EXPIRY"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/txtReaderExpiry"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="8dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:letterSpacing="0.12"
-                    android:text="EXPIRY"
-                    android:textColor="#8A94A6"
-                    android:textSize="11sp" />
-
-                <TextView
-                    android:id="@+id/txtReaderExpiry"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/field_bg"
-                    android:fontFamily="monospace"
-                    android:padding="12dp"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:letterSpacing="0.12"
-                    android:text="SERVICE CODE"
-                    android:textColor="#8A94A6"
-                    android:textSize="11sp" />
-
-                <TextView
-                    android:id="@+id/txtReaderService"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/field_bg"
-                    android:fontFamily="monospace"
-                    android:padding="12dp"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp" />
-            </LinearLayout>
-        </LinearLayout>
+            android:layout_marginBottom="14dp"
+            android:background="@drawable/field_bg"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:letterSpacing="0.12"
+            android:text="SERVICE CODE"
+            android:textColor="#8A94A6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/txtReaderService"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="14dp"
+            android:background="@drawable/field_bg"
+            android:padding="12dp"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:text="DISCRETIONARY DATA"
             android:textColor="#8A94A6"
             android:textSize="11sp" />
@@ -119,9 +90,8 @@
             android:id="@+id/txtReaderDisc"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:background="@drawable/field_bg"
-            android:fontFamily="monospace"
             android:padding="12dp"
             android:textColor="#FFFFFF"
             android:textSize="15sp" />
@@ -129,7 +99,6 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:letterSpacing="0.12"
             android:text="TRACK 2"
             android:textColor="#8A94A6"
             android:textSize="11sp" />
@@ -138,9 +107,8 @@
             android:id="@+id/txtReaderTrack2"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:background="@drawable/field_bg"
-            android:fontFamily="monospace"
             android:padding="12dp"
             android:textColor="#FFFFFF"
             android:textSize="13sp" />
@@ -148,7 +116,6 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:letterSpacing="0.12"
             android:text="AID"
             android:textColor="#8A94A6"
             android:textSize="11sp" />
@@ -159,7 +126,6 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="22dp"
             android:background="@drawable/field_bg"
-            android:fontFamily="monospace"
             android:padding="12dp"
             android:textColor="#FFFFFF"
             android:textSize="15sp" />
@@ -176,8 +142,7 @@
                 android:layout_weight="1"
                 android:backgroundTint="#232A33"
                 android:text="BACK"
-                android:textColor="#E6EAF0"
-                android:textSize="13sp" />
+                android:textColor="#E6EAF0" />
 
             <Button
                 android:id="@+id/btnCopyReader"
@@ -187,8 +152,7 @@
                 android:layout_weight="1"
                 android:backgroundTint="#232A33"
                 android:text="COPY"
-                android:textColor="#E6EAF0"
-                android:textSize="13sp" />
+                android:textColor="#E6EAF0" />
 
             <Button
                 android:id="@+id/btnUseCard"
@@ -198,8 +162,7 @@
                 android:layout_weight="1"
                 android:backgroundTint="#2E7DFF"
                 android:text="USE CARD"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp" />
+                android:textColor="#FFFFFF" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>
