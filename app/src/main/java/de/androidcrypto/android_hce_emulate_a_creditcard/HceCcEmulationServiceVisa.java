@@ -1,145 +1,132 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import static de.androidcrypto.android_hce_emulate_a_creditcard.Utils.bytesToHexNpe;
-import static de.androidcrypto.android_hce_emulate_a_creditcard.Utils.concatenateByteArrays;
-import static de.androidcrypto.android_hce_emulate_a_creditcard.Utils.hexStringToByteArray;
-
 import android.content.Context;
-import android.content.Intent;
+import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
 
-import androidx.localbroadcastmanager.content.LocalBroadcastManager;
-
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-
-/**
- * This service class uses a static approach to serve the data (command and response data) of a
- * sample Visa Card. 
- * 
- * The provided data are from an outdated Visa Card that is no longer in use and the card is 
- * blocked by the bank. The data was recorded with the app "Talk to your Credit Card" 
- * available here: https://github.com/AndroidCrypto/TalkToYourCreditCardG8
- * 
- * Please make sure that the AID A0000000031010 is included in the apduservice.xml file or the 
- * service will not called by Android, the card will not get selected and the workflow stops.
- * 
- */
 
 public class HceCcEmulationServiceVisa extends HostApduService {
 
-    // this is a static approach to serve the byte arrays to the service
+    private static final byte[] SW_OK  = hex("9000");
+    private static final byte[] SW_BAD = hex("6A82");
+    private static final byte[] PPSE   = hex("325041592E5359532E4444463031");
 
-    private static final byte[] RESPONSE_OK_SW = hexStringToByteArray("9000");
-    // Note: the responses does not include the 0x9000h terminator
-    private static final byte[] SELECT_PPSE_COMMAND = hexStringToByteArray("00a404000e325041592e5359532e444446303100");
-    private static final byte[] SELECT_PPSE_RESPONSE = hexStringToByteArray("6f2b840e325041592e5359532e4444463031a519bf0c1661144f07a00000000310109f0a080001050100000000");
+    static byte[] hex(String s) {
+        int n = s.length() / 2;
+        byte[] b = new byte[n];
+        for (int i = 0; i < n; i++)
+            b[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
+        return b;
+    }
 
-    private static final byte[] SELECT_AID_COMMAND = hexStringToByteArray("00a4040007a000000003101000");
-    private static final byte[] SELECT_AID_RESPONSE = hexStringToByteArray("6f5d8407a0000000031010a5525010564953412044454249542020202020208701029f38189f66049f02069f03069f1a0295055f2a029a039c019f37045f2d02656ebf0c1a9f5a0531082608269f0a080001050100000000bf6304df200180");
+    static byte[] tlv(int tag, byte[] v) {
+        byte[] t = (tag > 0xFF)
+                ? new byte[]{(byte) (tag >> 8), (byte) tag}
+                : new byte[]{(byte) tag};
+        byte[] l = (v.length < 0x80)
+                ? new byte[]{(byte) v.length}
+                : new byte[]{(byte) 0x81, (byte) v.length};
+        byte[] out = new byte[t.length + l.length + v.length];
+        System.arraycopy(t, 0, out, 0, t.length);
+        System.arraycopy(l, 0, out, t.length, l.length);
+        System.arraycopy(v, 0, out, t.length + l.length, v.length);
+        return out;
+    }
 
-    // this needs to be dynamic as the response from the real NFC reader is not predictable (e.g. different amounts)
-    private static final byte[] GET_PROCESSING_OPTONS_COMMAND_SHORTED = hexStringToByteArray("80a8");
-    // private static final byte[] GET_PROCESSING_OPTONS_COMMAND_READER = hexStringToByteArray("80a8000023832127000000000000001000000000000000097800000000000978230301003839303100");
-    private static final byte[] GET_PROCESSING_OPTONS_RESPONSE = hexStringToByteArray("7781c68202200094041003060057134921828094896752d25022013650000000000f9f100706040a03a020009f26089ffe5b7ee37376179f2701809f360203aa9f4b81804703a7be03f1e3dfed25d08fed5739de0d7ba5062b95eeab5aba503e447502d25bfc7d3ea6959b6e9fb9fed7e32f0382654ea3ad32b29728128f5e6fcd31ed2eb7859e9db84a9ca84e5366afac92792bff27adddf55816727e61740b1ae03ab89e3e5cf475099512896a9936f24b1cca97aacb975c4aa2fc827519d69d1d93be9f6c021600");
+    static byte[] cat(byte[]... arrs) {
+        int len = 0;
+        for (byte[] a : arrs) len += a.length;
+        byte[] out = new byte[len];
+        int p = 0;
+        for (byte[] a : arrs) { System.arraycopy(a, 0, out, p, a.length); p += a.length; }
+        return out;
+    }
 
-    private static final byte[] READ_FILE_10_03_COMMAND = hexStringToByteArray("00b2031400");
-    private static final byte[] READ_FILE_10_03_RESPONSE = hexStringToByteArray("7081fb9081f830f056de40a950bec2a870c59d5462222605a8f31cdef39a0537c7c175115e352ad0c55470fce5737c4e769897623e01401da73e01644bb0b491aa1aadb27fc360c0089f7c2e52a64e96a3f8a59f76e49aa6dd9a6792644f2b0b513b1a1a93b98a3cc19f0bec45e9f8edd70f893a8cafb21b62f3b8f15983775f14fd16cb36a19120e5a5068ef9f05ffaea4e714d80f134a298d167a65a92f6f57963db94ab5d3967f6675b3609a0fceb5fbb70f07cfdeab1352c6a34d6be737aa74848f3f56932f08b51f54aa3040f1ace4a0ced38684df900a395c5cd88562eb2af8d35601210c20d6c3425dcd813b9b358d1356d52a8ebd8fb5a19915d");
+    private SharedPreferences prefs() {
+        return getSharedPreferences("card", Context.MODE_PRIVATE);
+    }
 
-    private static final byte[] READ_FILE_10_04_COMMAND = hexStringToByteArray("00b2041400");
-    private static final byte[] READ_FILE_10_04_RESPONSE = hexStringToByteArray("70078f01099f320103");
-
-    private static final byte[] READ_FILE_10_05_COMMAND = hexStringToByteArray("00b2051400");
-    private static final byte[] READ_FILE_10_05_RESPONSE = hexStringToByteArray("7081b49f4681b047461ffca14b5dfdc209569c8a14f17644251aa3f4abea251262134b920982f0250741f96fccb40800293054c0d89824ba7ac44ee7bab06fa157fccf7e52d3c64b4d8acd41b9774b801519ed6fec827ec2ec29f8991167c453776559a4a06fd98c4b9bd1548a65af2f56002a836bdf9a040a9253e653584c92833c3d1aa8e08c4de9cda1026044f80f39a9326a57496598987a6b3e18a5f56a8bdede752870e8793776db9d325ccd9c7ca5db33c28f04");
-
-    private static final byte[] READ_FILE_10_06_COMMAND = hexStringToByteArray("00b2061400");
-    private static final byte[] READ_FILE_10_06_RESPONSE = hexStringToByteArray("702e9f4701035a0849218280948967525f3401005f24032502285f280208269f6e04207000009f690701c1b626881600");
-
-    @Override
-    public byte[] processCommandApdu(byte[] commandApdu, Bundle bundle) {
-        sendMessageToActivity("------------------------", "----");
-        sendMessageToActivity("# Visa Card #", bytesToHexNpe(commandApdu));
-
-        // step 01
-        if (Arrays.equals(commandApdu, SELECT_PPSE_COMMAND)) {
-            // step 01 selecting the PPSE
-            sendMessageToActivity("step 01 Select PPSE Command ", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 01 Select PPSE Response", bytesToHexNpe(SELECT_PPSE_RESPONSE));
-            return concatenateByteArrays(SELECT_PPSE_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 02
-        if (Arrays.equals(commandApdu, SELECT_AID_COMMAND)) {
-            // step 02 selecting the AID
-            sendMessageToActivity("step 02 Select AID Command ", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 02 Select AID Response", bytesToHexNpe(SELECT_AID_RESPONSE));
-            return concatenateByteArrays(SELECT_AID_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 03
-        // dynamic - just compare the beginning of the commandApdu with the sample
-        byte[] shortedCommandApdu = Arrays.copyOf(commandApdu, 2);
-        if (Arrays.equals(shortedCommandApdu, GET_PROCESSING_OPTONS_COMMAND_SHORTED)) {
-            sendMessageToActivity("step 03 Get Processing Options (GPO) Command", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 03 Get Processing Options (GPO) Response", bytesToHexNpe(GET_PROCESSING_OPTONS_RESPONSE));
-            return concatenateByteArrays(GET_PROCESSING_OPTONS_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 04
-        if (Arrays.equals(commandApdu, READ_FILE_10_03_COMMAND)) {
-            // step 04 Read File 10/03 Command
-            sendMessageToActivity("step 04 Read File 10/03 Command", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 04 Read File 10/03 Response", bytesToHexNpe(READ_FILE_10_03_RESPONSE));
-            return concatenateByteArrays(READ_FILE_10_03_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 05
-        if (Arrays.equals(commandApdu, READ_FILE_10_04_COMMAND)) {
-            // step 05 Read File 10/04 Command
-            sendMessageToActivity("step 05 Read File 10/04 Command", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 05 Read File 10/05 Response", bytesToHexNpe(READ_FILE_10_04_RESPONSE));
-            return concatenateByteArrays(READ_FILE_10_04_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 06
-        if (Arrays.equals(commandApdu, READ_FILE_10_05_COMMAND)) {
-            // step 06 Read File 10/05 Command
-            sendMessageToActivity("step 06 Read File 10/05 Command", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 06 Read File 10/05 Response", bytesToHexNpe(READ_FILE_10_05_RESPONSE));
-            return concatenateByteArrays(READ_FILE_10_05_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // step 07
-        if (Arrays.equals(commandApdu, READ_FILE_10_06_COMMAND)) {
-            // step 07 Read File 10/06 Command
-            sendMessageToActivity("step 08 Read File 10/06 Command", bytesToHexNpe(commandApdu));
-            sendMessageToActivity("step 08 Read File 10/06 Response", bytesToHexNpe(READ_FILE_10_06_RESPONSE));
-            return concatenateByteArrays(READ_FILE_10_06_RESPONSE, RESPONSE_OK_SW);
-        }
-
-        // in any other case response an 'OK'
-        return RESPONSE_OK_SW;
+    private String p(String k, String d) {
+        return prefs().getString(k, d);
     }
 
     @Override
-    public void onDeactivated(int reason) {
-        sendMessageToActivity("------------------------", "----");
-        sendMessageToActivity("onDeactivated with reason", String.valueOf(reason));
+    public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
+        int ins = apdu[1] & 0xFF;
+        int p1  = apdu[2] & 0xFF;
+
+        if (ins == 0xA4 && p1 == 0x04) return select(apdu);
+        if (ins == 0xA8) return gpo();
+        if (ins == 0xB2) return readRecord();
+        if (ins == 0xAE) return genac();
+        return SW_BAD;
     }
 
-    /**
-     * A utility method to send data with an Broadcast Intent from this service to the MainActivity class
-     *
-     * @param msg
-     * @param data
-     */
-    private void sendMessageToActivity(String msg, String data) {
-        Intent intent = new Intent("HceCcEmulatorService");
-        // You can also include some extra data.
-        intent.putExtra("Message", msg);
-        intent.putExtra("Data", data);
-        Context context = this;
-        LocalBroadcastManager.getInstance(context).sendBroadcast(intent);
+    private byte[] select(byte[] apdu) {
+        int lc = apdu[4] & 0xFF;
+        byte[] name = new byte[lc];
+        System.arraycopy(apdu, 5, name, 0, lc);
+
+        String aid = p("aid", "A0000000031010");
+        String label = p("label", "CARD");
+
+        if (Arrays.equals(name, PPSE)) {
+            return cat(
+                tlv(0x6F, cat(
+                    tlv(0x84, PPSE),
+                    tlv(0xA5, tlv(0xBF0C,
+                        tlv(0x61, cat(
+                            tlv(0x4F, hex(aid)),
+                            tlv(0x50, label.getBytes(StandardCharsets.US_ASCII))))))
+                )), SW_OK);
+        }
+        if (Arrays.equals(name, hex(aid))) {
+            return cat(
+                tlv(0x6F, cat(
+                    tlv(0x84, hex(aid)),
+                    tlv(0xA5, cat(
+                        tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                        tlv(0x87, new byte[]{0x01}))))
+                )), SW_OK);
+        }
+        return SW_BAD;
     }
 
+    private byte[] gpo() {
+        return cat(tlv(0x77, cat(
+            tlv(0x82, hex(p("aip", "1C00"))),
+            tlv(0x94, hex(p("afl", "08010100")))
+        )), SW_OK);
+    }
+
+    private byte[] readRecord() {
+        String pan  = p("pan", "4111111111111111");
+        String exp  = p("expiry", "3112");
+        String sc   = p("serviceCode", "201");
+        String disc = p("disc", "");
+
+        String track = pan + "D" + exp + sc + disc;
+        if (track.length() % 2 != 0) track = track + "F";
+
+        return cat(tlv(0x70, cat(
+            tlv(0x5A, hex(pan.length() % 2 == 0 ? pan : pan + "F")),
+            tlv(0x5F24, hex(exp + "00")),
+            tlv(0x57, hex(track))
+        )), SW_OK);
+    }
+
+    private byte[] genac() {
+        return cat(tlv(0x77, cat(
+            tlv(0x9F27, hex(p("cid", "80"))),
+            tlv(0x9F36, hex(p("atc", "001B"))),
+            tlv(0x9F26, hex(p("arqc", "0000000000000000"))),
+            tlv(0x9F10, hex(p("iad", "06010A03A0B800")))
+        )), SW_OK);
+    }
+
+    @Override
+    public void onDeactivated(int reason) { }
 }
