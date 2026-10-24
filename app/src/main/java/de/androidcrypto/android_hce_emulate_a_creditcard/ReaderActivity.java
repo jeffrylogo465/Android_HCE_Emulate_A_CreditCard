@@ -11,6 +11,7 @@ import android.nfc.Tag;
 import android.nfc.tech.IsoDep;
 import android.os.Bundle;
 import android.os.Vibrator;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
@@ -24,7 +25,21 @@ import java.util.Calendar;
 import java.util.List;
 
 public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallback {
+private static final String TAG = "READER";
+    private final StringBuilder logBuf = new StringBuilder();
 
+    private void log(String s) {
+        Log.d(TAG, s);
+        logBuf.append(s).append('\n');
+        if (logBuf.length() > 4000) logBuf.delete(0, 2000);
+        final String text = logBuf.toString();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                txtReaderStatus.setText(text);
+            }
+        });
+    }
     public static final String EXTRA_PAN = "extra_pan";
     public static final String EXTRA_EXPIRY = "extra_expiry";
     public static final String EXTRA_SERVICE = "extra_service";
@@ -173,6 +188,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         try {
             isoDep.connect();
             isoDep.setTimeout(5000);
+            log("connected, maxTransceiveLength=" + isoDep.getMaxTransceiveLength());
 
             clearRaw();
             capturedRecords = 0;
@@ -295,7 +311,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
         } catch (IOException e) {
-            setStatus("Card lost - hold it still and try again");
+          log("FAILED: " + e);
         } finally {
             try { isoDep.close(); } catch (IOException ignored) { }
         }
@@ -385,7 +401,15 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     // ---------- APDU helpers ----------
 
     private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
-        byte[] response = isoDep.transceive(command);
+        log(">> " + bytesToHex(command));
+        byte[] response;
+        try {
+            response = isoDep.transceive(command);
+        } catch (IOException e) {
+            log("!! transceive threw: " + e);
+            throw e;
+        }
+        log("<< " + bytesToHex(response));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         while (true) {
             if (response.length < 2) {
