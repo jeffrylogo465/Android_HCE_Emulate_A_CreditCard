@@ -25,18 +25,23 @@ import java.util.Calendar;
 import java.util.List;
 
 public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallback {
-private static final String TAG = "READER";
+    private static final String TAG = "READER";
     private final StringBuilder logBuf = new StringBuilder();
+    private volatile boolean done = false;
 
     private void log(String s) {
         Log.d(TAG, s);
         logBuf.append(s).append('\n');
         if (logBuf.length() > 4000) logBuf.delete(0, 2000);
-        final String text = logBuf.toString();
+        if (done) return;
+        String text = logBuf.toString();
+        int cut = text.lastIndexOf('\n', Math.max(0, text.length() - 240));
+        if (cut > 0) text = text.substring(cut + 1);
+        final String shown = text;
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                txtReaderStatus.setText(text);
+                if (!done) txtReaderStatus.setText(shown);
             }
         });
     }
@@ -339,6 +344,7 @@ private static final String TAG = "READER";
 
     private void showResult(final String status, final String pan, final String expiry, final String service,
                             final String disc, final String track2, final String aid) {
+        done = true;
         lastPan = pan;
         lastExpiry = expiry;
         lastService = service;
