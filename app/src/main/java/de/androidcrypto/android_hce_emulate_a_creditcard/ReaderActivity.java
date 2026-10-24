@@ -261,21 +261,25 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
-            // 3b. ask the card to sign a transaction
-            byte[] cdol = firstTag(pool, 0x8C);
-            if (cdol != null) {
-                byte[] genAc = transceive(isoDep, genAcCommand(cdol));
-                if (genAc != null) {
-                    saveRaw("rawgenac", genAc);
-                    byte[] payload = firstTag(genAc, 0x80);
-                    if (payload == null) payload = genAc;
-                    if (payload.length >= 9) {
-                        lastArqc = bytesToHex(Arrays.copyOfRange(payload, 0, 8));
-                        if (payload.length > 9) {
-                            lastIad = bytesToHex(Arrays.copyOfRange(payload, 9, payload.length));
+            // 3b. ask the card to sign a transaction (optional - never fail the whole read)
+            try {
+                byte[] cdol = firstTag(pool, 0x8C);
+                if (cdol != null) {
+                    byte[] genAc = transceive(isoDep, genAcCommand(cdol));
+                    if (genAc != null) {
+                        saveRaw("rawgenac", genAc);
+                        byte[] payload = firstTag(genAc, 0x80);
+                        if (payload == null) payload = genAc;
+                        if (payload.length >= 9) {
+                            lastArqc = bytesToHex(Arrays.copyOfRange(payload, 0, 8));
+                            if (payload.length > 9) {
+                                lastIad = bytesToHex(Arrays.copyOfRange(payload, 9, payload.length));
+                            }
                         }
                     }
                 }
+            } catch (IOException e) {
+                log("GENERATE AC skipped: " + e);
             }
 
             // 4. pull the fields out of everything we collected
