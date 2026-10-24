@@ -115,8 +115,19 @@ public class MainActivity extends AppCompatActivity {
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            public void afterTextChanged(Editable s)
-            // ---------- card graphic effect ----------
+            public void afterTextChanged(Editable s) {
+                if (!binding) {
+                    collect();
+                    adapter.notifyItemChanged(current);
+                }
+            }
+        };
+        EditText[] fields = { etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
+                etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd };
+        for (EditText f : fields) f.addTextChangedListener(watcher);
+    }
+
+    // ---------- card graphic effect ----------
 
     private void applyTransforms() {
         int centre = pager.getWidth() / 2;
@@ -242,7 +253,8 @@ public class MainActivity extends AppCompatActivity {
         txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
         Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
     }
-            private void onAdd() {
+
+    private void onAdd() {
         collect();
         if (cards.size() >= MAX_CARDS) {
             Toast.makeText(this, "Max " + MAX_CARDS + " cards", Toast.LENGTH_SHORT).show();
