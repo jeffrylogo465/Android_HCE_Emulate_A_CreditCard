@@ -4,11 +4,15 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
+import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 public class HceCcEmulationServiceVisa extends HostApduService {
+
+    private static final String TAG = "HCE";
 
     private static final byte[] SW_OK  = hex("9000");
     private static final byte[] SW_BAD = hex("6A82");
@@ -97,6 +101,42 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return h;
     }
 
+    // ---------- captured raw data ----------
+
+    private static byte[] hexOrNull(String s) {
+        return (s == null || s.isEmpty()) ? null : hex(s);
+    }
+
+    private byte[] rawFci() { return hexOrNull(p("rawfci", "")); }
+    private byte[] rawGpo() { return hexOrNull(p("rawgpo", "")); }
+
+    private byte[] rawRec(int sfi, int rec) {
+        return hexOrNull(p("rec" + sfi + "_" + rec, ""));
+    }
+
+    private static int readTag(byte[] b, int[] pos) {
+        int t = b[pos[0]++] & 0xFF;
+        if ((t & 0x1F) == 0x1F) {
+            t = (t << 8) | (b[pos[0]++] & 0xFF);
+            while (pos[0] < b.length && (b[pos[0] - 1] & 0x80) != 0) {
+                t = (t << 8) | (b[pos[0]++] & 0xFF);
+            }
+        }
+        return t;
+    }
+
+    private static int readLen(byte[] b, int[] pos) {
+        int l = b[pos[0]++] & 0xFF;
+        if ((l & 0x80) != 0) {
+            int n = l & 0x7F, v = 0;
+            for (int k = 0; k < n && pos[0] < b.length; k++) {
+                v = (v << 8) | (b[pos[0]++] & 0xFF);
+            }
+            return v;
+        }
+        return l;
+    }
+
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
         try {
@@ -104,19 +144,38 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             int ins = apdu[1] & 0xFF;
             int p1  = apdu[2] & 0xFF;
+            int p2  = apdu[3] & 0xFF;
 
+            Log.d(TAG, ">> " + bytesToHex(apdu));
+
+            byte[] out;
             if (ins == 0xA4 && p1 == 0x04) {
                 if (apdu.length < 5) return SW_BAD;
-                return select(apdu);
+                out = select(apdu);
+            } else if (ins == 0xA8) {
+                out = gpo();
+            } else if (ins == 0xB2) {
+                out = readRecord(p1, p2);
+            } else if (ins == 0xAE) {
+                out = genac(apdu);
+            } else if (ins == 0xCA) {
+                out = getData(apdu);
+            } else {
+                out = SW_BAD;
             }
-            if (ins == 0xA8) return gpo();
-            if (ins == 0xB2) return readRecord();
-            if (ins == 0xAE) return genac(apdu);
-            if (ins == 0xCA) return getData(apdu);
-            return SW_BAD;
+
+            Log.d(TAG, "<< " + bytesToHex(out));
+            return out;
         } catch (Exception e) {
+            Log.d(TAG, "!! " + e);
             return SW_BAD;
         }
+    }
+
+    private static String bytesToHex(byte[] d) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
+        return sb.toString();
     }
 
     private byte[] select(byte[] apdu) {
@@ -139,6 +198,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
 
         if (Arrays.equals(name, hex(aid))) {
+            byte[] captured = rawFci();
+            if (captured != null) {
+                Log.d(TAG, "serving captured FCI (" + captured.length + " bytes)");
+                return cat(captured, SW_OK);
+            }
             byte[] prop = cat(
                     tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                     tlv(0x87, new byte[]{0x01}),
@@ -151,16 +215,78 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private byte[] gpo() {
+        byte[] captured = rawGpo();
+        if (captured != null) {
+            Log.d(TAG, "serving captured GPO (" + captured.length + " bytes)");
+            return cat(rewriteGpo(captured), SW_OK);
+        }
+
         String aip = p("aip", "3800");
         String afl = p("afl", "08010100");
-
         if (isMsd()) {
             return cat(tlv(0x80, cat(hex(aip), hex(afl))), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, hex(aip)), tlv(0x94, hex(afl)))), SW_OK);
     }
 
-    private byte[] readRecord() {
+    // take the real card's GPO response and make it safe to replay
+    private byte[] rewriteGpo(byte[] raw) {
+        int[] pos = new int[1];
+        int outer = readTag(raw, pos);
+
+        // MSD format - AIP and AFL are raw, not wrapped in a template
+        if (outer == 0x80) {
+            byte[] copy = raw.clone();
+            copy[pos[0]] = 0x00;
+            copy[pos[0] + 1] = 0x00;
+            return copy;
+        }
+
+        int outerLen = readLen(raw, pos);
+        int end = Math.min(raw.length, pos[0] + outerLen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(raw, q);
+            int l = readLen(raw, q);
+            if (q[0] + l > raw.length) break;
+            byte[] v = Arrays.copyOfRange(raw, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0x9F4B) {
+                continue;                                     // drop the CDA signature
+            } else if (t == 0x82) {
+                v = new byte[]{0x00, 0x00};                   // no SDA, no DDA
+            } else if (t == 0x9F27) {
+                v = new byte[]{0x40};                         // TC = approved offline
+            } else if (t == 0x9F36) {
+                v = hex(nextAtc());                           // fresh counter
+            } else if (t == 0x9F26) {
+                v = new byte[8];                              // nobody verifies it
+            } else if (t == 0x9F6C && v.length >= 2) {
+                v[1] |= (byte) 0x80;                          // device CVM already done
+            }
+
+            byte[] one = tlv(t, v);
+            out.write(one, 0, one.length);
+        }
+        return tlv(0x77, out.toByteArray());
+    }
+
+    private byte[] readRecord(int p1, int p2) {
+        int sfi = (p2 & 0xFF) >> 3;
+        int rec = p1 & 0xFF;
+
+        byte[] captured = rawRec(sfi, rec);
+        if (captured != null) {
+            Log.d(TAG, "serving captured record sfi=" + sfi + " rec=" + rec
+                    + " (" + captured.length + " bytes)");
+            return cat(captured, SW_OK);
+        }
+        Log.d(TAG, "no capture for sfi=" + sfi + " rec=" + rec + " - using fallback");
+
         String track2Hex = p("track2", "").trim();
         String pan  = p("pan", "4111111111111111");
         String exp  = p("expiry", "3112");
@@ -194,54 +320,4 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] cdol = new byte[0];
         if (apdu.length >= 5) {
             int lc = apdu[4] & 0xFF;
-            if (lc > 0 && apdu.length >= 5 + lc) {
-                cdol = Arrays.copyOfRange(apdu, 5, 5 + lc);
-            }
-        }
-
-        int cid;
-        if ((p1 & 0xC0) == 0x80)      cid = 0x80;
-        else if ((p1 & 0xC0) == 0x40) cid = 0x40;
-        else                          cid = 0x00;
-
-        byte[] ac = computeAc(atc, cdol);
-
-        byte[] cidT  = tlv(0x9F27, new byte[]{(byte) cid});
-        byte[] atcT  = tlv(0x9F36, hex(atc));
-        byte[] arqcT = tlv(0x9F26, ac);
-        byte[] iadT  = tlv(0x9F10, hex(p("iad", "06010A03A0B800")));
-        return cat(tlv(0x77, cat(cidT, atcT, arqcT, iadT)), SW_OK);
-    }
-
-    private byte[] computeAc(String atc, byte[] cdol) {
-        String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
-        if (mk.length() < 32) return new byte[8];
-        try {
-            byte[] macIn = cat(hex(p("aip", "3800")), hex(atc), cdol);
-            return EmvCrypto.arqc(mk, p("pan", "4111111111111111"), "00", atc, macIn);
-        } catch (Exception e) {
-            return new byte[8];
-        }
-    }
-
-    private byte[] getData(byte[] apdu) {
-        if (apdu.length < 6) return SW_BAD;
-        int lc = apdu[4] & 0xFF;
-        if (apdu.length < 5 + lc) return SW_BAD;
-
-        int tag = 0;
-        for (int i = 0; i < lc; i++) tag = (tag << 8) | (apdu[5 + i] & 0xFF);
-
-        byte[] val;
-        if (tag == 0x9F36)      val = hex(p("atc", "001B"));
-        else if (tag == 0x9F13) val = hex("00");
-        else if (tag == 0x9F17) val = hex("00");
-        else return SW_BAD;
-
-        return cat(tlv(tag, val), SW_OK);
-    }
-
-    @Override
-    public void onDeactivated(int reason) {
-    }
-}
+            if (lc
