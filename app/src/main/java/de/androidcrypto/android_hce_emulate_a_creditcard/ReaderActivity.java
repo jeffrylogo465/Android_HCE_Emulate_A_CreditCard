@@ -28,12 +28,12 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     public static final String EXTRA_EXPIRY = "extra_expiry";
     public static final String EXTRA_SERVICE = "extra_service";
     public static final String EXTRA_DISC = "extra_disc";
-
-    // "2PAY.SYS.DDF01" - the contactless payment directory
+    public static final String EXTRA_TRACK2 = "extra_track2";
+    // "2P AY.SYS.DDF01" - the contactless payment directory
     private static final byte[] PPSE_NAME = {
             0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31
     };
-
+    public static final String EXTRA_AID = "extra_aid";
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010",   // Visa
             "A0000000041010",   // Mastercard
@@ -322,6 +322,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         result.putExtra(EXTRA_EXPIRY, lastExpiry);
         result.putExtra(EXTRA_SERVICE, lastService);
         result.putExtra(EXTRA_DISC, lastDisc);
+        result.putExtra(EXTRA_TRACK2, lastTrack2);
+        result.putExtra(EXTRA_AID, lastAid);
         setResult(RESULT_OK, result);
         finish();
     }
