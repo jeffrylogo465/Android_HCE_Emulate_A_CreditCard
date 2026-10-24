@@ -2,12 +2,23 @@
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/app_name"
     android:requireDeviceUnlock="false">
-    <aid-group android:description="@string/app_name" android:category="payment">
-        <aid-filter android:name="325041592E5359532E4444463031" /> <!-- PPSE -->
-        <aid-filter android:name="A0000000031010" />                <!-- Visa -->
-        <aid-filter android:name="A0000000041010" />                <!-- Mastercard -->
-        <aid-filter android:name="A00000002501" />                  <!-- Amex -->
-        <aid-filter android:name="A0000001523010" />                <!-- Discover -->
-        <aid-filter android:name="A0000000651010" />                <!-- JCB -->
+    <aid-group
+        android:category="payment"
+        android:description="@string/app_name">
+        <aid-filter android:name="325041592E5359532E4444463031" />
+        <aid-filter android:name="A0000000031010" />
+        <aid-filter android:name="A0000000032010" />
+        <aid-filter android:name="A0000000041010" />
+        <aid-filter android:name="A0000000043060" />
+        <aid-filter android:name="A0000000046000" />
+        <aid-filter android:name="A0000000048002" />
+        <aid-filter android:name="A0000000410100" />
+        <aid-filter android:name="A0000000410105" />
+        <aid-filter android:name="A0000000422035" />
+        <aid-filter android:name="A00000002501" />
+        <aid-filter android:name="A0000000250104" />
+        <aid-filter android:name="A0000000651010" />
+        <aid-filter android:name="A0000000152001" />
+        <aid-filter android:name="A00000006900" />
     </aid-group>
 </host-apdu-service>
