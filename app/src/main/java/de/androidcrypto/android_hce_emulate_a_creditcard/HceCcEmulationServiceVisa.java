@@ -320,4 +320,53 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] cdol = new byte[0];
         if (apdu.length >= 5) {
             int lc = apdu[4] & 0xFF;
-            if (lc
+            if (lc > 0 && apdu.length >= 5 + lc) {
+                cdol = Arrays.copyOfRange(apdu, 5, 5 + lc);
+            }
+        }
+
+        // always answer TC - approved offline, so the issuer never checks the cryptogram
+        int cid = 0x40;
+
+        byte[] ac = computeAc(atc, cdol);
+
+        byte[] cidT  = tlv(0x9F27, new byte[]{(byte) cid});
+        byte[] atcT  = tlv(0x9F36, hex(atc));
+        byte[] arqcT = tlv(0x9F26, ac);
+        byte[] iadT  = tlv(0x9F10, hex(p("iad", "06010A03A0B800")));
+        return cat(tlv(0x77, cat(cidT, atcT, arqcT, iadT)), SW_OK);
+    }
+
+    private byte[] computeAc(String atc, byte[] cdol) {
+        String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (mk.length() < 32) return new byte[8];
+        try {
+            byte[] macIn = cat(hex(p("aip", "3800")), hex(atc), cdol);
+            return EmvCrypto.arqc(mk, p("pan", "4111111111111111"), "00", atc, macIn);
+        } catch (Exception e) {
+            return new byte[8];
+        }
+    }
+
+    private byte[] getData(byte[] apdu) {
+        if (apdu.length < 6) return SW_BAD;
+        int lc = apdu[4] & 0xFF;
+        if (apdu.length < 5 + lc) return SW_BAD;
+
+        int tag = 0;
+        for (int i = 0; i < lc; i++) tag = (tag << 8) | (apdu[5 + i] & 0xFF);
+
+        byte[] val;
+        if (tag == 0x9F36)      val = hex(p("atc", "001B"));
+        else if (tag == 0x9F13) val = hex("00");
+        else if (tag == 0x9F17) val = hex("00");
+        else return SW_BAD;
+
+        return cat(tlv(tag, val), SW_OK);
+    }
+
+    @Override
+    public void onDeactivated(int reason) {
+        Log.d(TAG, "onDeactivated reason=" + reason);
+    }
+}
