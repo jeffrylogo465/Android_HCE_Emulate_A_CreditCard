@@ -42,6 +42,22 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread t, Throwable e) {
+                String s = android.util.Log.getStackTraceString(e);
+                try {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", s));
+                } catch (Exception ignored) { }
+                try { Thread.sleep(400); } catch (Exception ignored) { }
+                android.os.Process.killProcess(android.os.Process.myPid());
+                System.exit(1);
+            }
+        });
+
         setContentView(R.layout.activity_main);
 
         if (getSupportActionBar() != null) getSupportActionBar().hide();
