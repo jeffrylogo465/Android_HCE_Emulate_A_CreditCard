@@ -36,6 +36,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     // response must not claim EMV mode.
     private static final byte AIP_EMV_MODE = (byte) 0x80;
 
+    // 9F27 Cryptogram Information Data. NOT the same encoding as the P1 request
+    // bits - P1 0x80 means "terminal wants an ARQC", CID 0x80 means "here is an
+    // ARQC". Handing back the wrong one makes the terminal decline without ever
+    // going online.
+    private static final byte CID_AAC  = (byte) 0x00;   // declined offline
+    private static final byte CID_TC   = (byte) 0x40;   // approved offline
+    private static final byte CID_ARQC = (byte) 0x80;   // go online
+
+    // Set true to always answer TC: the terminal approves offline and the issuer
+    // never judges our ARQC. Handy while MK-AC is unknown.
+    private static final boolean FORCE_OFFLINE_TC = false;
+
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
@@ -420,7 +432,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 v = new byte[]{(byte) (v[0] & AIP_ODA_MASK), v[1]};
                 txnAip = v;
             } else if (t == 0x9F27) {
-                v = new byte[]{0x40};
+                v = new byte[]{CID_TC};
             } else if (t == 0x9F36) {
                 v = hex(txnAtc());
             } else if (t == 0x9F26) {
@@ -472,10 +484,22 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
 
-        // mirror what the terminal asked for, otherwise it never goes online
-        int cid = (requested == 0x80) ? 0x00      // ARQC
-                : (requested == 0x40) ? 0x40      // TC
-                : 0x80;                           // AAC
+        // P1 bits 8-7 say what the terminal WANTS; CID says what we DID.
+        // 0x80 = ARQC wanted, 0x40 = TC wanted, 0x00 = AAC wanted.
+        // These are the same encoding, but they are two different fields - do
+        // not assume the terminal wants back the byte it just sent.
+        byte cid;
+        if (FORCE_OFFLINE_TC) {
+            cid = CID_TC;
+        } else if (requested == 0x80) {
+            cid = CID_ARQC;
+        } else if (requested == 0x40) {
+            cid = CID_TC;
+        } else if (requested == 0x00) {
+            cid = CID_AAC;
+        } else {
+            cid = CID_TC;   // 0xC0 is RFU/AAR - answer TC rather than stall
+        }
 
         String atc = txnAtc();
 
@@ -495,7 +519,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         return cat(tlv(0x77, cat(
-                tlv(0x9F27, new byte[]{(byte) cid}),
+                tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
                 tlv(0x9F26, ac),
                 tlv(0x9F10, hex(p("iad", "06010A03A0B800"))))), SW_OK);
@@ -559,6 +583,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (gens == 0)    return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
         if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
         if (l.contains("9F270140")) return "TAP: terminal got our TC (approved offline) and stopped anyway - its decision";
+        if (l.contains("9F270100")) return "TAP: terminal got an AAC from us - offline decline";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
