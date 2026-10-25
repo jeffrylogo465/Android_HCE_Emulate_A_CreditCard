@@ -6,19 +6,53 @@
         android:category="payment"
         android:description="@string/app_name">
         <aid-filter android:name="325041592E5359532E4444463031" />
+
+        <!-- Visa -->
         <aid-filter android:name="A0000000031010" />
+        <aid-filter android:name="A0000000031020" />
         <aid-filter android:name="A0000000032010" />
+        <aid-filter android:name="A0000000032020" />
+        <aid-filter android:name="A0000000038010" />
+
+        <!-- Mastercard / Maestro / Cirrus -->
         <aid-filter android:name="A0000000041010" />
+        <aid-filter android:name="A0000000041000" />
         <aid-filter android:name="A0000000043060" />
         <aid-filter android:name="A0000000046000" />
         <aid-filter android:name="A0000000048002" />
-        <aid-filter android:name="A0000000410100" />
-        <aid-filter android:name="A0000000410105" />
-        <aid-filter android:name="A0000000422035" />
+        <aid-filter android:name="A0000000050001" />
+
+        <!-- American Express -->
         <aid-filter android:name="A00000002501" />
         <aid-filter android:name="A0000000250104" />
-        <aid-filter android:name="A0000000651010" />
+        <aid-filter android:name="A0000000250001" />
+
+        <!-- Discover / Diners -->
         <aid-filter android:name="A0000000152001" />
-        <aid-filter android:name="A00000006900" />
+        <aid-filter android:name="A0000000152010" />
+        <aid-filter android:name="A0000000152020" />
+        <aid-filter android:name="A0000000152200" />
+        <aid-filter android:name="A0000000152300" />
+        <aid-filter android:name="A0000000152400" />
+        <aid-filter android:name="A0000000010101" />
+
+        <!-- JCB -->
+        <aid-filter android:name="A0000000651010" />
+        <aid-filter android:name="A0000000650000" />
+
+        <!-- UnionPay -->
+        <aid-filter android:name="A0000003330101" />
+        <aid-filter android:name="A000000333010101" />
+        <aid-filter android:name="A000000333010102" />
+        <aid-filter android:name="A000000333010103" />
+
+        <!-- Interac / Eftpos / Girocard / others -->
+        <aid-filter android:name="A0000002771010" />
+        <aid-filter android:name="A0000003845010" />
+        <aid-filter android:name="A0000003591010" />
+        <aid-filter android:name="A0000003591010028001" />
+        <aid-filter android:name="A00000000386980701" />
+        <aid-filter android:name="A0000000410100" />
+        <aid-filter android:name="A0000000422035" />
     </aid-group>
 </host-apdu-service>
