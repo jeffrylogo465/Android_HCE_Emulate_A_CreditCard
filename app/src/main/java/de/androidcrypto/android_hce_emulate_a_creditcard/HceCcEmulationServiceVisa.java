@@ -459,12 +459,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         int recs    = countOf(l, ">> 00B2");
         int gens    = countOf(l, ">> 80AE");
 
-        if (!ppse)       return "TAP: terminal never asked for the directory - it never read the phone";
+        if (!ppse)        return "TAP: terminal never asked for the directory - it never read the phone";
         if (selects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
-        if (gpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
-        if (recs == 0)   return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
-        if (gens == 0)   return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
-        if (gens >= 2)   return "TAP: terminal WENT ONLINE - the issuer judged our fake ARQC";
+        if (gpos == 0)    return "TAP: terminal picked an app then stopped - it rejected the FCI";
+        if (recs == 0)    return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
+        if (gens == 0)    return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
+        if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our fake ARQC";
         if (l.contains("9F270140")) return "TAP: terminal got our TC (approved offline) and stopped anyway - its decision";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
