@@ -77,7 +77,6 @@ public class MainActivity extends AppCompatActivity {
             etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd;
 
     private int current = 0;
-    private int cloneSource = 0;
     private boolean binding = false;
 
     @Override
@@ -643,8 +642,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void startReader() {
         collect();
-        cloneSource = current;
-        startActivityForResult(new Intent(this, ReaderActivity.class), REQ_CLONE);
+        Intent i = new Intent(this, ReaderActivity.class);
+        i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
+        startActivityForResult(i, REQ_CLONE);
     }
 
     private void onSave() {
