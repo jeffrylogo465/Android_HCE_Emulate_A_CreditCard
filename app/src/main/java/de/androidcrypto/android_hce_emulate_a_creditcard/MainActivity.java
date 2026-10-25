@@ -37,6 +37,7 @@ public class MainActivity extends AppCompatActivity {
             etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd;
 
     private int current = 0;
+    private int cloneSource = 0;
     private boolean binding = false;
 
     @Override
@@ -118,13 +119,9 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.btnSave).setOnClickListener(v -> onSave());
         findViewById(R.id.btnAdd).setOnClickListener(v -> onAdd());
-        findViewById(R.id.btnClone).setOnClickListener(v -> {
-            collect();
-            startActivityForResult(new Intent(this, ReaderActivity.class), REQ_CLONE);
-        });
+        findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
-            collect();
-            startActivityForResult(new Intent(this, ReaderActivity.class), REQ_CLONE);
+            startReader();
             return true;
         });
 
@@ -249,6 +246,14 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- actions ----------
 
+    private void startReader() {
+        collect();
+        cloneSource = current;
+        Intent i = new Intent(this, ReaderActivity.class);
+        i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
+        startActivityForResult(i, REQ_CLONE);
+    }
+
     private void onSave() {
         String pan = digits(t(etPan));
         if (pan.length() < 12 || pan.length() > 19 || !luhn(pan)) {
@@ -356,6 +361,8 @@ public class MainActivity extends AppCompatActivity {
             current = cards.size() - 1;
         }
 
+        if (cloneSource != current) copyCapture(cloneSource, current);
+
         binding = true;
         etLabel.setText(pan.length() >= 4 ? "CLONE " + pan.substring(pan.length() - 4) : "CLONE");
         etPan.setText(pan);
@@ -373,6 +380,18 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putInt("selected", current).apply();
         txtStatus.setText("Cloned - check it, then SAVE");
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
+    }
+
+    private void copyCapture(int from, int to) {
+        SharedPreferences.Editor e = prefs.edit();
+        String src = "card" + from + "_";
+        String dst = "card" + to + "_";
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(src + "raw") || k.startsWith(src + "rec")) {
+                e.putString(dst + k.substring(src.length()), prefs.getString(k, ""));
+            }
+        }
+        e.apply();
     }
 
     private static String nz(String s) {
