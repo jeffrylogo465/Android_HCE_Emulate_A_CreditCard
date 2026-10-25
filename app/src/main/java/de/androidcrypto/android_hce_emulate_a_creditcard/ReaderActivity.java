@@ -30,6 +30,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private volatile boolean done = false;
     private volatile boolean reading = false;
     private int attempts = 0;
+    private boolean fresh = true;
     private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     private void log(String s) {
@@ -247,10 +248,23 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             try { Thread.sleep(150); } catch (InterruptedException ignored) { }
             log("connected, maxTransceiveLength=" + isoDep.getMaxTransceiveLength());
 
-            clearRaw();
-            capturedRecords = 0;
+            if (fresh) {
+                clearRaw();
+                fresh = false;
+            }
 
             List<byte[]> pool = new ArrayList<>();
+            // bring back anything earlier attempts already captured
+            for (String k : prefs().getAll().keySet()) {
+                if (k.startsWith("cap_rec") || k.startsWith("cap_raw")) {
+                    String v = prefs().getString(k, "");
+                    if (v != null && !v.isEmpty() && v.length() % 2 == 0) pool.add(hexToBytes(v));
+                }
+            }
+            capturedRecords = 0;
+            for (String k : prefs().getAll().keySet()) {
+                if (k.startsWith("cap_rec")) capturedRecords++;
+            }
             String aid = null;
 
             // 1. ask the card for its payment directory
@@ -285,8 +299,11 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
             if (aid == null) {
-                setStatus("Card found, but no card application answered");
-                return;
+                if (pool.isEmpty()) {
+                    setStatus("Card found, but no card application answered");
+                    return;
+                }
+                aid = prefs().getString("cap_aid", "");
             }
 
             // 3. start a transaction and read every record the card points at
@@ -335,7 +352,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 log("GENERATE AC skipped: " + e);
             }
 
-            log("STEP4 pool=" + pool.size());
+            log("STEP4 pool=" + pool.size() + " stored=" + capturedRecords);
             // 4. pull the fields out of everything we collected
             String pan = digitsOrEmpty(firstTag(pool, 0x5A));
             String expiry = digitsOrEmpty(firstTag(pool, 0x5F24));
