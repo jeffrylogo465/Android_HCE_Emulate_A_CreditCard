@@ -388,10 +388,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
-            if (expiry.length() >= 4) {
-                expiry = expiry.substring(2, 4) + "/" + expiry.substring(0, 2);
-            }
-
             saveText("pan", pan);
             saveText("expiry", expiry);
             saveText("service", service);
