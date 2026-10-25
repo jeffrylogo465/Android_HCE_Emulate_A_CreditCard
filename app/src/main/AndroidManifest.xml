@@ -32,6 +32,9 @@
         <activity
             android:name=".ReaderActivity"
             android:exported="false" />
+        <activity
+            android:name=".CaptureActivity"
+            android:exported="false" />
 
         <service
             android:name=".HceCcEmulationServiceVisa"
