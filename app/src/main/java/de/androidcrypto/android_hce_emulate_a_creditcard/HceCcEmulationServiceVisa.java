@@ -32,6 +32,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     // advertise none of them and the terminal skips the step entirely.
     private static final byte AIP_ODA_MASK = 0x18;
 
+    // AIP byte 2 bit 8. Only meaningful with EMV framing - a magstripe-mode
+    // response must not claim EMV mode.
+    private static final byte AIP_EMV_MODE = (byte) 0x80;
+
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
@@ -107,16 +111,23 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return "card" + prefs().getInt("selected", 0) + "_";
     }
 
+    /**
+     * Note: an empty stored value is treated as absent, so the default applies.
+     * collect() writes empty strings for untouched fields, which would otherwise
+     * shadow every default here and produce zero-length TLVs.
+     */
     private String p(String k, String d) {
-        return prefs().getString(sel() + k, d);
+        String v = prefs().getString(sel() + k, d);
+        return (v == null || v.isEmpty()) ? d : v;
     }
 
     private void put(String k, String v) {
         prefs().edit().putString(sel() + k, v).apply();
     }
 
+    /** msd is stored with putInt, so it must be read with getInt. */
     private boolean isMsd() {
-        return "1".equals(p("msd", "1"));
+        return prefs().getInt(sel() + "msd", 1) == 1;
     }
 
     private String nextAtc() {
@@ -362,11 +373,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(rewriteGpo(captured), SW_OK);
         }
 
+        // No capture - synthesise. Mask the ODA bits so the terminal does not
+        // attempt an authentication we cannot pass, and keep the AIP consistent
+        // with whichever framing we are about to send.
+        boolean msd = isMsd();
         byte[] aip = hex(p("aip", DEFAULT_AIP));
-        String afl = p("afl", "08010100");
+        if (aip.length >= 2) {
+            aip[0] &= AIP_ODA_MASK;
+            if (msd) aip[1] &= (byte) ~AIP_EMV_MODE;
+        }
         txnAip = aip;
 
-        if (isMsd()) {
+        String afl = p("afl", "08010100");
+        if (msd) {
             return cat(tlv(0x80, cat(aip, hex(afl))), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, aip), tlv(0x94, hex(afl)))), SW_OK);
@@ -502,21 +521,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
+    /**
+     * GET DATA carries the tag in P1P2 - it is not a case-4 command with a data
+     * field. A standard 80 CA 9F 36 00 is five bytes with Le at apdu[4].
+     */
     private byte[] getData(byte[] apdu) {
-        if (apdu.length < 6) return SW_BAD;
-        int lc = apdu[4] & 0xFF;
-        if (apdu.length < 5 + lc) return SW_BAD;
+        int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);
 
-        int tag = 0;
-        for (int i = 0; i < lc; i++) tag = (tag << 8) | (apdu[5 + i] & 0xFF);
-
-        byte[] val;
-        if (tag == 0x9F36)      val = hex(p("atc", "001B"));
-        else if (tag == 0x9F13) val = hex("00");
-        else if (tag == 0x9F17) val = hex("00");
-        else return SW_BAD;
-
-        return cat(tlv(tag, val), SW_OK);
+        if (tag == 0x9F36)      return cat(tlv(0x9F36, hex(txnAtc())), SW_OK);
+        else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("00")), SW_OK);
+        else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
+        return SW_BAD;
     }
 
     // ---------- what just happened ----------
