@@ -107,8 +107,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return (s == null || s.isEmpty()) ? null : hex(s);
     }
 
-    private byte[] rawFci() { return hexOrNull(p("rawfci", "")); }
-    private byte[] rawGpo() { return hexOrNull(p("rawgpo", "")); }
+    private byte[] rawFci()  { return hexOrNull(p("rawfci",  "")); }
+    private byte[] rawGpo()  { return hexOrNull(p("rawgpo",  "")); }
+    private byte[] rawPpse() { return hexOrNull(p("rawppse", "")); }
 
     private byte[] rawRec(int sfi, int rec) {
         return hexOrNull(p("rec" + sfi + "_" + rec, ""));
@@ -187,7 +188,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String aid = p("aid", "A0000000031010");
         String label = p("label", "CARD");
 
+        // PPSE - hand back the card's real directory listing when we have it
         if (Arrays.equals(name, PPSE)) {
+            byte[] capPpse = rawPpse();
+            if (capPpse != null) {
+                Log.d(TAG, "serving captured PPSE (" + capPpse.length + " bytes)");
+                return cat(capPpse, SW_OK);
+            }
             byte[] entry = cat(
                     tlv(0x4F, hex(aid)),
                     tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)));
@@ -197,21 +204,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(tlv(0x6F, inner), SW_OK);
         }
 
-        if (Arrays.equals(name, hex(aid))) {
-            byte[] captured = rawFci();
-            if (captured != null) {
-                Log.d(TAG, "serving captured FCI (" + captured.length + " bytes)");
-                return cat(captured, SW_OK);
-            }
-            byte[] prop = cat(
-                    tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
-                    tlv(0x87, new byte[]{0x01}),
-                    tlv(0x9F38, hex(PDOL)));
-            byte[] inner = cat(tlv(0x84, hex(aid)), tlv(0xA5, prop));
-            return cat(tlv(0x6F, inner), SW_OK);
+        // any other AID the terminal picks - answer with the card's real FCI
+        byte[] captured = rawFci();
+        if (captured != null) {
+            Log.d(TAG, "serving captured FCI (" + captured.length + " bytes)");
+            return cat(captured, SW_OK);
         }
 
-        return SW_BAD;
+        byte[] prop = cat(
+                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{0x01}),
+                tlv(0x9F38, hex(PDOL)));
+        byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
+        return cat(tlv(0x6F, inner), SW_OK);
     }
 
     private byte[] gpo() {
@@ -236,10 +241,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         // MSD format - AIP and AFL are raw, not wrapped in a template
         if (outer == 0x80) {
-            byte[] copy = raw.clone();
-            copy[pos[0]] = 0x00;
-            copy[pos[0] + 1] = 0x00;
-            return copy;
+            return raw.clone();
         }
 
         int outerLen = readLen(raw, pos);
@@ -257,8 +259,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             if (t == 0x9F4B) {
                 continue;                                     // drop the CDA signature
-            } else if (t == 0x82) {
-                v = new byte[]{0x00, 0x00};                   // no SDA, no DDA
             } else if (t == 0x9F27) {
                 v = new byte[]{0x40};                         // TC = approved offline
             } else if (t == 0x9F36) {
