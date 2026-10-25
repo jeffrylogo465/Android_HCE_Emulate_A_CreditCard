@@ -12,6 +12,7 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Random;
 
 public class HceCcEmulationServiceVisa extends HostApduService {
 
@@ -44,9 +45,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte CID_TC   = (byte) 0x40;   // approved offline
     private static final byte CID_ARQC = (byte) 0x80;   // go online
 
-    // Set true to always answer TC: the terminal approves offline and the issuer
-    // never judges our ARQC. Handy while MK-AC is unknown.
-    private static final boolean FORCE_OFFLINE_TC = false;
+    /**
+     * true  - always answer TC. The card says "approved, do not call the host",
+     *         so our (unverifiable) ARQC never gets judged. Needs a small amount
+     *         and a terminal that is not configured forced-online.
+     * false - mirror what the terminal asked for. Set false once you have the
+     *         issuer MK-AC and want the online path to be real.
+     */
+    private static final boolean FORCE_OFFLINE_TC = true;
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -54,6 +60,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final String CVMLIST = "000013881F0602071E03";
 
     private final StringBuilder tapLog = new StringBuilder();
+    private final Random rnd = new Random();
 
     /** The AIP actually sent in the GPO response. The ARQC is MACed over this. */
     private byte[] txnAip;
@@ -337,6 +344,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 out = genac(apdu);
             } else if (ins == 0xCA) {
                 out = getData(apdu);
+            } else if (ins == 0x20) {
+                // VERIFY - offline PIN. We hold no PIN, so always claim a match
+                // rather than letting the tap die on 6A82.
+                out = SW_OK;
+            } else if (ins == 0x84) {
+                // GET CHALLENGE - hand back 8 bytes of noise.
+                byte[] ch = new byte[8];
+                rnd.nextBytes(ch);
+                out = cat(ch, SW_OK);
             } else if (ins == 0x88) {
                 out = SW_UNSUPPORTED;
             } else {
@@ -582,8 +598,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (recs == 0)    return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
         if (gens == 0)    return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
         if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
-        if (l.contains("9F270140")) return "TAP: terminal got our TC (approved offline) and stopped anyway - its decision";
-        if (l.contains("9F270100")) return "TAP: terminal got an AAC from us - offline decline";
+        if (l.contains("9F270140")) return "TAP: we answered TC - terminal should have APPROVED offline";
+        if (l.contains("9F270100")) return "TAP: we answered AAC - terminal treated it as an offline decline";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
