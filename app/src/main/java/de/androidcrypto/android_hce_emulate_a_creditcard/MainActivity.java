@@ -27,7 +27,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQ_CLONE = 4711;
 
     private static final String HINT =
-            "Long-press AID to pick it - long-press TRACK 2 to preview";
+            "Paste a dump anywhere - it fills itself in. Long-press AID to pick it.";
 
     /** Brand -> AID. Stops anyone having to remember one, and stops the
      *  "empty AID silently becomes Visa" trap. */
@@ -160,6 +160,66 @@ public class MainActivity extends AppCompatActivity {
         EditText[] fields = { etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
                 etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd };
         for (EditText f : fields) f.addTextChangedListener(watcher);
+
+        // paste a dump into either of these and the card fills itself in
+        TextWatcher filler = new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(Editable s) {
+                if (!binding) autoFill();
+            }
+        };
+        etTrack2.addTextChangedListener(filler);
+        etPan.addTextChangedListener(filler);
+    }
+
+    /**
+     * Paste "5287250556251985=310420113264855" into the track 2 field or the PAN
+     * field and the rest of the card is filled in from it. The separator is the
+     * only reliable split point - everything after it is read positionally,
+     * which is how a real card lays it out: 4 expiry, 3 service code, rest
+     * discretionary (that tail holds the CVC, so it is never truncated).
+     */
+    private void autoFill() {
+        if (binding) return;
+
+        String fromTrack = normaliseTrack2(t(etTrack2));
+        String fromPan = normaliseTrack2(t(etPan));
+
+        String src;
+        if (fromTrack.indexOf('D') > 0) {
+            src = fromTrack;
+        } else if (fromPan.indexOf('D') > 0) {
+            src = fromPan;
+        } else {
+            return;
+        }
+
+        int sep = src.indexOf('D');
+        if (sep < 12 || sep > 19) return;                 // not a usable PAN length
+
+        String pan = src.substring(0, sep);
+        if (!pan.matches("[0-9]+")) return;               // still being typed
+
+        String rest = src.substring(sep + 1);
+        if (rest.length() < 7) return;                    // need expiry + service
+
+        String expiry = rest.substring(0, 4);
+        String service = rest.substring(4, 7);
+        String disc = rest.substring(7);
+        if (!expiry.matches("[0-9]{4}")) return;
+        if (!service.matches("[0-9]{3}")) return;
+
+        binding = true;
+        etTrack2.setText(src);
+        etPan.setText(pan);
+        etExpiry.setText(expiry);
+        etService.setText(service);
+        etDiscretionary.setText(disc);
+        binding = false;
+
+        collect();
+        adapter.notifyItemChanged(current);
     }
 
     private void applyTransforms() {
@@ -259,6 +319,7 @@ public class MainActivity extends AppCompatActivity {
         binding = false;
         updateCount();
         txtStatus.setText("");
+        autoFill();
     }
 
     private void updateCount() {
@@ -371,6 +432,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSave() {
+        autoFill();                                   // paste, hit save, done
+
         String pan = digits(t(etPan));
         if (pan.length() < 12 || pan.length() > 19 || !luhn(pan)) {
             Toast.makeText(this, "PAN must be 12-19 digits and pass Luhn", Toast.LENGTH_LONG).show();
@@ -391,7 +454,7 @@ public class MainActivity extends AppCompatActivity {
         String track2 = normaliseTrack2(t(etTrack2));
         String trackPan = track2.contains("D")
                 ? track2.substring(0, track2.indexOf('D')) : track2;
-        if (!trackPan.isEmpty() && !trackPan.equals(pan)) {
+        if (track2.contains("D") && !trackPan.isEmpty() && !trackPan.equals(pan)) {
             txtStatus.setText("Saved - but PAN and TRACK 2 are different cards");
             Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
             return;
