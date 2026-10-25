@@ -222,47 +222,6 @@ public class MainActivity extends AppCompatActivity {
         adapter.notifyItemChanged(current);
     }
 
-    /** SAVE also syncs the plain fields out of the track 2, so a pasted dump
-     *  cannot end up contradicting itself. */
-    private void syncFieldsFromTrack2() {
-        String track2 = normaliseTrack2(t(etTrack2));
-        int d = track2.indexOf('D');
-        if (d <= 0) return;
-
-        String pan  = digits(track2.substring(0, d));
-        String tail = track2.substring(d + 1);
-        String exp  = tail.length() >= 4 ? tail.substring(0, 4) : "";
-        String sc   = tail.length() >= 7 ? tail.substring(4, 7) : "";
-        String disc = tail.length() > 7 ? tail.substring(7) : "";
-
-        binding = true;
-        if (!pan.isEmpty() && !pan.equals(digits(t(etPan)))) etPan.setText(pan);
-        if (!exp.isEmpty() && !exp.equals(t(etExpiry))) etExpiry.setText(exp);
-        if (!sc.isEmpty() && !sc.equals(t(etService))) etService.setText(sc);
-        if (!disc.equals(t(etDiscretionary))) etDiscretionary.setText(disc);
-        binding = false;
-    }
-
-    private static String brandFromPan(String pan) {
-        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
-        if (pan.startsWith("35")) return "JCB";
-        if (pan.startsWith("62")) return "UNIONPAY";
-        if (pan.startsWith("4")) return "VISA";
-        if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
-        return "CARD";
-    }
-
-    private static String aidFromPan(String pan) {
-        if (pan.startsWith("34") || pan.startsWith("37")) return "A00000002501";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "A0000001523010";
-        if (pan.startsWith("35")) return "A0000000651010";
-        if (pan.startsWith("62")) return "A000000333010101";
-        if (pan.startsWith("4")) return "A0000000031010";
-        if (pan.startsWith("5") || pan.startsWith("2")) return "A0000000041010";
-        return "";
-    }
-
     private void applyTransforms() {
         int centre = pager.getWidth() / 2;
         if (centre == 0) return;
@@ -473,7 +432,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSave() {
-        syncFieldsFromTrack2();                       // paste, hit save, done
+        syncFieldsFromTrack2();                   // SAVE puts everything in its place
         if (t(etLabel).isEmpty()) {
             String b = brandFromPan(digits(t(etPan)));
             if (!b.isEmpty()) etLabel.setText(b);
@@ -677,5 +636,49 @@ public class MainActivity extends AppCompatActivity {
         String s = raw.trim().toUpperCase().replace('=', 'D');
         while (s.endsWith("F")) s = s.substring(0, s.length() - 1);
         return s;
+    }
+
+    /**
+     * SAVE syncs the plain fields out of the track 2, so a pasted dump cannot
+     * end up contradicting itself. The separator is the split point; everything
+     * after it is positional, and the tail (which holds the CVC) is kept whole.
+     */
+    private void syncFieldsFromTrack2() {
+        String track2 = normaliseTrack2(t(etTrack2));
+        int d = track2.indexOf('D');
+        if (d <= 0) return;
+
+        String pan  = digits(track2.substring(0, d));
+        String tail = track2.substring(d + 1);
+        String exp  = tail.length() >= 4 ? tail.substring(0, 4) : "";
+        String sc   = tail.length() >= 7 ? tail.substring(4, 7) : "";
+        String disc = tail.length() > 7 ? tail.substring(7) : "";
+
+        binding = true;
+        if (!pan.isEmpty() && !pan.equals(digits(t(etPan)))) etPan.setText(pan);
+        if (!exp.isEmpty() && !exp.equals(t(etExpiry))) etExpiry.setText(exp);
+        if (!sc.isEmpty() && !sc.equals(t(etService))) etService.setText(sc);
+        if (!disc.equals(t(etDiscretionary))) etDiscretionary.setText(disc);
+        binding = false;
+    }
+
+    private static String brandFromPan(String pan) {
+        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
+        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
+        if (pan.startsWith("35")) return "JCB";
+        if (pan.startsWith("62")) return "UNIONPAY";
+        if (pan.startsWith("4")) return "VISA";
+        if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
+        return "CARD";
+    }
+
+    private static String aidFromPan(String pan) {
+        if (pan.startsWith("34") || pan.startsWith("37")) return "A00000002501";
+        if (pan.startsWith("6011") || pan.startsWith("65")) return "A0000001523010";
+        if (pan.startsWith("35")) return "A0000000651010";
+        if (pan.startsWith("62")) return "A000000333010101";
+        if (pan.startsWith("4")) return "A0000000031010";
+        if (pan.startsWith("5") || pan.startsWith("2")) return "A0000000041010";
+        return "";
     }
 }
