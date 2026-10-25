@@ -259,6 +259,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             if (t == 0x9F4B) {
                 continue;                                     // drop the CDA signature
+            } else if (t == 0x82 && v.length >= 2) {
+                v = new byte[]{(byte) (v[0] & 0xFE), v[1]};   // drop the CDA bit
             } else if (t == 0x9F27) {
                 v = new byte[]{0x40};                         // TC = approved offline
             } else if (t == 0x9F36) {
