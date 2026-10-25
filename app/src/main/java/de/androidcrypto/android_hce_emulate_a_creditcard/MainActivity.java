@@ -311,6 +311,12 @@ public class MainActivity extends AppCompatActivity {
         collect();
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        txtStatus.setText(prefs.getString("lastverdict", ""));
+    }
+
     // ---------- clone from reader ----------
 
     @Override
