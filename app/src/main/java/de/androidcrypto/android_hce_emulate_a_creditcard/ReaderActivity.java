@@ -202,6 +202,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         try {
             isoDep.connect();
             isoDep.setTimeout(5000);
+            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
             log("connected, maxTransceiveLength=" + isoDep.getMaxTransceiveLength());
 
             clearRaw();
@@ -257,7 +258,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 if (afl != null) {
                     for (int i = 0; i + 3 < afl.length; i += 4) {
                         int sfi = (afl[i] & 0xFF) >> 3;
-                        int firstRecord = afl[i + 1] & 0xFF;
+                        int firstRecord = (afl[i + 1] & 0xFF);
                         int recordCount = afl[i + 2] & 0xFF;
                         for (int record = firstRecord; record < firstRecord + recordCount; record++) {
                             byte[] data = transceive(isoDep, readRecord(sfi, record));
@@ -389,7 +390,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 + "\nTRACK 2: " + emptyToDash(lastTrack2)
                 + "\nARQC / 9F26: " + emptyToDash(lastArqc)
                 + "\nIAD / 9F10: " + emptyToDash(lastIad)
-                + "\nAID: " + emptyToDash(lastAid);
+                + "\nAID: " + emptyToDash(lastAid)
+                + "\n\nLOG:\n" + logBuf.toString();
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard != null) {
             clipboard.setPrimaryClip(ClipData.newPlainText("card data", text));
@@ -423,6 +425,21 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     // ---------- APDU helpers ----------
 
     private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
+        IOException last = null;
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            try {
+                return transceiveOnce(isoDep, command);
+            } catch (IOException e) {
+                last = e;
+                log("!! lost the card, retrying (" + attempt + "/4)");
+                try { Thread.sleep(200); } catch (InterruptedException ignored) { }
+                try { if (!isoDep.isConnected()) isoDep.connect(); } catch (IOException ignored) { }
+            }
+        }
+        throw last;
+    }
+
+    private byte[] transceiveOnce(IsoDep isoDep, byte[] command) throws IOException {
         log(">> " + bytesToHex(command));
         byte[] response;
         try {
