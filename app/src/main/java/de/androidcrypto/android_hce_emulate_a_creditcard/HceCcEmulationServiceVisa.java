@@ -54,10 +54,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      */
     private static final boolean FORCE_OFFLINE_TC = true;
 
+    /**
+     * true  - always answer ARQC, so the terminal must dial the host even if it
+     *         wanted to approve offline. Only takes effect in EMV mode (MSD=0) -
+     *         magstripe mode never sends a GENERATE AC at all.
+     * false - fall through to FORCE_OFFLINE_TC / mirror behaviour.
+     *
+     * Inert while MSD=1, so it is safe to leave on.
+     */
+    private static final boolean FORCE_ONLINE_ARQC = true;
+
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
-    private static final String CVMLIST = "000013881F0602071E03";
+
+    // X=0, Y=0, one rule: CVM code 0x1F "no CVM required", condition 0x00 "always".
+    // The old value (000013881F0602071E03) parsed as X=00001388 and Y=1F060207,
+    // which is not a sane amount, and its first rule used CVM code 0x13, which is
+    // RFU. "No CVM, always" is the right thing for a clone.
+    private static final String CVMLIST = "00000000000000001F00";
 
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
@@ -508,8 +523,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         // These are the same encoding, but they are two different fields - do
         // not assume the terminal wants back the byte it just sent.
         byte cid;
-        if (FORCE_OFFLINE_TC) {
-            cid = CID_TC;
+        if (FORCE_ONLINE_ARQC) {
+            cid = CID_ARQC;                              // force the terminal online
+        } else if (FORCE_OFFLINE_TC) {
+            cid = CID_TC;                                // approve offline, nobody judges
         } else if (requested == 0x80) {
             cid = CID_ARQC;
         } else if (requested == 0x40) {
@@ -599,9 +616,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (selects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
         if (gpos == 0)    return "TAP: terminal picked an app then stopped - it rejected the FCI";
         if (recs == 0)    return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
-        if (gens == 0)    return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
+
+        // magstripe mode never sends a GENERATE AC, so gens == 0 is normal there
+        if (gens == 0) {
+            if (isMsd()) {
+                return "TAP: magstripe mode - terminal read " + recs
+                        + " records and made its own decision (no cryptogram in MSD)";
+            }
+            return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
+        }
         if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
         if (l.contains("9F270140")) return "TAP: we answered TC - terminal should have APPROVED offline";
+        if (l.contains("9F270180")) return "TAP: we answered ARQC - terminal must go online";
         if (l.contains("9F270100")) return "TAP: we answered AAC - terminal treated it as an offline decline";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
