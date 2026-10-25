@@ -35,8 +35,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private void log(String s) {
         Log.d(TAG, s);
-        logBuf.append(s).append('\n');
-        if (logBuf.length() > 4000) logBuf.delete(0, 2000);
+        synchronized (logBuf) {
+            logBuf.append(s).append('\n');
+            if (logBuf.length() > 4000) logBuf.delete(0, 2000);
+        }
         if (done) return;
         String text = logBuf.toString();
         int cut = text.lastIndexOf('\n', Math.max(0, text.length() - 240));
@@ -49,15 +51,18 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
         });
     }
+
     public static final String EXTRA_PAN = "extra_pan";
     public static final String EXTRA_EXPIRY = "extra_expiry";
     public static final String EXTRA_SERVICE = "extra_service";
     public static final String EXTRA_DISC = "extra_disc";
     public static final String EXTRA_TRACK2 = "extra_track2";
     public static final String EXTRA_AID = "extra_aid";
-    public static final String EXTRA_CARD_INDEX = "extra_card_index";
+    public static final String EXTRA_PSN = "extra_psn";
+    public static final String EXTRA_IAD = "extra_iad";
+    public static final String EXTRA_ATC = "extra_atc";
+    public static final String EXTRA_AIP = "extra_aip";
 
-    // "2PAY.SYS.DDF01" - the contactless payment directory
     private static final byte[] PPSE_NAME = {
             0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31
     };
@@ -80,15 +85,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private NfcAdapter nfcAdapter;
 
-    private TextView txtReaderStatus;
-    private TextView txtReaderPan;
-    private TextView txtReaderExpiry;
-    private TextView txtReaderService;
-    private TextView txtReaderDisc;
-    private TextView txtReaderTrack2;
-    private TextView txtReaderAid;
+    private TextView txtReaderStatus, txtReaderPan, txtReaderExpiry, txtReaderService,
+            txtReaderDisc, txtReaderTrack2, txtReaderAid;
 
-    private int cardIndex = 0;
     private int capturedRecords = 0;
 
     private String lastPan = "";
@@ -99,56 +98,36 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private String lastAid = "";
     private String lastArqc = "";
     private String lastIad = "";
+    private String lastPsn = "";
+    private String lastAtc = "";
+    private String lastAip = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_reader);
 
-        cardIndex = getIntent().getIntExtra(EXTRA_CARD_INDEX, 0);
+        txtReaderStatus = findViewById(R.id.txtReaderStatus);
+        txtReaderPan = findViewById(R.id.txtReaderPan);
+        txtReaderExpiry = findViewById(R.id.txtReaderExpiry);
+        txtReaderService = findViewById(R.id.txtReaderService);
+        txtReaderDisc = findViewById(R.id.txtReaderDisc);
+        txtReaderTrack2 = findViewById(R.id.txtReaderTrack2);
+        txtReaderAid = findViewById(R.id.txtReaderAid);
 
-        txtReaderStatus = (TextView) findViewById(R.id.txtReaderStatus);
-        txtReaderPan = (TextView) findViewById(R.id.txtReaderPan);
-        txtReaderExpiry = (TextView) findViewById(R.id.txtReaderExpiry);
-        txtReaderService = (TextView) findViewById(R.id.txtReaderService);
-        txtReaderDisc = (TextView) findViewById(R.id.txtReaderDisc);
-        txtReaderTrack2 = (TextView) findViewById(R.id.txtReaderTrack2);
-        txtReaderAid = (TextView) findViewById(R.id.txtReaderAid);
-
-        Button btnCancelReader = (Button) findViewById(R.id.btnCancelReader);
-        Button btnCopyReader = (Button) findViewById(R.id.btnCopyReader);
-        Button btnUseCard = (Button) findViewById(R.id.btnUseCard);
+        Button btnCancelReader = findViewById(R.id.btnCancelReader);
+        Button btnCopyReader = findViewById(R.id.btnCopyReader);
+        Button btnUseCard = findViewById(R.id.btnUseCard);
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this);
 
-        btnCancelReader.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                finish();
-            }
+        btnCancelReader.setOnClickListener(v -> finish());
+        btnCopyReader.setOnClickListener(v -> copyEverything());
+        btnCopyReader.setOnLongClickListener(v -> {
+            startActivity(new Intent(ReaderActivity.this, CaptureActivity.class));
+            return true;
         });
-
-        btnCopyReader.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                copyEverything();
-            }
-        });
-
-        btnCopyReader.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                startActivity(new Intent(ReaderActivity.this, CaptureActivity.class));
-                return true;
-            }
-        });
-
-        btnUseCard.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                useCard();
-            }
-        });
+        btnUseCard.setOnClickListener(v -> useCard());
 
         clearFields();
 
@@ -162,31 +141,25 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     }
 
     private void restartDiscovery() {
-        handler.post(new Runnable() {
-            @Override
-            public void run() {
-                if (nfcAdapter == null) return;
-                nfcAdapter.disableReaderMode(ReaderActivity.this);
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (nfcAdapter != null) {
-                            nfcAdapter.enableReaderMode(ReaderActivity.this, ReaderActivity.this,
-                                    NfcAdapter.FLAG_READER_NFC_A
-                                            | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
-                                            | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
-                                    null);
-                        }
-                    }
-                }, 350);
-            }
+        handler.post(() -> {
+            if (nfcAdapter == null) return;
+            nfcAdapter.disableReaderMode(ReaderActivity.this);
+            handler.postDelayed(() -> {
+                if (nfcAdapter != null) {
+                    nfcAdapter.enableReaderMode(ReaderActivity.this, ReaderActivity.this,
+                            NfcAdapter.FLAG_READER_NFC_A
+                                    | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
+                                    | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                            null);
+                }
+            }, 350);
         });
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (nfcAdapter != null) {
+        if (nfcAdapter != null && nfcAdapter.isEnabled()) {
             nfcAdapter.enableReaderMode(
                     this, this,
                     NfcAdapter.FLAG_READER_NFC_A
@@ -199,12 +172,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     @Override
     protected void onPause() {
         super.onPause();
-        if (nfcAdapter != null) {
-            nfcAdapter.disableReaderMode(this);
-        }
+        if (nfcAdapter != null) nfcAdapter.disableReaderMode(this);
     }
 
-    // ---------- raw capture ----------
+    // ---------- raw capture (staging area, MainActivity namespaces it) ----------
 
     private SharedPreferences prefs() {
         return getSharedPreferences("hce_card", MODE_PRIVATE);
@@ -227,11 +198,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         e.apply();
     }
 
-    // runs on a background thread
     @Override
     public void onTagDiscovered(Tag tag) {
-        if (done) return;
-        if (reading) return;
+        if (done || reading) return;
         reading = true;
         attempts++;
         log("-- read attempt " + attempts);
@@ -254,7 +223,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
             List<byte[]> pool = new ArrayList<>();
-            // bring back anything earlier attempts already captured
             for (String k : prefs().getAll().keySet()) {
                 if (k.startsWith("cap_rec") || k.startsWith("cap_raw")) {
                     String v = prefs().getString(k, "");
@@ -269,7 +237,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             int expected = 0;
             String aid = null;
 
-            // 1. ask the card for its payment directory
             byte[] ppse = transceive(isoDep, selectByName(PPSE_NAME));
             if (ppse != null) {
                 pool.add(ppse);
@@ -287,7 +254,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
-            // 2. fall back to well known application ids
             if (aid == null) {
                 for (String candidate : FALLBACK_AIDS) {
                     byte[] fci = transceive(isoDep, selectByName(hexToBytes(candidate)));
@@ -308,18 +274,20 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 aid = prefs().getString("cap_aid", "");
             }
 
-            // 3. start a transaction and read every record the card points at
             byte[] pdol = firstTag(pool, 0x9F38);
             byte[] gpo = transceive(isoDep, gpoCommand(pdol));
             if (gpo != null) {
                 pool.add(gpo);
                 saveRaw("rawgpo", gpo);
 
+                byte[] aip = firstTag(gpo, 0x82);
+                if (aip != null) lastAip = bytesToHex(aip);
+
                 byte[] afl = firstTag(gpo, 0x94);
                 if (afl != null) {
                     for (int i = 0; i + 3 < afl.length; i += 4) {
                         int sfi = (afl[i] & 0xFF) >> 3;
-                        int firstRecord = (afl[i + 1] & 0xFF);
+                        int firstRecord = afl[i + 1] & 0xFF;
                         int recordCount = afl[i + 2] & 0xFF;
                         for (int record = firstRecord; record < firstRecord + recordCount; record++) {
                             byte[] data = transceive(isoDep, readRecord(sfi, record));
@@ -344,7 +312,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
-            // 3b. ask the card to sign a transaction (optional - never fail the whole read)
+            // optional: ask the card to sign, and harvest the ATC / ARQC / IAD
             try {
                 byte[] cdol = firstTag(pool, 0x8C);
                 if (cdol != null) {
@@ -359,6 +327,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                                 lastIad = bytesToHex(Arrays.copyOfRange(payload, 9, payload.length));
                             }
                         }
+                        byte[] atcTag = firstTag(genAc, 0x9F36);
+                        if (atcTag != null) lastAtc = bytesToHex(atcTag);
                     }
                 }
             } catch (IOException e) {
@@ -366,14 +336,14 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
             log("STEP4 pool=" + pool.size() + " stored=" + capturedRecords + "/" + expected);
-            // 4. pull the fields out of everything we collected
+
             String pan = digitsOrEmpty(firstTag(pool, 0x5A));
             String expiry = digitsOrEmpty(firstTag(pool, 0x5F24));
             String service = digitsOrEmpty(firstTag(pool, 0x5F30));
             String track2 = digitsOrEmpty(firstTag(pool, 0x57));
+            String psn = digitsOrEmpty(firstTag(pool, 0x5F34));
             String disc = "";
 
-            // track 2 also carries the discretionary data
             int separator = track2.indexOf('D');
             if (separator > 0) {
                 if (pan.isEmpty()) pan = track2.substring(0, separator);
@@ -388,12 +358,21 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
+            // keep expiry as YYMM - that is what the emulator expects
+            if (expiry.length() > 4) expiry = expiry.substring(0, 4);
+            if (psn.isEmpty()) psn = "00";
+            if (psn.length() > 2) psn = psn.substring(0, 2);
+
+            lastPsn = psn;
+
             saveText("pan", pan);
             saveText("expiry", expiry);
             saveText("service", service);
             saveText("track2", track2);
             saveText("discretionary", disc);
             saveText("aid", aid);
+            saveText("psn", psn);
+            if (!lastIad.isEmpty()) saveText("iad", lastIad);
 
             vibrate();
 
@@ -408,8 +387,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
         } catch (Exception e) {
-          log("FAILED: " + e);
-          restartDiscovery();
+            log("FAILED: " + e);
+            restartDiscovery();
         } finally {
             reading = false;
             try { isoDep.close(); } catch (IOException ignored) { }
@@ -428,16 +407,12 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     }
 
     private void setStatus(final String message) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                txtReaderStatus.setText(message);
-            }
-        });
+        runOnUiThread(() -> txtReaderStatus.setText(message));
     }
 
-    private void showResult(final String status, final String pan, final String expiry, final String service,
-                            final String disc, final String track2, final String aid) {
+    private void showResult(final String status, final String pan, final String expiry,
+                            final String service, final String disc, final String track2,
+                            final String aid) {
         log("RESULT: " + status);
         lastPan = pan;
         lastExpiry = expiry;
@@ -445,17 +420,14 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         lastDisc = disc;
         lastTrack2 = track2;
         lastAid = aid;
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                txtReaderStatus.setText(status);
-                txtReaderPan.setText(emptyToDash(pan));
-                txtReaderExpiry.setText(emptyToDash(expiry));
-                txtReaderService.setText(emptyToDash(service));
-                txtReaderDisc.setText(emptyToDash(disc));
-                txtReaderTrack2.setText(emptyToDash(track2));
-                txtReaderAid.setText(emptyToDash(aid));
-            }
+        runOnUiThread(() -> {
+            txtReaderStatus.setText(status);
+            txtReaderPan.setText(emptyToDash(pan));
+            txtReaderExpiry.setText(emptyToDash(expiry));
+            txtReaderService.setText(emptyToDash(service));
+            txtReaderDisc.setText(emptyToDash(disc));
+            txtReaderTrack2.setText(emptyToDash(track2));
+            txtReaderAid.setText(emptyToDash(aid));
         });
     }
 
@@ -465,8 +437,11 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 + "\nSERVICE CODE: " + emptyToDash(lastService)
                 + "\nDISCRETIONARY DATA: " + emptyToDash(lastDisc)
                 + "\nTRACK 2: " + emptyToDash(lastTrack2)
+                + "\nPAN SEQ: " + emptyToDash(lastPsn)
                 + "\nARQC / 9F26: " + emptyToDash(lastArqc)
                 + "\nIAD / 9F10: " + emptyToDash(lastIad)
+                + "\nATC / 9F36: " + emptyToDash(lastAtc)
+                + "\nAIP / 82: " + emptyToDash(lastAip)
                 + "\nAID: " + emptyToDash(lastAid)
                 + "\n\nLOG:\n" + logBuf.toString();
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -488,14 +463,18 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         result.putExtra(EXTRA_DISC, lastDisc);
         result.putExtra(EXTRA_TRACK2, lastTrack2);
         result.putExtra(EXTRA_AID, lastAid);
+        result.putExtra(EXTRA_PSN, lastPsn);
+        result.putExtra(EXTRA_IAD, lastIad);
+        result.putExtra(EXTRA_ATC, lastAtc);
+        result.putExtra(EXTRA_AIP, lastAip);
         setResult(RESULT_OK, result);
         finish();
     }
 
     private void vibrate() {
         try {
-            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-            if (vibrator != null) vibrator.vibrate(150);
+            Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (v != null) v.vibrate(150);
         } catch (Exception ignored) { }
     }
 
@@ -539,12 +518,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             int sw2 = response[response.length - 1] & 0xFF;
             out.write(response, 0, response.length - 2);
 
-            // the card has more data waiting
             if (sw1 == 0x61) {
                 response = isoDep.transceive(new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, (byte) sw2});
                 continue;
             }
-            // wrong length - retry with the length the card asked for
             if (sw1 == 0x6C) {
                 byte[] retry = command.clone();
                 retry[retry.length - 1] = (byte) sw2;
@@ -554,7 +531,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             if (sw1 == 0x90 && sw2 == 0x00) {
                 return out.toByteArray();
             }
-            return null;
+            // return the payload anyway - the caller can judge the status
+            return out.size() > 0 ? out.toByteArray() : null;
         }
     }
 
@@ -585,18 +563,21 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         return command;
     }
 
-    // answer the terminal data the card asked for in its PDOL
     private byte[] genAcCommand(byte[] cdol) {
         byte[] data = buildPdolData(cdol == null ? new byte[0] : cdol);
         byte[] command = new byte[6 + data.length];
         command[0] = (byte) 0x80;
         command[1] = (byte) 0xAE;
-        command[2] = (byte) 0x80;   // 0x80 = ARQC, go online
+        command[2] = (byte) 0x80;   // ask for ARQC
         command[3] = 0x00;
         command[4] = (byte) data.length;
         System.arraycopy(data, 0, command, 5, data.length);
         command[command.length - 1] = 0x00;
         return command;
+    }
+
+    private static byte bcd(int v) {
+        return (byte) (((v / 10) << 4) | (v % 10));
     }
 
     private byte[] buildPdolData(byte[] pdol) {
@@ -626,9 +607,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 case 0x9A: {
                     Calendar c = Calendar.getInstance();
                     if (len >= 3) {
-                        value[0] = (byte) (c.get(Calendar.YEAR) % 100);
-                        value[1] = (byte) (c.get(Calendar.MONTH) + 1);
-                        value[2] = (byte) c.get(Calendar.DAY_OF_MONTH);
+                        value[0] = bcd(c.get(Calendar.YEAR) % 100);
+                        value[1] = bcd(c.get(Calendar.MONTH) + 1);
+                        value[2] = bcd(c.get(Calendar.DAY_OF_MONTH));
                     }
                     break;
                 }
@@ -636,15 +617,12 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                     if (len >= 1) value[0] = 0x00;
                     break;
                 case 0x9F66:
-                    // terminal transaction qualifiers - contactless EMV mode, ODA, signature
                     if (len >= 1) value[0] = 0x76;
                     break;
                 case 0x9F35:
-                    // terminal type - merchant attended, online capable
                     if (len >= 1) value[0] = 0x22;
                     break;
                 case 0x9F37: {
-                    // unpredictable number
                     long n = System.nanoTime();
                     for (int k = len - 1; k >= 0; k--) { value[k] = (byte) n; n >>= 8; }
                     break;
@@ -664,6 +642,11 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     // ---------- TLV helpers ----------
 
     private void collectTags(byte[] data, int wanted, List<byte[]> out) {
+        collectTags(data, wanted, out, 0);
+    }
+
+    private void collectTags(byte[] data, int wanted, List<byte[]> out, int depth) {
+        if (depth > 8) return;
         int i = 0;
         while (i < data.length) {
             int tag = data[i++] & 0xFF;
@@ -685,7 +668,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             byte[] value = new byte[length];
             System.arraycopy(data, i, value, 0, length);
             if (tag == wanted) out.add(value);
-            if (constructed) collectTags(value, wanted, out);
+            if (constructed) collectTags(value, wanted, out, depth + 1);
             i += length;
         }
     }
@@ -734,9 +717,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private static String bytesToHex(byte[] data) {
         StringBuilder sb = new StringBuilder();
-        for (byte b : data) {
-            sb.append(String.format("%02X", b & 0xFF));
-        }
+        for (byte b : data) sb.append(String.format("%02X", b & 0xFF));
         return sb.toString();
     }
 }
