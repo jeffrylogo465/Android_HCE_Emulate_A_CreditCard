@@ -12,7 +12,6 @@ import android.nfc.tech.IsoDep;
 import android.os.Bundle;
 import android.os.Vibrator;
 import android.util.Log;
-import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -35,21 +34,30 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private void log(String s) {
         Log.d(TAG, s);
+        final String text;
         synchronized (logBuf) {
             logBuf.append(s).append('\n');
             if (logBuf.length() > 4000) logBuf.delete(0, 2000);
+            text = logBuf.toString();
         }
         if (done) return;
-        String text = logBuf.toString();
-        int cut = text.lastIndexOf('\n', Math.max(0, text.length() - 240));
-        if (cut > 0) text = text.substring(cut + 1);
-        final String shown = text;
+        String shown = text;
+        int cut = shown.lastIndexOf('\n', Math.max(0, shown.length() - 240));
+        if (cut > 0) shown = shown.substring(cut + 1);
+        final String finalShown = shown;
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (!done) txtReaderStatus.setText(shown);
+                if (!done) txtReaderStatus.setText(finalShown);
             }
         });
+    }
+
+    /** Safe snapshot of the log buffer from any thread. */
+    private String logText() {
+        synchronized (logBuf) {
+            return logBuf.toString();
+        }
     }
 
     public static final String EXTRA_PAN = "extra_pan";
@@ -62,6 +70,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     public static final String EXTRA_IAD = "extra_iad";
     public static final String EXTRA_ATC = "extra_atc";
     public static final String EXTRA_AIP = "extra_aip";
+    /** Target wallet slot. The capture itself is staged, so this is informational. */
+    public static final String EXTRA_CARD_INDEX = "extra_card_index";
 
     private static final byte[] PPSE_NAME = {
             0x32, 0x50, 0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31
@@ -443,7 +453,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 + "\nATC / 9F36: " + emptyToDash(lastAtc)
                 + "\nAIP / 82: " + emptyToDash(lastAip)
                 + "\nAID: " + emptyToDash(lastAid)
-                + "\n\nLOG:\n" + logBuf.toString();
+                + "\n\nLOG:\n" + logText();
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard != null) {
             clipboard.setPrimaryClip(ClipData.newPlainText("card data", text));
