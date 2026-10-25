@@ -44,19 +44,15 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-            @Override
-            public void uncaughtException(Thread t, Throwable e) {
-                String s = android.util.Log.getStackTraceString(e);
-                try {
-                    android.content.ClipboardManager cm = (android.content.ClipboardManager)
-                            getSystemService(CLIPBOARD_SERVICE);
-                    cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", s));
-                } catch (Exception ignored) { }
-                try { Thread.sleep(400); } catch (Exception ignored) { }
-                android.os.Process.killProcess(android.os.Process.myPid());
-                System.exit(1);
-            }
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            String s = android.util.Log.getStackTraceString(e);
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", s));
+            } catch (Exception ignored) { }
+            try { Thread.sleep(400); } catch (Exception ignored) { }
+            android.os.Process.killProcess(android.os.Process.myPid());
         });
 
         setContentView(R.layout.activity_main);
@@ -93,7 +89,7 @@ public class MainActivity extends AppCompatActivity {
         snapHelper.attachToRecyclerView(pager);
 
         loadAll();
-        bindCard(Math.min(prefs.getInt("selected", 0), cards.size() - 1));
+        bindCard(Math.min(Math.max(prefs.getInt("selected", 0), 0), cards.size() - 1));
         pager.post(this::applyTransforms);
 
         pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
@@ -140,8 +136,6 @@ public class MainActivity extends AppCompatActivity {
         for (EditText f : fields) f.addTextChangedListener(watcher);
     }
 
-    // ---------- card graphic effect ----------
-
     private void applyTransforms() {
         int centre = pager.getWidth() / 2;
         if (centre == 0) return;
@@ -170,7 +164,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadAll() {
         cards.clear();
-        int n = prefs.getInt("card_count", 0);
+        int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
         for (int i = 0; i < n; i++) {
             CardAdapter.CardModel c = new CardAdapter.CardModel();
             c.label = prefs.getString(key(i, "label"), "");
@@ -227,7 +221,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "3801"));
+        etAip.setText(prefs.getString(key(i, "aip"), "1880"));
         etAfl.setText(prefs.getString(key(i, "afl"), "08010100"));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -249,9 +243,7 @@ public class MainActivity extends AppCompatActivity {
     private void startReader() {
         collect();
         cloneSource = current;
-        Intent i = new Intent(this, ReaderActivity.class);
-        i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
-        startActivityForResult(i, REQ_CLONE);
+        startActivityForResult(new Intent(this, ReaderActivity.class), REQ_CLONE);
     }
 
     private void onSave() {
@@ -330,8 +322,13 @@ public class MainActivity extends AppCompatActivity {
         String disc = nz(data.getStringExtra(ReaderActivity.EXTRA_DISC));
         String aid = nz(data.getStringExtra(ReaderActivity.EXTRA_AID)).toUpperCase();
         String track2 = normaliseTrack2(data.getStringExtra(ReaderActivity.EXTRA_TRACK2));
+        String psn = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_PSN)));
+        String iad = nz(data.getStringExtra(ReaderActivity.EXTRA_IAD)).toUpperCase();
+        String atc = nz(data.getStringExtra(ReaderActivity.EXTRA_ATC)).toUpperCase();
+        String aip = nz(data.getStringExtra(ReaderActivity.EXTRA_AIP)).toUpperCase();
 
         if (expiry.length() > 4) expiry = expiry.substring(0, 4);
+        if (psn.length() > 2) psn = psn.substring(0, 2);
 
         if (pan.isEmpty() && !track2.isEmpty()) {
             int d = track2.indexOf('D');
@@ -367,8 +364,6 @@ public class MainActivity extends AppCompatActivity {
             current = cards.size() - 1;
         }
 
-        if (cloneSource != current) copyCapture(cloneSource, current);
-
         binding = true;
         etLabel.setText(pan.length() >= 4 ? "CLONE " + pan.substring(pan.length() - 4) : "CLONE");
         etPan.setText(pan);
@@ -378,9 +373,15 @@ public class MainActivity extends AppCompatActivity {
         etAid.setText(aid);
         etMsd.setText("1");
         etDiscretionary.setText(track2.isEmpty() ? disc : "");
+        if (!iad.isEmpty()) etIad.setText(iad);
+        if (!aip.isEmpty()) etAip.setText(aip);
+        if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
         binding = false;
 
         collect();
+        prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
+        copyStagingToCard(current);
+
         adapter.notifyItemChanged(current);
         pager.smoothScrollToPosition(current);
         prefs.edit().putInt("selected", current).apply();
@@ -388,13 +389,27 @@ public class MainActivity extends AppCompatActivity {
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
     }
 
-    private void copyCapture(int from, int to) {
+    /** Start the clone's ATC just above the value the real card last used. */
+    private static String nextAtc(String hexAtc) {
+        try {
+            int v = Integer.parseInt(hexAtc.replaceAll("[^0-9A-Fa-f]", ""), 16);
+            return String.format("%04X", (v + 1) & 0xFFFF);
+        } catch (Exception e) {
+            return "001B";
+        }
+    }
+
+    /**
+     * The reader writes its capture into a staging area under "cap_". Move it
+     * onto the wallet card that was just written, so two cloned cards cannot
+     * overwrite each other and the emulator always MACs the right PAN.
+     */
+    private void copyStagingToCard(int index) {
         SharedPreferences.Editor e = prefs.edit();
-        String src = "card" + from + "_";
-        String dst = "card" + to + "_";
+        String dst = key(index, "cap_");
         for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(src + "raw") || k.startsWith(src + "rec")) {
-                e.putString(dst + k.substring(src.length()), prefs.getString(k, ""));
+            if (k.startsWith("cap_")) {
+                e.putString(dst + k.substring(4), prefs.getString(k, ""));
             }
         }
         e.apply();
