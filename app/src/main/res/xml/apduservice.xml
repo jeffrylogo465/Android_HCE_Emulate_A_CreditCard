@@ -27,7 +27,7 @@
         <aid-filter android:name="A0000000250104" />
         <aid-filter android:name="A0000000250001" />
 
-        <!-- Discover / Diners - RID is A000000152 -->
+        <!-- Discover / Diners - spans RID A000000152 and A000000015 -->
         <aid-filter android:name="A0000001523010" />
         <aid-filter android:name="A0000001524010" />
         <aid-filter android:name="A0000001521010" />
@@ -56,6 +56,8 @@
         <!-- Interac / Eftpos / Girocard / others -->
         <aid-filter android:name="A0000002771010" />
         <aid-filter android:name="A0000003845010" />
+        <aid-filter android:name="A00000038410" />
+        <aid-filter android:name="F0010203040506" />
         <aid-filter android:name="A0000003591010" />
         <aid-filter android:name="A0000003591010028001" />
         <aid-filter android:name="A00000000386980701" />
