@@ -27,7 +27,14 @@
         <aid-filter android:name="A0000000250104" />
         <aid-filter android:name="A0000000250001" />
 
-        <!-- Discover / Diners -->
+        <!-- Discover / Diners - RID is A000000152 -->
+        <aid-filter android:name="A0000001523010" />
+        <aid-filter android:name="A0000001524010" />
+        <aid-filter android:name="A0000001521010" />
+        <aid-filter android:name="A0000001522010" />
+        <aid-filter android:name="A0000001522001" />
+        <aid-filter android:name="A0000001522300" />
+        <aid-filter android:name="A0000001522400" />
         <aid-filter android:name="A0000000152001" />
         <aid-filter android:name="A0000000152010" />
         <aid-filter android:name="A0000000152020" />
