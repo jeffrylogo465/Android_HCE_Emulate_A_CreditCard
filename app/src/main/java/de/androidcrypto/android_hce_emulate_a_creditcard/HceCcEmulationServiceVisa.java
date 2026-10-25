@@ -46,23 +46,21 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte CID_ARQC = (byte) 0x80;   // go online
 
     /**
-     * true  - always answer TC. The card says "approved, do not call the host",
-     *         so our (unverifiable) ARQC never gets judged. Needs a small amount
-     *         and a terminal that is not configured forced-online.
-     * false - mirror what the terminal asked for. Set false once you have the
-     *         issuer MK-AC and want the online path to be real.
-     */
-    private static final boolean FORCE_OFFLINE_TC = true;
-
-    /**
-     * true  - always answer ARQC, so the terminal must dial the host even if it
-     *         wanted to approve offline. Only takes effect in EMV mode (MSD=0) -
-     *         magstripe mode never sends a GENERATE AC at all.
-     * false - fall through to FORCE_OFFLINE_TC / mirror behaviour.
-     *
-     * Inert while MSD=1, so it is safe to leave on.
+     * true  - when we actually hold a matching MK-AC, answer ARQC and let the
+     *         issuer judge a cryptogram that is real. Without a key the ARQC
+     *         would be eight zero bytes, which the host almost always rejects,
+     *         so in that case we fall through to FORCE_OFFLINE_TC instead.
+     * false - always fall through to the flag below.
      */
     private static final boolean FORCE_ONLINE_ARQC = true;
+
+    /**
+     * true  - answer TC. The card says "approved, do not call the host", so an
+     *         unverifiable ARQC never gets judged. Needs a small amount and a
+     *         terminal that is not configured forced-online.
+     * false - mirror what the terminal asked for.
+     */
+    private static final boolean FORCE_OFFLINE_TC = true;
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -191,6 +189,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private byte[] aipForMac() {
         if (txnAip != null) return txnAip;
         return hex(p("aip", DEFAULT_AIP));
+    }
+
+    /** True when a usable MK-AC is set on the selected card. */
+    private boolean haveKey() {
+        return p("mkac", "").replaceAll("[^0-9A-Fa-f]", "").length() >= 32;
     }
 
     // ---------- captured raw data (namespaced per wallet card) ----------
@@ -522,11 +525,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         // 0x80 = ARQC wanted, 0x40 = TC wanted, 0x00 = AAC wanted.
         // These are the same encoding, but they are two different fields - do
         // not assume the terminal wants back the byte it just sent.
+        //
+        // Going online is only worth it when the ARQC is genuine. Without a key
+        // it is eight zero bytes, so answer TC and let the terminal approve
+        // offline rather than handing the host a cryptogram it will reject.
         byte cid;
-        if (FORCE_ONLINE_ARQC) {
-            cid = CID_ARQC;                              // force the terminal online
+        if (FORCE_ONLINE_ARQC && haveKey()) {
+            cid = CID_ARQC;                              // real ARQC - let the issuer judge
         } else if (FORCE_OFFLINE_TC) {
-            cid = CID_TC;                                // approve offline, nobody judges
+            cid = CID_TC;                                // no key - approve offline
         } else if (requested == 0x80) {
             cid = CID_ARQC;
         } else if (requested == 0x40) {
@@ -562,8 +569,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * MAC input is CDOL data, then AIP, then ATC. If the issuer declines with a
-     * MAC error, this ordering is the first thing to flip.
+     * MAC input is CDOL data, then AIP, then ATC. keyvar bit 1 flips that order
+     * and bit 0 picks the diversification option - the key scan sets keyvar when
+     * it finds a match, so the found key is used exactly the way it verified.
      */
     private byte[] computeAc(String atc, byte[] cdol) {
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -571,10 +579,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             tap("!! no MK-AC set - ARQC will be all zeros");
             return new byte[8];
         }
+        int variant = 0;
         try {
-            byte[] macIn = cat(cdol, aipForMac(), hex(atc));
+            variant = Integer.parseInt(p("keyvar", "0").replaceAll("[^0-9]", ""));
+        } catch (Exception ignored) { }
+        try {
+            byte[] macIn = ((variant & 2) != 0)
+                    ? cat(aipForMac(), hex(atc), cdol)
+                    : cat(cdol, aipForMac(), hex(atc));
             return EmvCrypto.arqc(mk, p("pan", "4111111111111111"),
-                    p("psn", "00"), atc, macIn);
+                    p("psn", "00"), atc, macIn, variant & 1);
         } catch (Exception e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
