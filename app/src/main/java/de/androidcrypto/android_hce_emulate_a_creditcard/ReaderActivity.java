@@ -28,6 +28,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private static final String TAG = "READER";
     private final StringBuilder logBuf = new StringBuilder();
     private volatile boolean done = false;
+    private volatile boolean reading = false;
+    private int attempts = 0;
     private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     private void log(String s) {
@@ -162,13 +164,12 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                         if (nfcAdapter != null) {
                             nfcAdapter.enableReaderMode(ReaderActivity.this, ReaderActivity.this,
                                     NfcAdapter.FLAG_READER_NFC_A
-                                            | NfcAdapter.FLAG_READER_NFC_B
                                             | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
                                             | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
                                     null);
                         }
                     }
-                }, 400);
+                }, 350);
             }
         });
     }
@@ -180,7 +181,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             nfcAdapter.enableReaderMode(
                     this, this,
                     NfcAdapter.FLAG_READER_NFC_A
-                            | NfcAdapter.FLAG_READER_NFC_B
                             | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
                             | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
                     null);
@@ -219,15 +219,21 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     @Override
     public void onTagDiscovered(Tag tag) {
         if (done) return;
+        if (reading) return;
+        reading = true;
+        attempts++;
+        log("-- read attempt " + attempts);
+
         IsoDep isoDep = IsoDep.get(tag);
         if (isoDep == null) {
+            reading = false;
             setStatus("Found a tag, but it is not an ISO-DEP card");
             return;
         }
         try {
             isoDep.connect();
             isoDep.setTimeout(5000);
-            try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+            try { Thread.sleep(150); } catch (InterruptedException ignored) { }
             log("connected, maxTransceiveLength=" + isoDep.getMaxTransceiveLength());
 
             clearRaw();
@@ -360,6 +366,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
           log("FAILED: " + e);
           restartDiscovery();
         } finally {
+            reading = false;
             try { isoDep.close(); } catch (IOException ignored) { }
         }
     }
@@ -452,17 +459,16 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
         IOException last = null;
-        for (int attempt = 1; attempt <= 4; attempt++) {
+        for (int attempt = 1; attempt <= 3; attempt++) {
             try {
                 return transceiveOnce(isoDep, command);
             } catch (IOException e) {
                 last = e;
-                log("!! lost the card, retrying (" + attempt + "/4)");
-                try { Thread.sleep(150); } catch (InterruptedException ignored) { }
+                try { Thread.sleep(120); } catch (InterruptedException ignored) { }
                 try {
                     if (!isoDep.isConnected()) isoDep.connect();
                 } catch (Exception e2) {
-                    log("!! tag went stale - letting it re-discover");
+                    log("!! tag went stale - recycling the field");
                     throw last;
                 }
             }
@@ -476,7 +482,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         try {
             response = isoDep.transceive(command);
         } catch (IOException e) {
-            log("!! transceive threw: " + e);
+            log("!! " + e);
             throw e;
         }
         log("<< " + bytesToHex(response));
