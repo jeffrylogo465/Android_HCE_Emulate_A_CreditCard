@@ -59,10 +59,19 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     };
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010",   // Visa
+            "A0000000032010",   // Visa Electron
             "A0000000041010",   // Mastercard
-            "A0000000651010",   // JCB
+            "A0000000043060",   // Maestro
+            "A0000000046000",   // Cirrus
             "A00000002501",     // American Express
-            "F0010203040506"    // common HCE test application
+            "A0000000152001",   // Discover
+            "A0000001523010",   // Diners
+            "A0000000651010",   // JCB
+            "A000000333010101", // UnionPay
+            "A0000002771010",   // Interac
+            "A00000038410",     // Eftpos
+            "A0000003591010",   // Girocard
+            "F0010203040506"    // generic HCE test application
     };
 
     private NfcAdapter nfcAdapter;
@@ -205,6 +214,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             byte[] ppse = transceive(isoDep, selectByName(PPSE_NAME));
             if (ppse != null) {
                 pool.add(ppse);
+                saveRaw("rawppse", ppse);
                 List<byte[]> aids = new ArrayList<>();
                 collectTags(ppse, 0x4F, aids);
                 for (byte[] candidate : aids) {
@@ -338,282 +348,4 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         txtReaderAid.setText("-");
     }
 
-    private void setStatus(final String message) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                txtReaderStatus.setText(message);
-            }
-        });
-    }
-
-    private void showResult(final String status, final String pan, final String expiry, final String service,
-                            final String disc, final String track2, final String aid) {
-        log("RESULT: " + status);
-        done = true;
-        lastPan = pan;
-        lastExpiry = expiry;
-        lastService = service;
-        lastDisc = disc;
-        lastTrack2 = track2;
-        lastAid = aid;
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                txtReaderStatus.setText(status);
-                txtReaderPan.setText(emptyToDash(pan));
-                txtReaderExpiry.setText(emptyToDash(expiry));
-                txtReaderService.setText(emptyToDash(service));
-                txtReaderDisc.setText(emptyToDash(disc));
-                txtReaderTrack2.setText(emptyToDash(track2));
-                txtReaderAid.setText(emptyToDash(aid));
-            }
-        });
-    }
-
-    private void copyEverything() {
-        String text = "CARD NUMBER: " + emptyToDash(lastPan)
-                + "\nEXPIRY: " + emptyToDash(lastExpiry)
-                + "\nSERVICE CODE: " + emptyToDash(lastService)
-                + "\nDISCRETIONARY DATA: " + emptyToDash(lastDisc)
-                + "\nTRACK 2: " + emptyToDash(lastTrack2)
-                + "\nARQC / 9F26: " + emptyToDash(lastArqc)
-                + "\nIAD / 9F10: " + emptyToDash(lastIad)
-                + "\nAID: " + emptyToDash(lastAid);
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard != null) {
-            clipboard.setPrimaryClip(ClipData.newPlainText("card data", text));
-        }
-        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
-    }
-
-    private void useCard() {
-        if (lastPan.isEmpty()) {
-            Toast.makeText(this, "Read a card first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        Intent result = new Intent();
-        result.putExtra(EXTRA_PAN, lastPan);
-        result.putExtra(EXTRA_EXPIRY, lastExpiry);
-        result.putExtra(EXTRA_SERVICE, lastService);
-        result.putExtra(EXTRA_DISC, lastDisc);
-        result.putExtra(EXTRA_TRACK2, lastTrack2);
-        result.putExtra(EXTRA_AID, lastAid);
-        setResult(RESULT_OK, result);
-        finish();
-    }
-
-    private void vibrate() {
-        try {
-            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-            if (vibrator != null) vibrator.vibrate(150);
-        } catch (Exception ignored) { }
-    }
-
-    // ---------- APDU helpers ----------
-
-    private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
-        log(">> " + bytesToHex(command));
-        byte[] response;
-        try {
-            response = isoDep.transceive(command);
-        } catch (IOException e) {
-            log("!! transceive threw: " + e);
-            throw e;
-        }
-        log("<< " + bytesToHex(response));
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        while (true) {
-            if (response.length < 2) {
-                return out.size() > 0 ? out.toByteArray() : null;
-            }
-            int sw1 = response[response.length - 2] & 0xFF;
-            int sw2 = response[response.length - 1] & 0xFF;
-            out.write(response, 0, response.length - 2);
-
-            // the card has more data waiting
-            if (sw1 == 0x61) {
-                response = isoDep.transceive(new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, (byte) sw2});
-                continue;
-            }
-            // wrong length - retry with the length the card asked for
-            if (sw1 == 0x6C) {
-                byte[] retry = command.clone();
-                retry[retry.length - 1] = (byte) sw2;
-                response = isoDep.transceive(retry);
-                continue;
-            }
-            if (sw1 == 0x90 && sw2 == 0x00) {
-                return out.toByteArray();
-            }
-            return null;
-        }
-    }
-
-    private byte[] selectByName(byte[] name) {
-        byte[] command = new byte[6 + name.length];
-        command[0] = 0x00;
-        command[1] = (byte) 0xA4;
-        command[2] = 0x04;
-        command[3] = 0x00;
-        command[4] = (byte) name.length;
-        System.arraycopy(name, 0, command, 5, name.length);
-        command[command.length - 1] = 0x00;
-        return command;
-    }
-
-    private byte[] gpoCommand(byte[] pdol) {
-        byte[] data = buildPdolData(pdol == null ? new byte[0] : pdol);
-        byte[] command = new byte[8 + data.length];
-        command[0] = (byte) 0x80;
-        command[1] = (byte) 0xA8;
-        command[2] = 0x00;
-        command[3] = 0x00;
-        command[4] = (byte) (data.length + 2);
-        command[5] = (byte) 0x83;
-        command[6] = (byte) data.length;
-        System.arraycopy(data, 0, command, 7, data.length);
-        command[command.length - 1] = 0x00;
-        return command;
-    }
-
-    // answer the terminal data the card asked for in its PDOL
-    private byte[] genAcCommand(byte[] cdol) {
-        byte[] data = buildPdolData(cdol == null ? new byte[0] : cdol);
-        byte[] command = new byte[6 + data.length];
-        command[0] = (byte) 0x80;
-        command[1] = (byte) 0xAE;
-        command[2] = (byte) 0x80;   // 0x80 = ARQC, go online
-        command[3] = 0x00;
-        command[4] = (byte) data.length;
-        System.arraycopy(data, 0, command, 5, data.length);
-        command[command.length - 1] = 0x00;
-        return command;
-    }
-
-    private byte[] buildPdolData(byte[] pdol) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int i = 0;
-        while (i + 1 < pdol.length) {
-            int tag = pdol[i++] & 0xFF;
-            if ((tag & 0x1F) == 0x1F) {
-                if (i >= pdol.length) break;
-                tag = (tag << 8) | (pdol[i++] & 0xFF);
-            }
-            if (i >= pdol.length) break;
-            int len = pdol[i++] & 0xFF;
-            byte[] value = new byte[len];
-            switch (tag) {
-                case 0x9F02: {
-                    byte[] amount = hexToBytes("000000001000");
-                    System.arraycopy(amount, 0, value, 0, Math.min(len, amount.length));
-                    break;
-                }
-                case 0x9F1A:
-                    if (len >= 2) { value[0] = 0x08; value[1] = 0x40; }
-                    break;
-                case 0x5F2A:
-                    if (len >= 2) { value[0] = 0x08; value[1] = 0x40; }
-                    break;
-                case 0x9A: {
-                    Calendar c = Calendar.getInstance();
-                    if (len >= 3) {
-                        value[0] = (byte) (c.get(Calendar.YEAR) % 100);
-                        value[1] = (byte) (c.get(Calendar.MONTH) + 1);
-                        value[2] = (byte) c.get(Calendar.DAY_OF_MONTH);
-                    }
-                    break;
-                }
-                case 0x9C:
-                    if (len >= 1) value[0] = 0x00;
-                    break;
-                default:
-                    break;
-            }
-            out.write(value, 0, value.length);
-        }
-        return out.toByteArray();
-    }
-
-    private byte[] readRecord(int sfi, int record) {
-        return new byte[]{0x00, (byte) 0xB2, (byte) record, (byte) ((sfi << 3) | 0x04), 0x00};
-    }
-
-    // ---------- TLV helpers ----------
-
-    private void collectTags(byte[] data, int wanted, List<byte[]> out) {
-        int i = 0;
-        while (i < data.length) {
-            int tag = data[i++] & 0xFF;
-            if ((tag & 0x1F) == 0x1F) {
-                if (i >= data.length) break;
-                tag = (tag << 8) | (data[i++] & 0xFF);
-            }
-            if (i >= data.length) break;
-            int length = data[i++] & 0xFF;
-            if ((length & 0x80) != 0) {
-                int n = length & 0x7F;
-                length = 0;
-                for (int k = 0; k < n && i < data.length; k++) {
-                    length = (length << 8) | (data[i++] & 0xFF);
-                }
-            }
-            if (i + length > data.length) break;
-            byte[] value = new byte[length];
-            System.arraycopy(data, i, value, 0, length);
-            if (tag == wanted) out.add(value);
-            if ((tag & 0x20) != 0) collectTags(value, wanted, out);
-            i += length;
-        }
-    }
-
-    private byte[] firstTag(byte[] data, int tag) {
-        List<byte[]> found = new ArrayList<>();
-        collectTags(data, tag, found);
-        return found.isEmpty() ? null : found.get(0);
-    }
-
-    private byte[] firstTag(List<byte[]> pool, int tag) {
-        for (byte[] block : pool) {
-            List<byte[]> found = new ArrayList<>();
-            collectTags(block, tag, found);
-            if (!found.isEmpty()) return found.get(0);
-        }
-        return null;
-    }
-
-    private static String digits(byte[] value) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : value) {
-            int hi = (b >> 4) & 0x0F;
-            int lo = b & 0x0F;
-            if (hi != 0x0F) sb.append(Integer.toHexString(hi));
-            if (lo != 0x0F) sb.append(Integer.toHexString(lo));
-        }
-        return sb.toString().toUpperCase();
-    }
-
-    private static String digitsOrEmpty(byte[] value) {
-        return value == null ? "" : digits(value);
-    }
-
-    private static String emptyToDash(String value) {
-        return (value == null || value.isEmpty()) ? "-" : value;
-    }
-
-    private static byte[] hexToBytes(String hex) {
-        byte[] out = new byte[hex.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
-    }
-
-    private static String bytesToHex(byte[] data) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : data) {
-            sb.append(String.format("%02X", b & 0xFF));
-        }
-        return sb.toString();
-    }
-}
+    private void setStatus(final String
