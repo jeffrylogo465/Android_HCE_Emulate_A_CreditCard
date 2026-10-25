@@ -265,6 +265,17 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             for (String k : prefs().getAll().keySet()) {
                 if (k.startsWith("cap_rec")) capturedRecords++;
             }
+
+            int expected = 0;
+            String gpoHex = prefs().getString("cap_rawgpo", "");
+            if (!gpoHex.isEmpty()) {
+                byte[] gAfl = firstTag(hexToBytes(gpoHex), 0x94);
+                if (gAfl != null) {
+                    for (int i = 0; i + 3 < gAfl.length; i += 4) {
+                        expected += gAfl[i + 2] & 0xFF;
+                    }
+                }
+            }
             String aid = null;
 
             // 1. ask the card for its payment directory
@@ -352,7 +363,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 log("GENERATE AC skipped: " + e);
             }
 
-            log("STEP4 pool=" + pool.size() + " stored=" + capturedRecords);
+            log("STEP4 pool=" + pool.size() + " stored=" + capturedRecords + "/" + expected);
             // 4. pull the fields out of everything we collected
             String pan = digitsOrEmpty(firstTag(pool, 0x5A));
             String expiry = digitsOrEmpty(firstTag(pool, 0x5F24));
@@ -388,11 +399,12 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
             vibrate();
 
-            String tail = " (" + capturedRecords + " records captured)";
+            String tail = " (" + capturedRecords + " of " + expected + " records)";
             if (pan.isEmpty()) {
                 showResult("Card read, but no card number was found" + tail,
                         pan, expiry, service, disc, track2, aid);
             } else {
+                if (expected == 0 || capturedRecords >= expected) done = true;
                 showResult("Card read successfully" + tail,
                         pan, expiry, service, disc, track2, aid);
             }
@@ -429,7 +441,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private void showResult(final String status, final String pan, final String expiry, final String service,
                             final String disc, final String track2, final String aid) {
         log("RESULT: " + status);
-        if (!pan.isEmpty()) done = true;
         lastPan = pan;
         lastExpiry = expiry;
         lastService = service;
