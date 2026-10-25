@@ -1,5 +1,6 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
@@ -24,6 +25,26 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREF = "hce_card";
     private static final int MAX_CARDS = 12;
     private static final int REQ_CLONE = 4711;
+
+    private static final String HINT =
+            "Long-press AID to pick it - long-press TRACK 2 to preview";
+
+    /** Brand -> AID. Stops anyone having to remember one, and stops the
+     *  "empty AID silently becomes Visa" trap. */
+    private static final String[][] AID_PRESETS = {
+            {"Discover / Diners",      "A0000001523010"},
+            {"Discover (legacy RID)",  "A0000000152001"},
+            {"Mastercard",             "A0000000041010"},
+            {"Maestro",                "A0000000043060"},
+            {"Visa",                   "A0000000031010"},
+            {"Visa Electron",          "A0000000032010"},
+            {"American Express",       "A00000002501"},
+            {"JCB",                    "A0000000651010"},
+            {"UnionPay",               "A000000333010101"},
+            {"Interac",                "A0000002771010"},
+            {"Eftpos",                 "A00000038410"},
+            {"Girocard",               "A0000003591010"},
+    };
 
     private SharedPreferences prefs;
     private final List<CardAdapter.CardModel> cards = new ArrayList<>();
@@ -114,12 +135,17 @@ public class MainActivity extends AppCompatActivity {
         });
 
         findViewById(R.id.btnSave).setOnClickListener(v -> onSave());
+        findViewById(R.id.btnSave).setOnLongClickListener(v -> { showPreview(); return true; });
         findViewById(R.id.btnAdd).setOnClickListener(v -> onAdd());
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
             startReader();
             return true;
         });
+
+        // long-press helpers - no layout changes needed
+        etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
+        etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -186,8 +212,9 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "pan"), digits(t(etPan)));
         e.putString(key(i, "expiry"), t(etExpiry));
         e.putString(key(i, "service"), t(etService));
-        e.putString(key(i, "discretionary"), t(etDiscretionary));
-        e.putString(key(i, "track2"), t(etTrack2));
+        e.putString(key(i, "discretionary"), t(etDiscretionary).toUpperCase());
+        // normalise on the way in - '=' is not hex and would be stripped later
+        e.putString(key(i, "track2"), normaliseTrack2(t(etTrack2)));
         e.putString(key(i, "aid"), t(etAid).toUpperCase());
         e.putString(key(i, "aip"), t(etAip).toUpperCase());
         e.putString(key(i, "afl"), t(etAfl).toUpperCase());
@@ -238,6 +265,103 @@ public class MainActivity extends AppCompatActivity {
         txtCount.setText(cards.size() == 1 ? "1 card" : cards.size() + " cards");
     }
 
+    // ---------- AID presets ----------
+
+    private void showAidPicker() {
+        String[] labels = new String[AID_PRESETS.length];
+        for (int i = 0; i < AID_PRESETS.length; i++) {
+            labels[i] = AID_PRESETS[i][0] + "  (" + AID_PRESETS[i][1] + ")";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Which brand is this card?")
+                .setItems(labels, (d, which) -> {
+                    etAid.setText(AID_PRESETS[which][1]);
+                    collect();
+                    txtStatus.setText("AID set to " + AID_PRESETS[which][0]);
+                    Toast.makeText(this, AID_PRESETS[which][0] + " AID set", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ---------- preview ----------
+
+    /** Everything the terminal will actually receive, plus the traps we keep
+     *  falling into. Long-press TRACK 2 or SAVE to see it. */
+    private String previewText() {
+        String pan = digits(t(etPan));
+        String exp = digits(t(etExpiry));
+        String sc = digits(t(etService));
+        String disc = t(etDiscretionary).toUpperCase();
+        String aid = t(etAid).toUpperCase();
+        String msd = t(etMsd).isEmpty() ? "1" : t(etMsd);
+
+        String track2 = normaliseTrack2(t(etTrack2));
+        if (track2.isEmpty() && !pan.isEmpty()) {
+            track2 = pan + "D" + exp + sc + disc;
+        }
+
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("AID  (4F)  : ")
+                .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
+        sb.append("AIP  (82)  : ")
+                .append(t(etAip).isEmpty() ? "1880" : t(etAip).toUpperCase()).append('\n');
+        sb.append("MSD        : ").append("0".equals(msd)
+                ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
+        sb.append('\n');
+
+        sb.append("5A  PAN    : ")
+                .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
+                .append('\n');
+        sb.append("5F24 expiry: ")
+                .append(exp.isEmpty() ? "3112  <-- DEFAULT" : exp).append("00").append('\n');
+        sb.append("57  track2 : ")
+                .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
+
+        // ---- traps ----
+        String trackPan = track2.contains("D")
+                ? track2.substring(0, track2.indexOf('D')) : track2;
+
+        if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
+            sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
+            sb.append("   PAN    : ").append(pan).append('\n');
+            sb.append("   track 2: ").append(trackPan).append('\n');
+        }
+        if (aid.isEmpty()) {
+            sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
+        }
+        if (!"0".equals(msd) && !track2.isEmpty()) {
+            sb.append('\n').append("note: MSD=0 means EMV mode, so the ARQC matters\n");
+        }
+        if (track2.length() % 2 != 0) {
+            sb.append('\n').append("track 2 is odd length - gets an F pad (normal)\n");
+        }
+        if (pan.isEmpty() && track2.isEmpty()) {
+            sb.append('\n').append("nothing filled in yet\n");
+        }
+        return sb.toString();
+    }
+
+    private void showPreview() {
+        new AlertDialog.Builder(this)
+                .setTitle("What the terminal will see")
+                .setMessage(previewText())
+                .setPositiveButton("Close", null)
+                .show();
+    }
+
+    private static String hexOf(String s) {
+        String h = s.toUpperCase().replaceAll("[^0-9A-F]", "");
+        if (h.length() % 2 != 0) h = h + "F";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < h.length(); i += 2) {
+            if (i > 0) sb.append(' ');
+            sb.append(h, i, i + 2);
+        }
+        return sb.toString();
+    }
+
     // ---------- actions ----------
 
     private void startReader() {
@@ -263,6 +387,21 @@ public class MainActivity extends AppCompatActivity {
         etPan.setText(pan);
         collect();
         adapter.notifyItemChanged(current);
+
+        String track2 = normaliseTrack2(t(etTrack2));
+        String trackPan = track2.contains("D")
+                ? track2.substring(0, track2.indexOf('D')) : track2;
+        if (!trackPan.isEmpty() && !trackPan.equals(pan)) {
+            txtStatus.setText("Saved - but PAN and TRACK 2 are different cards");
+            Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (t(etAid).isEmpty()) {
+            txtStatus.setText("Saved - but AID is empty, terminal will pick Visa");
+            Toast.makeText(this, "AID is empty - long-press the AID field", Toast.LENGTH_LONG).show();
+            return;
+        }
+
         txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
         Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
     }
@@ -306,7 +445,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        txtStatus.setText(prefs.getString("lastverdict", ""));
+        String v = prefs.getString("lastverdict", "");
+        txtStatus.setText(v.isEmpty() ? HINT : v);
     }
 
     // ---------- clone from reader ----------
