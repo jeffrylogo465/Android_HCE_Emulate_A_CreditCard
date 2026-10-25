@@ -404,10 +404,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     }
 
     private void vibrate() {
-        Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
-        if (vibrator != null) {
-            vibrator.vibrate(150);
-        }
+        try {
+            Vibrator vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator != null) vibrator.vibrate(150);
+        } catch (Exception ignored) { }
     }
 
     // ---------- APDU helpers ----------
