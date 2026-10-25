@@ -194,6 +194,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     // runs on a background thread
     @Override
     public void onTagDiscovered(Tag tag) {
+        if (done) return;
         IsoDep isoDep = IsoDep.get(tag);
         if (isoDep == null) {
             setStatus("Found a tag, but it is not an ISO-DEP card");
@@ -361,7 +362,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private void showResult(final String status, final String pan, final String expiry, final String service,
                             final String disc, final String track2, final String aid) {
         log("RESULT: " + status);
-        done = true;
+        if (!pan.isEmpty()) done = true;
         lastPan = pan;
         lastExpiry = expiry;
         lastService = service;
