@@ -432,8 +432,13 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             } catch (IOException e) {
                 last = e;
                 log("!! lost the card, retrying (" + attempt + "/4)");
-                try { Thread.sleep(200); } catch (InterruptedException ignored) { }
-                try { if (!isoDep.isConnected()) isoDep.connect(); } catch (IOException ignored) { }
+                try { Thread.sleep(150); } catch (InterruptedException ignored) { }
+                try {
+                    if (!isoDep.isConnected()) isoDep.connect();
+                } catch (Exception e2) {
+                    log("!! tag went stale - letting it re-discover");
+                    throw last;
+                }
             }
         }
         throw last;
