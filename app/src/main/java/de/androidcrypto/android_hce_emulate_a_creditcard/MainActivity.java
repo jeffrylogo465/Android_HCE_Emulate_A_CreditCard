@@ -391,7 +391,7 @@ public class MainActivity extends AppCompatActivity {
 
         // ---- traps ----
         String trackPan = track2.contains("D")
-                ? track2.substring(0, track2.indexOf('D')) : track2;
+                ? track2.substring(0, track2.indexOf('D')) : "";
 
         if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
             sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
