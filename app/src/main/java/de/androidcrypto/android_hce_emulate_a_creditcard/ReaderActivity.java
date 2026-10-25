@@ -462,7 +462,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private byte[] gpoCommand(byte[] pdol) {
         byte[] data = buildPdolData(pdol == null ? new byte[0] : pdol);
-        byte[] command = new byte[7 + data.length];
+        byte[] command = new byte[8 + data.length];
         command[0] = (byte) 0x80;
         command[1] = (byte) 0xA8;
         command[2] = 0x00;
@@ -471,6 +471,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         command[5] = (byte) 0x83;
         command[6] = (byte) data.length;
         System.arraycopy(data, 0, command, 7, data.length);
+        command[command.length - 1] = 0x00;
         return command;
     }
 
