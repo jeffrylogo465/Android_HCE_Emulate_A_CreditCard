@@ -1,10 +1,13 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +25,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
     private static final String CVMLIST = "000013881F0602071E03";
+
+    private final StringBuilder tapLog = new StringBuilder();
+
+    private void tap(String s) {
+        tapLog.append(s).append('\n');
+        if (tapLog.length() > 6000) tapLog.delete(0, 3000);
+    }
 
     static byte[] hex(String s) {
         if (s == null) return new byte[0];
@@ -147,7 +157,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int p1  = apdu[2] & 0xFF;
             int p2  = apdu[3] & 0xFF;
 
-            Log.d(TAG, ">> " + bytesToHex(apdu));
+            // a fresh tap log whenever the terminal asks for the directory
+            if (ins == 0xA4 && p1 == 0x04 && apdu.length >= 5) {
+                int lc0 = apdu[4] & 0xFF;
+                if (apdu.length >= 5 + lc0) {
+                    byte[] nm = new byte[lc0];
+                    System.arraycopy(apdu, 5, nm, 0, lc0);
+                    if (Arrays.equals(nm, PPSE)) tapLog.setLength(0);
+                }
+            }
+
+            tap(">> " + bytesToHex(apdu));
 
             byte[] out;
             if (ins == 0xA4 && p1 == 0x04) {
@@ -165,10 +185,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 out = SW_BAD;
             }
 
-            Log.d(TAG, "<< " + bytesToHex(out));
+            tap("<< " + bytesToHex(out));
             return out;
         } catch (Exception e) {
-            Log.d(TAG, "!! " + e);
+            tap("!! " + e);
             return SW_BAD;
         }
     }
@@ -192,7 +212,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (Arrays.equals(name, PPSE)) {
             byte[] capPpse = rawPpse();
             if (capPpse != null) {
-                Log.d(TAG, "serving captured PPSE (" + capPpse.length + " bytes)");
                 return cat(capPpse, SW_OK);
             }
             byte[] entry = cat(
@@ -207,7 +226,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         // any other AID the terminal picks - answer with the card's real FCI
         byte[] captured = rawFci();
         if (captured != null) {
-            Log.d(TAG, "serving captured FCI (" + captured.length + " bytes)");
             return cat(captured, SW_OK);
         }
 
@@ -222,7 +240,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private byte[] gpo() {
         byte[] captured = rawGpo();
         if (captured != null) {
-            Log.d(TAG, "serving captured GPO (" + captured.length + " bytes)");
             return cat(rewriteGpo(captured), SW_OK);
         }
 
@@ -283,11 +300,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         byte[] captured = rawRec(sfi, rec);
         if (captured != null) {
-            Log.d(TAG, "serving captured record sfi=" + sfi + " rec=" + rec
-                    + " (" + captured.length + " bytes)");
             return cat(captured, SW_OK);
         }
-        Log.d(TAG, "no capture for sfi=" + sfi + " rec=" + rec + " - using fallback");
 
         String track2Hex = p("track2", "").trim();
         String pan  = p("pan", "4111111111111111");
@@ -367,8 +381,55 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return cat(tlv(tag, val), SW_OK);
     }
 
+    // ---------- what just happened ----------
+
+    private static int countOf(String hay, String needle) {
+        int n = 0, i = 0;
+        while ((i = hay.indexOf(needle, i)) >= 0) { n++; i += needle.length(); }
+        return n;
+    }
+
+    private String verdict() {
+        String l = tapLog.toString();
+        if (l.isEmpty()) return "TAP: nothing recorded";
+
+        boolean ppse = l.contains("325041592E5359532E4444463031");
+        int selects = countOf(l, ">> 00A40400");
+        int gpos    = countOf(l, ">> 80A80000");
+        int recs    = countOf(l, ">> 00B2");
+        int gens    = countOf(l, ">> 80AE");
+
+        if (!ppse)       return "TAP: terminal never asked for the directory - it never read the phone (position, or Wallet took the tap)";
+        if (selects > 2) return "TAP: terminal re-selected the app " + selects + " times - unhappy with the FCI";
+        if (gpos == 0)   return "TAP: terminal picked the app but never started a transaction - it rejected the FCI";
+        if (recs == 0)   return "TAP: transaction started, terminal read no records - it didn't like the AFL";
+        if (gens == 0)   return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
+        if (gens >= 2)   return "TAP: terminal WENT ONLINE - it asked for a second cryptogram, so the issuer judged our fake ARQC";
+        if (l.contains("9F270140")) return "TAP: terminal asked for the cryptogram, we answered TC (offline approve), then it stopped - that stop is its decision";
+        return "TAP: terminal asked for a cryptogram and we did not answer TC";
+    }
+
     @Override
     public void onDeactivated(int reason) {
-        Log.d(TAG, "onDeactivated reason=" + reason);
+        final String t = tapLog.toString();
+        final String v = verdict();
+        if (!t.isEmpty()) {
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("tap log", t));
+            } catch (Exception ignored) { }
+            try {
+                prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
+            } catch (Exception ignored) { }
+            try {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(HceCcEmulationServiceVisa.this, v, Toast.LENGTH_LONG).show();
+                    }
+                });
+            } catch (Exception ignored) { }
+        }
+        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
 }
