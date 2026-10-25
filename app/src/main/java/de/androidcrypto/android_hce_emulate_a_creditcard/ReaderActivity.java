@@ -28,6 +28,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
     private static final String TAG = "READER";
     private final StringBuilder logBuf = new StringBuilder();
     private volatile boolean done = false;
+    private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     private void log(String s) {
         Log.d(TAG, s);
@@ -147,6 +148,29 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         } else {
             txtReaderStatus.setText("Hold the card flat on the back of the phone");
         }
+    }
+
+    private void restartDiscovery() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (nfcAdapter == null) return;
+                nfcAdapter.disableReaderMode(ReaderActivity.this);
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (nfcAdapter != null) {
+                            nfcAdapter.enableReaderMode(ReaderActivity.this, ReaderActivity.this,
+                                    NfcAdapter.FLAG_READER_NFC_A
+                                            | NfcAdapter.FLAG_READER_NFC_B
+                                            | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
+                                            | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                                    null);
+                        }
+                    }
+                }, 400);
+            }
+        });
     }
 
     @Override
@@ -334,6 +358,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
         } catch (Exception e) {
           log("FAILED: " + e);
+          restartDiscovery();
         } finally {
             try { isoDep.close(); } catch (IOException ignored) { }
         }
