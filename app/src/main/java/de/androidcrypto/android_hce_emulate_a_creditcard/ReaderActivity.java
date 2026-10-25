@@ -19,7 +19,6 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 
@@ -322,21 +321,20 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 }
             }
 
-            // optional: ask the card to sign, and harvest the ATC / ARQC / IAD
+            // optional: ask the card to sign, and harvest the ATC / ARQC / IAD by tag
             try {
                 byte[] cdol = firstTag(pool, 0x8C);
                 if (cdol != null) {
                     byte[] genAc = transceive(isoDep, genAcCommand(cdol));
                     if (genAc != null) {
                         saveRaw("rawgenac", genAc);
-                        byte[] payload = firstTag(genAc, 0x80);
-                        if (payload == null) payload = genAc;
-                        if (payload.length >= 9) {
-                            lastArqc = bytesToHex(Arrays.copyOfRange(payload, 0, 8));
-                            if (payload.length > 9) {
-                                lastIad = bytesToHex(Arrays.copyOfRange(payload, 9, payload.length));
-                            }
-                        }
+
+                        byte[] arqcTag = firstTag(genAc, 0x9F26);
+                        if (arqcTag != null) lastArqc = bytesToHex(arqcTag);
+
+                        byte[] iadTag = firstTag(genAc, 0x9F10);
+                        if (iadTag != null) lastIad = bytesToHex(iadTag);
+
                         byte[] atcTag = firstTag(genAc, 0x9F36);
                         if (atcTag != null) lastAtc = bytesToHex(atcTag);
                     }
@@ -520,7 +518,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         }
         log("<< " + bytesToHex(response));
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        while (true) {
+        int guard = 0;
+        while (guard++ < 16) {
             if (response.length < 2) {
                 return out.size() > 0 ? out.toByteArray() : null;
             }
@@ -544,6 +543,8 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             // return the payload anyway - the caller can judge the status
             return out.size() > 0 ? out.toByteArray() : null;
         }
+        log("!! transceive loop guard hit");
+        return out.size() > 0 ? out.toByteArray() : null;
     }
 
     private byte[] selectByName(byte[] name) {
