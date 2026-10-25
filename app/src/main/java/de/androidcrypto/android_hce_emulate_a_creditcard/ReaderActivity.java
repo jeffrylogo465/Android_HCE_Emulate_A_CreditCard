@@ -325,8 +325,11 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             try {
                 byte[] cdol = firstTag(pool, 0x8C);
                 if (cdol != null) {
-                    byte[] genAc = transceive(isoDep, genAcCommand(cdol));
+                    byte[] genAcCmd = genAcCommand(cdol);
+                    byte[] genAc = transceive(isoDep, genAcCmd);
                     if (genAc != null) {
+                        // keep the command too - its CDOL data is the MAC input
+                        saveRaw("genaccmd", genAcCmd);
                         saveRaw("rawgenac", genAc);
 
                         byte[] arqcTag = firstTag(genAc, 0x9F26);
