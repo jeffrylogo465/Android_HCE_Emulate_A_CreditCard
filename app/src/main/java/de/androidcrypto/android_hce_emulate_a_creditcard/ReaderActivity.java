@@ -591,6 +591,20 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 case 0x9C:
                     if (len >= 1) value[0] = 0x00;
                     break;
+                case 0x9F66:
+                    // terminal transaction qualifiers - contactless EMV mode, ODA, signature
+                    if (len >= 1) value[0] = 0x76;
+                    break;
+                case 0x9F35:
+                    // terminal type - merchant attended, online capable
+                    if (len >= 1) value[0] = 0x22;
+                    break;
+                case 0x9F37: {
+                    // unpredictable number
+                    long n = System.nanoTime();
+                    for (int k = len - 1; k >= 0; k--) { value[k] = (byte) n; n >>= 8; }
+                    break;
+                }
                 default:
                     break;
             }
@@ -609,6 +623,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         int i = 0;
         while (i < data.length) {
             int tag = data[i++] & 0xFF;
+            boolean constructed = (tag & 0x20) != 0;
             if ((tag & 0x1F) == 0x1F) {
                 if (i >= data.length) break;
                 tag = (tag << 8) | (data[i++] & 0xFF);
@@ -626,7 +641,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             byte[] value = new byte[length];
             System.arraycopy(data, i, value, 0, length);
             if (tag == wanted) out.add(value);
-            if ((tag & 0x20) != 0) collectTags(value, wanted, out);
+            if (constructed) collectTags(value, wanted, out);
             i += length;
         }
     }
