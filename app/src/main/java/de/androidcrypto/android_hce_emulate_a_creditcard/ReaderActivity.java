@@ -282,6 +282,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 log("GENERATE AC skipped: " + e);
             }
 
+            log("STEP4 pool=" + pool.size());
             // 4. pull the fields out of everything we collected
             String pan = digitsOrEmpty(firstTag(pool, 0x5A));
             String expiry = digitsOrEmpty(firstTag(pool, 0x5F24));
@@ -319,7 +320,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                         pan, expiry, service, disc, track2, aid);
             }
 
-        } catch (IOException e) {
+        } catch (Exception e) {
           log("FAILED: " + e);
         } finally {
             try { isoDep.close(); } catch (IOException ignored) { }
@@ -348,6 +349,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private void showResult(final String status, final String pan, final String expiry, final String service,
                             final String disc, final String track2, final String aid) {
+        log("RESULT: " + status);
         done = true;
         lastPan = pan;
         lastExpiry = expiry;
