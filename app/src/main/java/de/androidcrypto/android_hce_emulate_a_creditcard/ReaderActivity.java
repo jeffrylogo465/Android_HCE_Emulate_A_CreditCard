@@ -134,6 +134,14 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
         });
 
+        btnCopyReader.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                startActivity(new Intent(ReaderActivity.this, CaptureActivity.class));
+                return true;
+            }
+        });
+
         btnUseCard.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -203,14 +211,17 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private void saveRaw(String key, byte[] data) {
         if (data == null || data.length == 0) return;
-        prefs().edit().putString("card" + cardIndex + "_" + key, bytesToHex(data)).apply();
+        prefs().edit().putString("cap_" + key, bytesToHex(data)).apply();
+    }
+
+    private void saveText(String key, String value) {
+        prefs().edit().putString("cap_" + key, value == null ? "" : value).apply();
     }
 
     private void clearRaw() {
         SharedPreferences.Editor e = prefs().edit();
-        String pfx = "card" + cardIndex + "_";
         for (String k : prefs().getAll().keySet()) {
-            if (k.startsWith(pfx + "raw") || k.startsWith(pfx + "rec")) e.remove(k);
+            if (k.startsWith("cap_")) e.remove(k);
         }
         e.apply();
     }
@@ -350,6 +361,13 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             if (expiry.length() >= 4) {
                 expiry = expiry.substring(2, 4) + "/" + expiry.substring(0, 2);
             }
+
+            saveText("pan", pan);
+            saveText("expiry", expiry);
+            saveText("service", service);
+            saveText("track2", track2);
+            saveText("discretionary", disc);
+            saveText("aid", aid);
 
             vibrate();
 
