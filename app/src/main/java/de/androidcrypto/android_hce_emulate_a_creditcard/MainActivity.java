@@ -186,14 +186,23 @@ public class MainActivity extends AppCompatActivity {
         String fromTrack = normaliseTrack2(t(etTrack2));
         String fromPan = normaliseTrack2(t(etPan));
 
-        String src;
+        String src = null;
         if (fromTrack.indexOf('D') > 0) {
             src = fromTrack;
         } else if (fromPan.indexOf('D') > 0) {
             src = fromPan;
         } else {
-            return;
+            // the PAN field is inputType=number, so a pasted dump arrives with the
+            // separator already stripped. Rebuild it from the BIN length instead.
+            String p = digits(t(etPan));
+            if (p.length() > 20) {
+                int panLen = (p.startsWith("34") || p.startsWith("37")) ? 15 : 16;
+                if (p.length() > panLen + 7) {
+                    src = p.substring(0, panLen) + "D" + p.substring(panLen);
+                }
+            }
         }
+        if (src == null) return;
 
         int sep = src.indexOf('D');
         if (sep < 12 || sep > 19) return;                 // not a usable PAN length
