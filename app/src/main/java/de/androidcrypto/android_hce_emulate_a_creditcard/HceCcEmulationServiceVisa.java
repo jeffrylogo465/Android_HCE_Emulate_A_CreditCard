@@ -472,7 +472,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(captured, SW_OK);
         }
 
-        String track2Hex = p("track2", "").trim();
+        // Card dumps arrive as PAN=expiry service discretionary. '=' is not hex,
+        // so swap it for 'D' here - otherwise the TLV writer deletes it and the
+        // terminal gets a track 2 with no separator in it.
+        String track2Hex = p("track2", "").trim().toUpperCase().replace('=', 'D');
         String pan  = p("pan", "4111111111111111");
         String exp  = p("expiry", "3112");
         String sc   = p("service", "201");
