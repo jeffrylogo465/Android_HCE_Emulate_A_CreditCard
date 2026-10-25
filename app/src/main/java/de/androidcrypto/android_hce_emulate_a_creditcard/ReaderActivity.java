@@ -267,15 +267,6 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             }
 
             int expected = 0;
-            String gpoHex = prefs().getString("cap_rawgpo", "");
-            if (!gpoHex.isEmpty()) {
-                byte[] gAfl = firstTag(hexToBytes(gpoHex), 0x94);
-                if (gAfl != null) {
-                    for (int i = 0; i + 3 < gAfl.length; i += 4) {
-                        expected += gAfl[i + 2] & 0xFF;
-                    }
-                }
-            }
             String aid = null;
 
             // 1. ask the card for its payment directory
@@ -339,6 +330,17 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                             }
                         }
                     }
+                }
+            }
+
+            byte[] aflSrc = (gpo != null) ? firstTag(gpo, 0x94) : null;
+            if (aflSrc == null) {
+                String gpoHex = prefs().getString("cap_rawgpo", "");
+                if (!gpoHex.isEmpty()) aflSrc = firstTag(hexToBytes(gpoHex), 0x94);
+            }
+            if (aflSrc != null) {
+                for (int i = 0; i + 3 < aflSrc.length; i += 4) {
+                    expected += aflSrc[i + 2] & 0xFF;
                 }
             }
 
