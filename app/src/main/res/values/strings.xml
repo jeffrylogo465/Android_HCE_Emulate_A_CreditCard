@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Android_HCE_Emulate_A_CreditCard</string>
+    <string name="app_name">SHADOWS WALLET</string>
 
     <string name="header_write">This app emulates a Credit Card</string>
     <string name="description_write">The app needs to be called by the Select the PPSE (2PAY.SYS.DDF01) AID. The emulated Credit Card is of type Visa Card and has the AID A0000000031010</string>
