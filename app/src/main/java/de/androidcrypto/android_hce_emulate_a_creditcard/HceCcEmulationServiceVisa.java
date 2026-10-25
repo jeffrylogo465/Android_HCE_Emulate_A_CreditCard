@@ -117,12 +117,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return (s == null || s.isEmpty()) ? null : hex(s);
     }
 
-    private byte[] rawFci()  { return hexOrNull(p("rawfci",  "")); }
-    private byte[] rawGpo()  { return hexOrNull(p("rawgpo",  "")); }
-    private byte[] rawPpse() { return hexOrNull(p("rawppse", "")); }
+    private byte[] cap(String key) {
+        return hexOrNull(prefs().getString("cap_" + key, ""));
+    }
+
+    private byte[] rawFci()  { return cap("rawfci"); }
+    private byte[] rawGpo()  { return cap("rawgpo"); }
+    private byte[] rawPpse() { return cap("rawppse"); }
 
     private byte[] rawRec(int sfi, int rec) {
-        return hexOrNull(p("rec" + sfi + "_" + rec, ""));
+        return cap("rec" + sfi + "_" + rec);
     }
 
     private static int readTag(byte[] b, int[] pos) {
