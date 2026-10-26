@@ -73,9 +73,9 @@ public class MainActivity extends AppCompatActivity {
     private PagerSnapHelper snapHelper;
     private TextView txtCount, txtStatus;
 
-    private EditText etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
-            etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
-            etScript;
+    private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
+            etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
+            etMsd, etScript;                                 // NEW: etName
 
     private int current = 0;
     private boolean binding = false;
@@ -106,6 +106,7 @@ public class MainActivity extends AppCompatActivity {
         txtStatus = findViewById(R.id.txtStatus);
 
         etLabel = findViewById(R.id.etLabel);
+        etName = findViewById(R.id.etName);                   // NEW
         etPan = findViewById(R.id.etPan);
         etExpiry = findViewById(R.id.etExpiry);
         etService = findViewById(R.id.etService);
@@ -178,9 +179,9 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         };
-        EditText[] fields = { etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
-                etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
-                etScript };
+        EditText[] fields = { etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
+                etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
+                etMsd, etScript };                            // NEW: etName
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
         // paste a dump into either of these and the card fills itself in
@@ -300,6 +301,7 @@ public class MainActivity extends AppCompatActivity {
         int i = current;
         SharedPreferences.Editor e = prefs.edit();
         e.putString(key(i, "label"), t(etLabel));
+        e.putString(key(i, "name"), t(etName).toUpperCase());   // NEW
         e.putString(key(i, "pan"), digits(t(etPan)));
         e.putString(key(i, "expiry"), t(etExpiry));
         e.putString(key(i, "service"), t(etService));
@@ -335,6 +337,7 @@ public class MainActivity extends AppCompatActivity {
         binding = true;
         current = i;
         etLabel.setText(prefs.getString(key(i, "label"), ""));
+        etName.setText(prefs.getString(key(i, "name"), ""));    // NEW
         etPan.setText(prefs.getString(key(i, "pan"), ""));
         etExpiry.setText(prefs.getString(key(i, "expiry"), ""));
         etService.setText(prefs.getString(key(i, "service"), "201"));
@@ -413,6 +416,9 @@ public class MainActivity extends AppCompatActivity {
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
         if (exp.length() == 4) expOut = exp + "01";
         sb.append("5F24 expiry: ").append(expOut).append('\n');
+        sb.append("5F20 name  : ")
+                .append(t(etName).isEmpty() ? "(empty - slip shows no name)" : t(etName).toUpperCase())
+                .append('\n');                                  // NEW
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
@@ -830,6 +836,17 @@ public class MainActivity extends AppCompatActivity {
         collect();
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
         copyStagingToCard(current);
+
+        // if the reader captured a name, surface it so it can be corrected
+        if (t(etName).isEmpty()) {
+            String h = prefs.getString(key(current, "cap_holder"), "");
+            if (!h.isEmpty()) {
+                binding = true;
+                etName.setText(h.toUpperCase());
+                binding = false;
+                collect();
+            }
+        }
 
         adapter.notifyItemChanged(current);
         pager.smoothScrollToPosition(current);
