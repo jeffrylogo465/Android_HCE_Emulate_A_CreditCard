@@ -216,6 +216,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnSave).setOnLongClickListener(v -> { showPreview(); return true; });
         findViewById(R.id.btnAdd).setOnClickListener(v -> { onAdd(); showPage(1); });
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
+        findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
             startReader();
             return true;
@@ -890,6 +891,24 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(this, ReaderActivity.class);
         i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
         startActivityForResult(i, REQ_CLONE);
+    }
+
+    /**
+     * Resolve the current card's BIN to its issuer and call them.
+     *
+     * The issuer's IVR is the only liveness check that does not need a till:
+     * a balance readback or "card is active" means the account is open, and
+     * "card was replaced" or "cancelled" means it is dead. An expired row
+     * (2608 is already gone) never even reaches the terminal, so this is
+     * cheaper than spending a tap to find out.
+     */
+    private void callIssuer() {
+        String pan = digits(t(etPan));
+        if (pan.isEmpty()) {
+            Toast.makeText(this, "Fill the PAN first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        BankDirectory.showCallSheet(this, pan);
     }
 
     private void onSave() {
