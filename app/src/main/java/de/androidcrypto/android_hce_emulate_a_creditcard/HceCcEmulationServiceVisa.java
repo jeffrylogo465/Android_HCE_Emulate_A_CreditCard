@@ -234,7 +234,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (a.startsWith("A000000004")) return 2;   // Mastercard
         if (a.startsWith("A000000065")) return 5;   // JCB
         if (a.startsWith("A000000025")) return 4;   // Amex
-        if (a.startsWith("A000000333")) return 6;   // UnionPay
+        if (a.startsWith("A000000333")) return 7;   // UnionPay (was 6 = Discover's)
         return 3;                                   // Visa and anything else
     }
 
@@ -383,30 +383,47 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return "311201";
     }
 
-    private byte[] syntheticRecord() {
-        String pan = p("pan", "4111111111111111");
-        String exp = expiry6();
-        String sc  = p("service", "201");
-        String disc = p("discretionary", "");
+    /**
+     * Tag 57 - Track 2 Equivalent Data.
+     *
+     * A capture arrives as ASCII with '=' - PAN=YYMM service discretionary - and
+     * may carry ';' and '?' sentinels. EMV wants BCD with 'D', no sentinels, no
+     * LRC and an even length. Normalise here, in one place, so every caller gets
+     * the same thing and nothing downstream has to remember the rules.
+     */
+    private byte[] track2() {
+        String t = p("track2", "").toUpperCase().replace('=', 'D');
+        t = t.replaceAll("[^0-9A-F]", "");        // drops ; ? spaces and the LRC
 
-        // Card dumps arrive as PAN=expiry service discretionary. '=' is not hex,
-        // so swap it for 'D' here - otherwise the TLV writer deletes it and the
-        // terminal gets a track 2 with no separator in it.
-        String track2Hex = p("track2", "").trim().toUpperCase().replace('=', 'D');
-
-        String track;
-        if (!track2Hex.isEmpty()) {
-            track = track2Hex;
-        } else {
-            track = pan + "D" + exp + sc + disc;
+        if (t.isEmpty()) {
+            // nothing captured - synthesise from the other fields
+            String exp = expiry6();
+            String svc = p("service", "201").replaceAll("[^0-9]", "");
+            while (svc.length() < 3) svc = "0" + svc;
+            t = p("pan", "4111111111111111").replaceAll("[^0-9]", "")
+                    + "D"
+                    + exp.substring(0, 4)         // track 2 carries YYMM, not YYMMDD
+                    + svc.substring(0, 3)
+                    + p("discretionary", "").replaceAll("[^0-9]", "");
         }
-        if (track.length() % 2 != 0) track = track + "F";
-        if (pan.length() % 2 != 0) pan = pan + "F";
+
+        if (t.length() % 2 != 0) t += "F";
+        return hex(t);
+    }
+
+    private byte[] syntheticRecord() {
+        String pan = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
+        String exp = expiry6();
+        String psn = p("psn", "01").replaceAll("[^0-9]", "");
+        if (psn.length() > 2) psn = psn.substring(0, 2);
+        if (psn.isEmpty()) psn = "01";
+        if (pan.length() % 2 != 0) pan += "F";
 
         return tlv(0x70, cat(
                 tlv(0x5A, hex(pan)),
+                tlv(0x5F34, hex(psn)),            // PAN sequence number - was missing
                 tlv(0x5F24, hex(exp)),
-                tlv(0x57, hex(track)),
+                tlv(0x57, track2()),
                 tlv(0x8C, hex(CDOL1)),
                 tlv(0x8D, hex(CDOL2)),
                 tlv(0x8E, hex(CVMLIST))));
@@ -484,6 +501,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(buildPpse(), SW_OK);
         }
 
+        // A SELECT with an empty name used to wipe tag 84 out of the captured
+        // FCI, so the terminal got an application with no AID in it.
+        if (name.length == 0) {
+            String a = p("cap_aid", "");
+            if (a.isEmpty()) a = p("aid", "A0000000031010");
+            name = hex(a);
+        }
+
         String real = p("cap_aid", "");
         if (real.isEmpty()) real = p("aid", "");
         tap("-- selected " + bytesToHex(name)
@@ -532,7 +557,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(masked) + " afl=" + bytesToHex(a));
 
         if (msd) {
-            return cat(tlv(0x80, cat(masked, a)), SW_OK);
+            // Magstripe mode never walks an AFL - the payload is the AIP followed
+            // by the track itself. Sending the AFL here left the terminal with
+            // nothing to work from.
+            return cat(tlv(0x80, cat(masked, tlv(0x57, track2()))), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, masked), tlv(0x94, a))), SW_OK);
     }
@@ -712,6 +740,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     @Override
     public void onDeactivated(int reason) {
+        // End the transaction with the tap. Without this a tap that skips the
+        // PPSE select inherits the previous tap's cryptogramSent = true, so its
+        // FIRST cryptogram answers TC - no online, no receipt.
+        resetTransaction();
+
         final String t = tapLog.toString();
         final String v = verdict();
         if (!t.isEmpty()) {
