@@ -99,6 +99,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     private int capturedRecords = 0;
 
+    /** Status word of the most recent transceive. 0x9000 means the command worked. */
+    private volatile int lastSw1 = 0, lastSw2 = 0;
+
     private String lastPan = "";
     private String lastExpiry = "";
     private String lastService = "";
@@ -244,14 +247,16 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             String aid = null;
 
             byte[] ppse = transceive(isoDep, selectByName(PPSE_NAME));
-            if (ppse != null) {
+            if (ppse != null && lastOk()) {
                 pool.add(ppse);
                 saveRaw("rawppse", ppse);
                 List<byte[]> aids = new ArrayList<>();
                 collectTags(ppse, 0x4F, aids);
                 for (byte[] candidate : aids) {
                     byte[] fci = transceive(isoDep, selectByName(candidate));
-                    if (fci != null) {
+                    // FIX: require 9000. transceiveOnce returns the payload even on a
+                    // failure status, so a rejected SELECT used to look like a good one.
+                    if (fci != null && lastOk()) {
                         aid = bytesToHex(candidate);
                         pool.add(fci);
                         saveRaw("rawfci", fci);
@@ -263,7 +268,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             if (aid == null) {
                 for (String candidate : FALLBACK_AIDS) {
                     byte[] fci = transceive(isoDep, selectByName(hexToBytes(candidate)));
-                    if (fci != null) {
+                    if (fci != null && lastOk()) {          // FIX: 9000 only
                         aid = candidate;
                         pool.add(fci);
                         saveRaw("rawfci", fci);
@@ -282,15 +287,22 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
             byte[] pdol = firstTag(pool, 0x9F38);
             byte[] gpo = transceive(isoDep, gpoCommand(pdol));
-            if (gpo != null) {
+            if (gpo != null && lastOk()) {
                 pool.add(gpo);
                 saveRaw("rawgpo", gpo);
 
+                // FIX: in a magstripe (tag 80) GPO the AIP is two raw bytes, not a
+                // TLV - and collectTags only recurses into CONSTRUCTED tags (bit 6),
+                // which 0x80 is not. So firstTag(gpo, 0x82) can never find it there.
+                // Without this the real card's AIP was silently lost and the
+                // emulator fell back to DEFAULT_AIP "3080".
                 byte[] aip = firstTag(gpo, 0x82);
+                if (aip == null && gpo.length >= 4 && (gpo[0] & 0xFF) == 0x80) {
+                    aip = new byte[]{gpo[2], gpo[3]};
+                }
                 if (aip != null) {
                     lastAip = bytesToHex(aip);
-                    saveText("aip", lastAip);        // was missing - the emulator
-                                                     // never saw the real card's AIP
+                    saveText("aip", lastAip);
                 }
 
                 byte[] afl = firstTag(gpo, 0x94);
@@ -301,7 +313,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                         int lastRecord = afl[i + 2] & 0xFF;   // last, not count
                         for (int record = firstRecord; record <= lastRecord; record++) {
                             byte[] data = transceive(isoDep, readRecord(sfi, record));
-                            if (data != null) {
+                            if (data != null && lastOk()) {   // FIX: 9000 only
                                 pool.add(data);
                                 saveRaw("rec" + sfi + "_" + record, data);
                                 capturedRecords++;
@@ -332,7 +344,7 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 if (cdol != null) {
                     byte[] genAcCmd = genAcCommand(cdol);
                     byte[] genAc = transceive(isoDep, genAcCmd);
-                    if (genAc != null) {
+                    if (genAc != null && lastOk()) {          // FIX: 9000 only
                         // keep the command too - its CDOL data is the MAC input
                         saveRaw("genaccmd", genAcCmd);
                         saveRaw("rawgenac", genAc);
@@ -502,7 +514,17 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
 
     // ---------- APDU helpers ----------
 
+    /** True when the last command completed with 9000. */
+    private boolean lastOk() {
+        return lastSw1 == 0x90 && lastSw2 == 0x00;
+    }
+
     private byte[] transceive(IsoDep isoDep, byte[] command) throws IOException {
+        // FIX: clear first, so a stale 9000 from the previous command cannot leak
+        // out and make a failed command look successful.
+        lastSw1 = 0;
+        lastSw2 = 0;
+
         IOException last = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
             try {
@@ -535,10 +557,14 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
         int guard = 0;
         while (guard++ < 16) {
             if (response.length < 2) {
+                lastSw1 = 0;
+                lastSw2 = 0;
                 return out.size() > 0 ? out.toByteArray() : null;
             }
             int sw1 = response[response.length - 2] & 0xFF;
             int sw2 = response[response.length - 1] & 0xFF;
+            lastSw1 = sw1;                                    // FIX: record the status
+            lastSw2 = sw2;
             out.write(response, 0, response.length - 2);
 
             if (sw1 == 0x61) {
@@ -554,7 +580,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             if (sw1 == 0x90 && sw2 == 0x00) {
                 return out.toByteArray();
             }
-            // return the payload anyway - the caller can judge the status
+            // FIX: say the status out loud. A non-9000 used to be swallowed
+            // entirely, so a rejected SELECT read exactly like a good one.
+            log("!! sw=" + String.format("%02X%02X", sw1, sw2)
+                    + " payload=" + out.size() + " bytes");
             return out.size() > 0 ? out.toByteArray() : null;
         }
         log("!! transceive loop guard hit");
