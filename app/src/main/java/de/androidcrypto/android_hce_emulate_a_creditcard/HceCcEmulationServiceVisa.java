@@ -213,9 +213,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         prefs().edit().putString(sel() + k, v).apply();
     }
 
-    /** msd is stored with putInt, so it must be read with getInt. */
+    /**
+     * msd is stored with putInt, so it must be read with getInt.
+     *
+     * FIX: default was 1 (magstripe) while the editor defaults to 0 (EMV), so a
+     * card with no stored flag answered magstripe while the UI showed EMV.
+     * 0 now matches the editor, and the editor no longer coerces a blank field
+     * to 1 either.
+     */
     private boolean isMsd() {
-        return prefs().getInt(sel() + "msd", 1) == 1;
+        return prefs().getInt(sel() + "msd", 0) == 1;
     }
 
     private String nextAtc() {
@@ -456,13 +463,26 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     // ---------- records: the AFL is derived from what we can actually serve ----------
 
     /**
-     * Build the AFL from the record keys actually stored, so it can never point
-     * at a record we do not hold.
+     * Build the AFL.
+     *
+     * FIX 1: an AFL typed into the editor now wins, so a card can be forced to
+     * advertise exactly what the real one did. 4 bytes per entry, so the hex must
+     * be a multiple of 8 characters. Leave the box empty to use the derivation.
+     * Before this the AFL field was decorative - the service never read it.
+     *
+     * FIX 2: the derivation used to write first() and last() of the stored set,
+     * so SFI 2 holding records 1 and 3 advertised 1-3 with a hole at 2, and
+     * readRecord() answered 6A83 for it - which plenty of terminals abort on.
+     * It now emits one entry per CONTIGUOUS RUN. The old comment claiming it
+     * "can never point at a record we do not hold" was wrong for gaps.
      *
      * Keys look like "<card>_cap_rec<sfi>_<rec>". If none exist we advertise
      * SFI 1 record 1, which the synthetic record below always answers.
      */
     private byte[] afl() {
+        String typed = p("afl", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (typed.length() >= 8 && typed.length() % 8 == 0) return hex(typed);
+
         TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
         String prefix = sel() + "cap_rec";
 
@@ -490,12 +510,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         for (Map.Entry<Integer, TreeSet<Integer>> e : map.entrySet()) {
-            out.write((e.getKey() << 3) & 0xFF);   // SFI << 3
-            out.write(e.getValue().first() & 0xFF);
-            out.write(e.getValue().last() & 0xFF);
-            out.write(0x00);                       // offline-auth records
+            int sfi = e.getKey();
+            int runStart = -1, prev = -1;
+            for (int rec : e.getValue()) {          // TreeSet iterates ascending
+                if (runStart < 0) {
+                    runStart = rec;
+                } else if (rec != prev + 1) {
+                    aflEntry(out, sfi, runStart, prev);   // close the run
+                    runStart = rec;
+                }
+                prev = rec;
+            }
+            if (runStart >= 0) aflEntry(out, sfi, runStart, prev);
         }
         return out.toByteArray();
+    }
+
+    /** One AFL entry: SFI<<3, first record, last record, offline-auth record count. */
+    private static void aflEntry(ByteArrayOutputStream out, int sfi, int first, int last) {
+        out.write((sfi << 3) & 0xFF);
+        out.write(first & 0xFF);
+        out.write(last & 0xFF);
+        out.write(0x00);
     }
 
     private String expiry6() {
@@ -688,6 +724,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int outer = readTag(raw, q);
             if (outer == 0x80) msd = true;
             else if (outer == 0x77) msd = false;
+            // FIX: say so out loud. The capture silently overriding the editor
+            // switch is how you end up tuning a setting that is not in force.
+            tap("-- msd overridden from captured GPO framing: " + msd);
         }
 
         byte[] aip = capturedAip(raw);
@@ -849,6 +888,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return n;
     }
 
+    /**
+     * FIX: the magstripe case is now handled BEFORE the recs == 0 case.
+     *
+     * Magstripe mode never walks an AFL - gpo() answers a tag 80 payload of AIP +
+     * track 2 and sends no 94 - so recs == 0 is normal there. Tested afterwards,
+     * every single MSD tap reported "read no records, it didn't like the AFL"
+     * and sent you chasing an AFL the terminal never asked for. The old
+     * gens == 0 / isMsd() branch below it was also unreachable for recs == 0,
+     * because the recs check returned first.
+     */
     private String baseVerdict() {
         String l = tapLog.toString();
         if (l.isEmpty()) return "TAP: nothing recorded";
@@ -862,16 +911,21 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (!ppse)        return "TAP: terminal never asked for the directory - it never read the phone";
         if (selects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
         if (gpos == 0)    return "TAP: terminal picked an app then stopped - it rejected the FCI";
-        if (recs == 0)    return "TAP: terminal started a transaction but read no records - check the logged AFL";
 
-        // magstripe mode never sends a GENERATE AC, so gens == 0 is normal there
-        if (gens == 0) {
-            if (isMsd()) {
-                return "TAP: magstripe mode - terminal read " + recs
-                        + " records and made its own decision (no cryptogram in MSD)";
-            }
-            return "TAP: terminal read " + recs + " records then quit before the cryptogram - its own ODA or CVM check failed";
+        // Magstripe mode: no AFL, no READ RECORD, and gens == 0 is normal when
+        // the terminal has no CVM to do. This must come before the recs check.
+        if (isMsd()) {
+            if (gens == 0)              return "TAP: MSD mode - terminal took the track 2 and decided on its own";
+            if (gens >= 2)              return "TAP: MSD mode - terminal WENT ONLINE";
+            if (l.contains("9F270140")) return "TAP: MSD mode - we answered TC, terminal should APPROVE";
+            if (l.contains("9F270180")) return "TAP: MSD mode - we answered ARQC, terminal must go online";
+            if (l.contains("9F270100")) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
+            return "TAP: MSD mode - terminal asked for a cryptogram and we did not answer TC";
         }
+
+        if (recs == 0)    return "TAP: terminal started a transaction but read no records - check the logged AFL";
+        if (gens == 0)    return "TAP: terminal read " + recs
+                + " records then quit before the cryptogram - its own ODA or CVM check failed";
         if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
         if (l.contains("9F270140")) return "TAP: we answered TC - terminal should have APPROVED offline";
         if (l.contains("9F270180")) return "TAP: we answered ARQC - terminal must go online";
