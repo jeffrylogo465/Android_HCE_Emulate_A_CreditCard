@@ -95,6 +95,21 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     // RFU. "No CVM, always" is the right thing for a clone.
     private static final String CVMLIST = "00000000000000001F00";
 
+    /**
+     * Used when the selected card has no script of its own. Edit this and rebuild
+     * for a quick experiment; type a script into the card in the app to override
+     * it per card. All-comments here means the script is inert until you use it.
+     *
+     * Format, one per line:  <match>=<response>
+     *   match    - hex PREFIX of the command APDU. 80A80000 catches every GPO.
+     *   response - sent verbatim, so paste the '<<' line out of the tap log.
+     * '#' starts a comment, spaces are ignored, longest match wins.
+     */
+    private static final String DEFAULT_SCRIPT =
+            "# match=response, hex only. Longest match wins.\n"
+          + "# 80A80000=773C8202180094080801010010010300 9000\n"
+          + "# 00B2010C=700A5A086011499432007704 9000\n";
+
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
 
@@ -223,6 +238,54 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private byte[] rawRec(int sfi, int rec) {
         return cap("rec" + sfi + "_" + rec);
+    }
+
+    // ---------- script overrides ----------
+    //
+    // card<N>_script holds one "match=response" pair per line. A matching line is
+    // served verbatim; anything unnamed falls through to the handlers below, so a
+    // script is additive and can never break a step it does not name.
+
+    private String scriptRaw() {
+        return p("script", DEFAULT_SCRIPT);
+    }
+
+    private int scriptLines() {
+        String raw = scriptRaw();
+        if (raw.isEmpty()) return 0;
+        int n = 0;
+        for (String line : raw.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            if (line.indexOf('=') > 0) n++;
+        }
+        return n;
+    }
+
+    private String scriptMatch(byte[] apdu) {
+        String raw = scriptRaw();
+        if (raw.isEmpty()) return null;
+
+        String cmd = bytesToHex(apdu);
+        String best = null;
+        int bestLen = -1;
+
+        for (String line : raw.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+
+            String m = line.substring(0, eq).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            String r = line.substring(eq + 1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            if (m.isEmpty() || m.length() % 2 != 0) continue;
+            if (r.length() < 2 || r.length() % 2 != 0) continue;
+            if (cmd.startsWith(m) && m.length() > bestLen) {
+                best = r;
+                bestLen = m.length();
+            }
+        }
+        return best;
     }
 
     // ---------- the directory we advertise ----------
@@ -450,11 +513,27 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     if (Arrays.equals(nm, PPSE)) {
                         tapLog.setLength(0);
                         resetTransaction();
+                        int n = scriptLines();
+                        if (n > 0) tap("-- script armed: " + n + " line(s)");
                     }
                 }
             }
 
             tap(">> " + bytesToHex(apdu));
+
+            // Script first. A line that names this command wins outright;
+            // anything unnamed falls through to the handlers below.
+            String hit = scriptMatch(apdu);
+            if (hit != null) {
+                byte[] out = hex(hit);
+                tap("-- script hit " + out.length + " bytes");
+                int hi = out.length >= 2 ? (out[out.length - 2] & 0xFF) : 0;
+                if (hi != 0x90 && (hi & 0xF0) != 0x60) {
+                    tap("-- script response has no obvious status word - forgot 9000?");
+                }
+                tap("<< " + bytesToHex(out));
+                return out;
+            }
 
             byte[] out;
             if (isSelect) {
