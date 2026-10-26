@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/app_name"
+    android:apduServiceBanner="@drawable/hce_260_96"
     android:requireDeviceUnlock="false">
     <aid-group
         android:category="payment"
