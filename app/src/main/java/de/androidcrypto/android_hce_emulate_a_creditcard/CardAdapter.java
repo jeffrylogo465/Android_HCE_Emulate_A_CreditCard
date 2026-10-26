@@ -1,8 +1,11 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
+
+import android.content.Context;
 import android.graphics.drawable.GradientDrawable;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -31,15 +34,6 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
         }
     }
 
-    private static final int[][] GRADIENTS = {
-            {0xFF4F46E5, 0xFF7C3AED, 0xFFDB2777},
-            {0xFF0F766E, 0xFF0D9488, 0xFF22C55E},
-            {0xFFB45309, 0xFFF59E0B, 0xFFFDE047},
-            {0xFFBE123C, 0xFFE11D48, 0xFFFB7185},
-            {0xFF1D4ED8, 0xFF3B82F6, 0xFF60A5FA},
-            {0xFF6D28D9, 0xFF8B5CF6, 0xFFC4B5FD}
-    };
-
     private final List<CardModel> cards = new ArrayList<>();
 
     public void setCards(List<CardModel> list) {
@@ -63,19 +57,20 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
     @Override
     public void onBindViewHolder(@NonNull CardHolder h, int position) {
         CardModel c = cards.get(position);
+        Context ctx = h.itemView.getContext();
 
-        h.brand.setText(brandOf(c.pan, c.label));
-        h.pan.setText(prettyPan(c.pan));
-        h.expiry.setText(prettyExpiry(c.expiry));
-        h.aid.setText(c.aid == null || c.aid.isEmpty() ? "--" : c.aid);
-        h.mode.setText(c.msd == 1 ? "MSD" : "EMV");
-        h.index.setText((position + 1) + "/" + cards.size());
+        // Bank not known yet? Look it up once, then repaint the list.
+        BinLookup.Info info = BinLookup.cached(ctx, c.pan);
+        if (info == null && !BinLookup.seen(ctx, c.pan)) {
+            BinLookup.fetch(ctx, c.pan, new BinLookup.Callback() {
+                @Override
+                public void onResult(String bin, BinLookup.Info i) {
+                    notifyDataSetChanged();
+                }
+            });
+        }
 
-        int[] g = GRADIENTS[position % GRADIENTS.length];
-        GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR, new int[]{g[0], g[1], g[2]});
-        bg.setCornerRadius(16 * h.itemView.getResources().getDisplayMetrics().density);
-        h.itemView.setBackground(bg);
+        bindTile(h.itemView, c, cards.size(), position, info);
     }
 
     @Override
@@ -83,26 +78,74 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
         return cards.size();
     }
 
+    // ------------------------------------------------------------------ painting
+
+    public static void bindTile(View root, CardModel c, int total, int position, BinLookup.Info info) {
+        if (root == null || c == null) return;
+
+        String issuerName = info == null ? null : info.name;
+        String issuerDomain = info == null ? null : info.domain;
+
+        Brands.Style s = Brands.styleFor(c.pan, c.aid, issuerName, issuerDomain);
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setColor(s.bg);
+        bg.setCornerRadius(dp(root, 16));
+        root.setBackground(bg);
+
+        set(root, R.id.cardBrand, s.bankName, s.fg);
+        set(root, R.id.tvLabel, c.label, s.muted);
+        set(root, R.id.cardPan, Brands.formatPan(c.pan), s.fg);
+        set(root, R.id.cardExpiry, prettyExpiry(c.expiry), s.muted);
+        set(root, R.id.cardAid, c.aid == null || c.aid.isEmpty() ? "--" : c.aid, s.muted);
+        set(root, R.id.cardMode, c.msd == 1 ? "MSD" : "EMV", s.muted);
+        set(root, R.id.cardIndex, (position + 1) + "/" + total, s.muted);
+
+        // Bank logo sits on a small white chip so a dark logo still reads on a
+        // dark card.
+        ImageView ivBank = root.findViewById(R.id.ivBankLogo);
+        if (ivBank != null) {
+            if (s.bankIcon == null) {
+                ivBank.setBackground(null);
+                ivBank.setPadding(0, 0, 0, 0);
+            } else {
+                GradientDrawable chip = new GradientDrawable();
+                chip.setShape(GradientDrawable.RECTANGLE);
+                chip.setColor(0xFFFFFFFF);
+                chip.setCornerRadius(dp(root, 6));
+                ivBank.setBackground(chip);
+                int p = dp(root, 4);
+                ivBank.setPadding(p, p, p, p);
+            }
+        }
+        LogoLoader.into(ivBank, s.bankIcon, dp(root, 26), null);
+
+        LogoLoader.into((ImageView) root.findViewById(R.id.ivNetworkLogo),
+                s.networkIcon, dp(root, 24), s.networkTint);
+    }
+
+    private static void set(View root, int id, String text, int colour) {
+        TextView t = root.findViewById(id);
+        if (t == null) return;
+        t.setText(text);
+        t.setTextColor(colour);
+    }
+
+    private static int dp(View v, int value) {
+        return Math.round(value * v.getResources().getDisplayMetrics().density);
+    }
+
+    // ------------------------------------------------- kept for compatibility
+
     static String brandOf(String pan, String label) {
         if (label != null && !label.trim().isEmpty()) return label.trim().toUpperCase();
         if (pan == null || pan.length() < 2) return "CARD";
-        String p2 = pan.substring(0, 2);
-        if (p2.equals("34") || p2.equals("37")) return "AMERICAN EXPRESS";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
-        if (p2.startsWith("4")) return "VISA";
-        if (p2.startsWith("5") || p2.startsWith("2")) return "MASTERCARD";
-        if (p2.startsWith("6")) return "DISCOVER";
-        return "CARD";
+        return Brands.networkLabel(Brands.networkFromPan(pan));
     }
 
     static String prettyPan(String pan) {
-        if (pan == null || pan.isEmpty()) return "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < pan.length(); i++) {
-            if (i > 0 && i % 4 == 0) sb.append(' ');
-            sb.append(pan.charAt(i));
-        }
-        return sb.toString();
+        return Brands.formatPan(pan);
     }
 
     static String prettyExpiry(String yymm) {
@@ -112,6 +155,7 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
 
     static class CardHolder extends RecyclerView.ViewHolder {
         final TextView brand, pan, expiry, aid, mode, index;
+        final ImageView bankLogo, netLogo;
 
         CardHolder(@NonNull View v) {
             super(v);
@@ -121,6 +165,8 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
             aid = v.findViewById(R.id.cardAid);
             mode = v.findViewById(R.id.cardMode);
             index = v.findViewById(R.id.cardIndex);
+            bankLogo = v.findViewById(R.id.ivBankLogo);
+            netLogo = v.findViewById(R.id.ivNetworkLogo);
         }
     }
 }
