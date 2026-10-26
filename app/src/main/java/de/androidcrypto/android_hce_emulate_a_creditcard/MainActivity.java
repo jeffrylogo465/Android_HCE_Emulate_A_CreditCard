@@ -851,9 +851,17 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
         copyStagingToCard(current);
 
+        adapter.notifyItemChanged(current);
+        pager.smoothScrollToPosition(current);
+        prefs.edit().putInt("selected", current).apply();
+
+        int recs = recordCountOnCard();
+        String st = recs == 0
+                ? "Cloned - no records captured, terminal will get a synthetic one"
+                : "Cloned " + recs + " records - check it, then SAVE";
+
         // The PAN has no name in it - the name only exists on the card, as 5F20
-        // inside a record. So a card cloned with READ CARD names itself, and a
-        // card built by hand from a bare track 2 has to have the name typed once.
+        // inside a record. Report which way it went, so a miss is never silent.
         if (t(etName).isEmpty()) {
             String h = holderFromCapture(current);
             if (!h.isEmpty()) {
@@ -861,20 +869,16 @@ public class MainActivity extends AppCompatActivity {
                 etName.setText(h);
                 binding = false;
                 collect();
-                txtStatus.setText("Name read off the card: " + h);
+                st = st + " | name: " + h;
+                Toast.makeText(this, "Name read off the card: " + h, Toast.LENGTH_LONG).show();
+            } else {
+                st = st + " | no 5F20 in those " + recs + " records";
+                Toast.makeText(this, "No 5F20 name in the " + recs
+                        + " captured records - type it", Toast.LENGTH_LONG).show();
             }
         }
+        txtStatus.setText(st);
 
-        adapter.notifyItemChanged(current);
-        pager.smoothScrollToPosition(current);
-        prefs.edit().putInt("selected", current).apply();
-
-        int recs = recordCountOnCard();
-        if (recs == 0) {
-            txtStatus.setText("Cloned - no records captured, terminal will get a synthetic one");
-        } else {
-            txtStatus.setText("Cloned " + recs + " records - check it, then SAVE");
-        }
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
 
         // the reader just captured a real cryptogram - hunt for the issuer key
