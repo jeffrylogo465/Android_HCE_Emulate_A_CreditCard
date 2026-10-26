@@ -1,8 +1,12 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.app.AlertDialog;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.nfc.NfcAdapter;
+import android.nfc.NfcManager;
+import android.nfc.cardemulation.CardEmulation;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -221,6 +225,7 @@ public class MainActivity extends AppCompatActivity {
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
+        navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });   // NEW
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -587,6 +592,101 @@ public class MainActivity extends AppCompatActivity {
             sb.append(h, i, i + 2);
         }
         return sb.toString();
+    }
+
+    // ---------- routing self-check ----------   // NEW
+
+    /**
+     * Long-press WALLET. Answers the only question that matters before a real
+     * tap: will Android actually deliver the terminal's SELECT to this app?
+     *
+     * Nothing here changes state - it reads the platform's routing table, which
+     * is the thing you cannot see from inside the emulator. A blocked AID
+     * produces no log line, so it is indistinguishable from a dead reader.
+     */
+    private void showRoutingCheck() {
+        ComponentName me = new ComponentName(this, HceCcEmulationServiceVisa.class);
+        StringBuilder sb = new StringBuilder();
+
+        NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
+        NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
+
+        if (nfc == null) {
+            sb.append("NFC: no adapter - this device cannot do HCE at all\n");
+        } else {
+            sb.append("NFC radio: ")
+              .append(nfc.isEnabled() ? "on" : "OFF - enable it first").append('\n');
+        }
+        sb.append('\n');
+
+        CardEmulation ce = null;
+        if (nfc != null) {
+            try { ce = CardEmulation.getInstance(nfc); } catch (Exception ignored) { }
+        }
+        if (ce == null) {
+            sb.append("CardEmulation unavailable - HCE not supported on this device\n");
+            dialog("Can the terminal reach us?", sb.toString());
+            return;
+        }
+
+        boolean isDefault = ce.isDefaultServiceForCategory(me, CardEmulation.CATEGORY_PAYMENT);
+        sb.append("default payment app: ").append(isDefault ? "YES" : "NO").append('\n');
+        sb.append(isDefault
+                ? "  good - you outrank Google Wallet for the big-brand AIDs\n"
+                : "  NOT default - you only get AIDs no payment app claims\n");
+
+        String prefix = "?";
+        try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Exception ignored) { }
+        sb.append("prefix AID matching : ").append(prefix).append("\n\n");
+
+        // The PPSE first - if the terminal cannot read the directory, nothing
+        // else in the sequence ever happens. Then this card's AID, then the two
+        // fallbacks buildPpse() advertises alongside it.
+        String aid = t(etAid).toUpperCase();
+        List<String> check = new ArrayList<>();
+        check.add("325041592E5359532E4444463031");
+        if (!aid.isEmpty()) check.add(aid);
+        if (!"A0000000031010".equals(aid)) check.add("A0000000031010");
+        if (!"A0000000041010".equals(aid)) check.add("A0000000041010");
+
+        sb.append("routing for every AID this card advertises:\n");
+        int blocked = 0;
+        for (String a : check) {
+            if (!routable(a)) {
+                sb.append("  NO FILTER ").append(a).append("  <- add to apduservice.xml\n");
+                blocked++;
+                continue;
+            }
+            boolean routed;
+            try {
+                routed = ce.isDefaultServiceForAid(me, a);
+            } catch (Exception e) {
+                routed = false;
+            }
+            if (routed) {
+                sb.append("  ok        ").append(a).append('\n');
+            } else {
+                sb.append("  BLOCKED   ").append(a)
+                  .append("  <- another app wins this, or you are not the default\n");
+                blocked++;
+            }
+        }
+
+        sb.append('\n').append(blocked == 0
+                ? "Verdict: a tap should reach the emulator."
+                : "Verdict: " + blocked + " of " + check.size()
+                  + " AIDs will never reach us. Fix before a real till.");
+
+        dialog("Can the terminal reach us?", sb.toString());
+    }
+
+    /** Small dialog helper for the self-check. */   // NEW
+    private void dialog(String title, String body) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(body)
+                .setPositiveButton("Close", null)
+                .show();
     }
 
     // ---------- issuer key search ----------
