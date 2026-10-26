@@ -12,41 +12,31 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * Loads a real brand logo into an ImageView.
+ * Loads a logo into an ImageView.
  *
- * Icons come from the Iconify API, which serves the Simple Icons artwork
- * (CC0 licence, free for commercial use) rasterised to PNG on the fly.
- *
- * icon        = "prefix/slug", e.g. "simple-icons/visa", "logos/capital-one"
- * heightPx    = rendered pixel height, width follows the aspect ratio
- * tintHexOrNull = 6 hex chars with no '#', e.g. "FFFFFF" for a white logo.
- *                 Pass null to keep the brand's own colours.
- *
- * Nothing is bundled: if the phone is offline the view is left blank and the
- * bank name text still carries the card. Results are cached in memory so each
- * logo is fetched at most once per app run.
+ * source is EITHER a full URL ("https://logo.clearbit.com/chase.com")
+ * OR an Iconify slug ("simple-icons/visa").
+ * heightPx is pixels. tintHexOrNull only applies to Iconify slugs.
  */
 public final class LogoLoader {
 
-    private static final String BASE = "https://api.iconify.design/";
+    private static final String ICONIFY = "https://api.iconify.design/";
     private static final int TIMEOUT_MS = 6000;
 
-    /** Key is "icon|height|tint" so the same logo at two sizes caches separately. */
-    private static final LruCache<String, Bitmap> CACHE = new LruCache<>(64);
-
+    private static final LruCache<String, Bitmap> CACHE = new LruCache<>(96);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private LogoLoader() {
     }
 
-    public static void into(final ImageView view, final String icon,
+    public static void into(final ImageView view, final String source,
                             final int heightPx, final String tintHexOrNull) {
-        if (view == null || icon == null || icon.isEmpty() || heightPx <= 0) return;
+        if (view == null || source == null || source.isEmpty() || heightPx <= 0) {
+            if (view != null) view.setImageDrawable(null);
+            return;
+        }
 
-        final String key = icon + "|" + heightPx + "|" + (tintHexOrNull == null ? "-" : tintHexOrNull);
-
-        // Tag guard: RecyclerView recycles views, so by the time a fetch returns
-        // this ImageView may already have been rebound to a different card.
+        final String key = source + "|" + heightPx + "|" + (tintHexOrNull == null ? "-" : tintHexOrNull);
         view.setTag(key);
 
         Bitmap cached = CACHE.get(key);
@@ -60,8 +50,8 @@ public final class LogoLoader {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final Bitmap bmp = fetch(icon, heightPx, tintHexOrNull);
-                if (bmp == null) return;            // offline or unknown slug: stay blank
+                final Bitmap bmp = fetch(source, heightPx, tintHexOrNull);
+                if (bmp == null) return;
                 CACHE.put(key, bmp);
                 MAIN.post(new Runnable() {
                     @Override
@@ -70,20 +60,36 @@ public final class LogoLoader {
                     }
                 });
             }
-        }, "logo-" + icon).start();
+        }, "logo").start();
     }
 
-    private static Bitmap fetch(String icon, int heightPx, String tintHexOrNull) {
+    private static Bitmap fetch(String source, int heightPx, String tint) {
+        Bitmap b = tryFetch(urlFor(source, heightPx, tint));
+        if (b == null && source.startsWith("http")) b = tryFetch(favicon(source));
+        return b;
+    }
+
+    private static String urlFor(String source, int heightPx, String tint) {
+        if (source.startsWith("http")) return source;
+        return ICONIFY + source + ".png?height=" + heightPx
+                + (tint == null ? "" : "&color=%23" + tint);
+    }
+
+    /** Last-resort: the site's own favicon. Always available, never rate limited. */
+    private static String favicon(String url) {
+        String d = url.replaceFirst("^https?://", "").replaceFirst("^www\\.", "");
+        int slash = d.indexOf('/');
+        if (slash > 0) d = d.substring(0, slash);
+        return "https://www.google.com/s2/favicons?domain=" + d + "&sz=128";
+    }
+
+    private static Bitmap tryFetch(String url) {
         HttpURLConnection conn = null;
         try {
-            String url = BASE + icon + ".png?height=" + heightPx
-                    + (tintHexOrNull == null ? "" : "&color=%23" + tintHexOrNull);
-
             conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setConnectTimeout(TIMEOUT_MS);
             conn.setReadTimeout(TIMEOUT_MS);
             conn.setInstanceFollowRedirects(true);
-
             try (InputStream in = conn.getInputStream()) {
                 return BitmapFactory.decodeStream(in);
             }
@@ -94,7 +100,6 @@ public final class LogoLoader {
         }
     }
 
-    /** Call if you ever want to force a re-fetch, e.g. after a settings change. */
     public static void clearCache() {
         CACHE.evictAll();
     }
