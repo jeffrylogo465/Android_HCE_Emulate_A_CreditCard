@@ -43,7 +43,7 @@ public class MainActivity extends AppCompatActivity {
             {"JCB",                    "A0000000651010"},
             {"UnionPay",               "A000000333010101"},
             {"Interac",                "A0000002771010"},
-            {"Eftpos",                 "A0000003841010"},   // was A00000038410 - short by a byte
+            {"Eftpos",                 "A0000003841010"},
             {"Girocard",               "A0000003591010"},
     };
 
@@ -75,7 +75,7 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
             etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
-            etScript;                                        // NEW
+            etScript;
 
     private int current = 0;
     private boolean binding = false;
@@ -120,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
         etIad = findViewById(R.id.etIad);
         etMkac = findViewById(R.id.etMkac);
         etMsd = findViewById(R.id.etMsd);
-        etScript = findViewById(R.id.etScript);              // NEW
+        etScript = findViewById(R.id.etScript);
 
         adapter = new CardAdapter();
         layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
@@ -180,7 +180,7 @@ public class MainActivity extends AppCompatActivity {
         };
         EditText[] fields = { etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
                 etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
-                etScript };                                  // NEW
+                etScript };
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
         // paste a dump into either of these and the card fills itself in
@@ -315,7 +315,7 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "iad"), t(etIad).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         // script keeps its own case - '#' comments read better in lower case
-        e.putString(key(i, "script"), t(etScript));          // NEW
+        e.putString(key(i, "script"), t(etScript));
         e.putInt(key(i, "msd"), "0".equals(t(etMsd)) ? 0 : 1);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
@@ -341,7 +341,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "3080"));   // matches the service
+        etAip.setText(prefs.getString(key(i, "aip"), "3080"));
         etAfl.setText(prefs.getString(key(i, "afl"), "08010100"));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -349,7 +349,7 @@ public class MainActivity extends AppCompatActivity {
         etIad.setText(prefs.getString(key(i, "iad"), ""));
         etMkac.setText(prefs.getString(key(i, "mkac"), ""));
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 1)));
-        etScript.setText(prefs.getString(key(i, "script"), "")); // NEW - empty = service default
+        etScript.setText(prefs.getString(key(i, "script"), ""));
         binding = false;
         updateCount();
         txtStatus.setText("");
@@ -835,7 +835,7 @@ public class MainActivity extends AppCompatActivity {
         pager.smoothScrollToPosition(current);
         prefs.edit().putInt("selected", current).apply();
 
-        int recs = stagedRecordCount();
+        int recs = recordCountOnCard();
         if (recs == 0) {
             txtStatus.setText("Cloned - no records captured, terminal will get a synthetic one");
         } else {
@@ -861,10 +861,12 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private int stagedRecordCount() {
+    /** How many records actually landed on the card we just wrote. */
+    private int recordCountOnCard() {
         int n = 0;
+        String p = key(current, "cap_rec");
         for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("cap_rec")) n++;
+            if (k.startsWith(p)) n++;
         }
         return n;
     }
@@ -884,26 +886,35 @@ public class MainActivity extends AppCompatActivity {
      * onto the wallet card that was just written, so two cloned cards cannot
      * overwrite each other and the emulator always MACs the right PAN.
      *
-     * The card's own cap_ keys are cleared first. Without that, cloning into the
-     * same slot twice merges the two captures, and because the emulator derives
-     * its AFL from these keys a leftover rec1_1 would be advertised and served -
-     * card A's data answering for card B.
+     * Both ends are cleared. The destination, because cloning into the same slot
+     * twice merges two captures - and since the emulator derives its AFL from
+     * these keys, a leftover rec1_1 gets advertised and served, card A's data
+     * answering for card B. The staging area, because otherwise a record this
+     * read missed survives from the previous card and gets copied across too.
      */
     private void copyStagingToCard(int index) {
         SharedPreferences.Editor e = prefs.edit();
         String dst = key(index, "cap_");
 
+        // 1. drop whatever the destination already had
         List<String> stale = new ArrayList<>();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(dst)) stale.add(k);
         }
         for (String k : stale) e.remove(k);
 
+        // 2. staging -> destination
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith("cap_")) {
                 e.putString(dst + k.substring(4), prefs.getString(k, ""));
             }
         }
+
+        // 3. burn the staging area so the next clone starts from nothing
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith("cap_")) e.remove(k);
+        }
+
         e.apply();
     }
 
