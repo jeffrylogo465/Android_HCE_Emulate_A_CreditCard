@@ -374,6 +374,42 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
+     * The PAN out of the track 2, or "" when there is not a usable one.
+     *
+     * The track 2 is a capture: it came off a real card or out of a shared list
+     * and it carries its own check digit. The PAN box is usually hand-typed, so
+     * when the two disagree the track 2 is the one to trust.
+     */
+    private String panFromTrack2() {
+        String track2 = normaliseTrack2(t(etTrack2));
+        int d = track2.indexOf('D');
+        if (d < 12 || d > 19) return "";
+        String p = digits(track2.substring(0, d));
+        return p.matches("[0-9]+") ? p : "";
+    }
+
+    /**
+     * The last digit this PAN should have. Naming it turns "fails Luhn" from a
+     * dead end into "your 12th digit is wrong", which is the whole point.
+     */
+    private static int expectedCheckDigit(String pan) {
+        if (pan.length() < 2) return -1;
+        String body = pan.substring(0, pan.length() - 1);
+        int sum = 0;
+        boolean dbl = true;                 // the body's last digit IS doubled
+        for (int i = body.length() - 1; i >= 0; i--) {
+            int d = body.charAt(i) - '0';
+            if (dbl) {
+                d *= 2;
+                if (d > 9) d -= 9;
+            }
+            sum += d;
+            dbl = !dbl;
+        }
+        return (10 - (sum % 10)) % 10;
+    }
+
+    /**
      * AID routability. Prefix match, mirroring how Android routes, against the
      * filters in apduservice.xml. An AID outside this list is advertised in the
      * PPSE but never delivered to the service - the terminal SELECTs into a
@@ -524,6 +560,12 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5A  PAN    : ")
                 .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
                 .append('\n');
+        // a typo here is the single most common save failure, so check it here too
+        if (!pan.isEmpty()) {
+            sb.append("   check digit : ")
+                    .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
+                            + expectedCheckDigit(pan)).append('\n');
+        }
         // the emulator pads YYMM to YYMM01 - show what actually goes on the wire
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
         if (exp.length() == 4) expOut = exp + "01";
@@ -913,6 +955,20 @@ public class MainActivity extends AppCompatActivity {
 
     private void onSave() {
         syncFieldsFromTrack2();                   // SAVE puts everything in its place
+
+        // FIX: the track 2 is a capture and carries its own check digit, while
+        // the PAN box is usually hand-typed and is where typos land. When they
+        // disagree, take the track 2 value instead of bouncing the card with a
+        // check-digit error the user has no way to act on. Previously the Luhn
+        // guard ran first, so a single mistyped digit reported as "pass Luhn"
+        // and hid the fact that the correct number was sitting in TRACK 2.
+        String trackPan = panFromTrack2();
+        if (!trackPan.isEmpty() && !trackPan.equals(digits(t(etPan)))) {
+            binding = true;
+            etPan.setText(trackPan);
+            binding = false;
+        }
+
         if (t(etLabel).isEmpty()) {
             String b = brandFromPan(digits(t(etPan)));
             if (!b.isEmpty()) etLabel.setText(b);
@@ -924,8 +980,18 @@ public class MainActivity extends AppCompatActivity {
         collect();
 
         String pan = digits(t(etPan));
-        if (pan.length() < 12 || pan.length() > 19 || !luhn(pan)) {
-            Toast.makeText(this, "PAN must be 12-19 digits and pass Luhn", Toast.LENGTH_LONG).show();
+        if (pan.length() < 12 || pan.length() > 19) {
+            Toast.makeText(this, "PAN must be 12-19 digits, this is " + pan.length(),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        // FIX: name the expected last digit. "pass Luhn" is a dead end; telling
+        // you the digit is right there is actionable.
+        if (!luhn(pan)) {
+            String want = String.valueOf(expectedCheckDigit(pan));
+            txtStatus.setText("PAN check digit wrong - last digit should be " + want);
+            Toast.makeText(this, "PAN check digit wrong. Last digit should be " + want
+                    + ", not " + pan.substring(pan.length() - 1), Toast.LENGTH_LONG).show();
             return;
         }
         if (t(etExpiry).length() != 4) {
@@ -941,9 +1007,9 @@ public class MainActivity extends AppCompatActivity {
         adapter.notifyItemChanged(current);
 
         String track2 = normaliseTrack2(t(etTrack2));
-        String trackPan = track2.contains("D")
-                ? track2.substring(0, track2.indexOf('D')) : track2;
-        if (track2.contains("D") && !trackPan.isEmpty() && !trackPan.equals(pan)) {
+        String trackPan2 = track2.contains("D")
+                ? track2.substring(0, track2.indexOf("D")) : track2;
+        if (track2.contains("D") && !trackPan2.isEmpty() && !trackPan2.equals(pan)) {
             txtStatus.setText("Saved - but PAN and TRACK 2 are different cards");
             Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
             return;
@@ -984,16 +1050,21 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putInt("selected", current).apply();
     }
 
+    /** Correct as written - the rightmost digit is never doubled, and the
+     *  toggle flips AFTER the digit is added. Bound the length so a whole dump
+     *  pasted into the PAN box cannot slip through as a 31-digit "PAN". */
     private static boolean luhn(String s) {
+        String d = digits(s);
+        if (d.length() < 12 || d.length() > 19) return false;
         int sum = 0;
         boolean dbl = false;
-        for (int i = s.length() - 1; i >= 0; i--) {
-            int d = s.charAt(i) - '0';
+        for (int i = d.length() - 1; i >= 0; i--) {
+            int c = d.charAt(i) - '0';
             if (dbl) {
-                d *= 2;
-                if (d > 9) d -= 9;
+                c *= 2;
+                if (c > 9) c -= 9;
             }
-            sum += d;
+            sum += c;
             dbl = !dbl;
         }
         return sum % 10 == 0;
