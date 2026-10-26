@@ -238,12 +238,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                     if (v != null && !v.isEmpty() && v.length() % 2 == 0) pool.add(hexToBytes(v));
                 }
             }
-            capturedRecords = 0;
-            for (String k : prefs().getAll().keySet()) {
-                if (k.startsWith("cap_rec")) capturedRecords++;
-            }
 
-            int expected = 0;
+            capturedRecords = 0;
+
             String aid = null;
 
             byte[] ppse = transceive(isoDep, selectByName(PPSE_NAME));
@@ -290,15 +287,19 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 saveRaw("rawgpo", gpo);
 
                 byte[] aip = firstTag(gpo, 0x82);
-                if (aip != null) lastAip = bytesToHex(aip);
+                if (aip != null) {
+                    lastAip = bytesToHex(aip);
+                    saveText("aip", lastAip);        // was missing - the emulator
+                                                     // never saw the real card's AIP
+                }
 
                 byte[] afl = firstTag(gpo, 0x94);
                 if (afl != null) {
                     for (int i = 0; i + 3 < afl.length; i += 4) {
                         int sfi = (afl[i] & 0xFF) >> 3;
                         int firstRecord = afl[i + 1] & 0xFF;
-                        int recordCount = afl[i + 2] & 0xFF;
-                        for (int record = firstRecord; record < firstRecord + recordCount; record++) {
+                        int lastRecord = afl[i + 2] & 0xFF;   // last, not count
+                        for (int record = firstRecord; record <= lastRecord; record++) {
                             byte[] data = transceive(isoDep, readRecord(sfi, record));
                             if (data != null) {
                                 pool.add(data);
@@ -315,9 +316,13 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                 String gpoHex = prefs().getString("cap_rawgpo", "");
                 if (!gpoHex.isEmpty()) aflSrc = firstTag(hexToBytes(gpoHex), 0x94);
             }
+
+            int expected = 0;
             if (aflSrc != null) {
                 for (int i = 0; i + 3 < aflSrc.length; i += 4) {
-                    expected += aflSrc[i + 2] & 0xFF;
+                    int firstRecord = aflSrc[i + 1] & 0xFF;
+                    int lastRecord = aflSrc[i + 2] & 0xFF;
+                    expected += (lastRecord - firstRecord + 1);
                 }
             }
 
@@ -339,7 +344,10 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
                         if (iadTag != null) lastIad = bytesToHex(iadTag);
 
                         byte[] atcTag = firstTag(genAc, 0x9F36);
-                        if (atcTag != null) lastAtc = bytesToHex(atcTag);
+                        if (atcTag != null) {
+                            lastAtc = bytesToHex(atcTag);
+                            saveText("atc", lastAtc);
+                        }
                     }
                 }
             } catch (IOException e) {
@@ -384,6 +392,9 @@ public class ReaderActivity extends Activity implements NfcAdapter.ReaderCallbac
             saveText("aid", aid);
             saveText("psn", psn);
             if (!lastIad.isEmpty()) saveText("iad", lastIad);
+
+            // proves the record staging worked - check this line in logcat
+            log("stored records: " + capturedRecords + " under cap_rec<sfi>_<rec>");
 
             vibrate();
 
