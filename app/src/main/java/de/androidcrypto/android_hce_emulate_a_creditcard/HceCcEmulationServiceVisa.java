@@ -119,10 +119,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private String txnAtc;
     /** True once this tap has produced a cryptogram, so a second request completes with TC. */
     private boolean cryptogramSent;
+    /** How many script lines actually fired this tap. */
+    private int scriptHits;
 
     private void tap(String s) {
         tapLog.append(s).append('\n');
         if (tapLog.length() > 6000) tapLog.delete(0, 3000);
+    }
+
+    /** Toast from a service thread - always post to the main looper. */
+    private void popup(final String s) {
+        if (s == null || s.isEmpty()) return;
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(HceCcEmulationServiceVisa.this, s, Toast.LENGTH_SHORT).show();
+                }
+            });
+        } catch (Exception ignored) { }
     }
 
     // ---------- delegate to the shared helpers ----------
@@ -215,6 +230,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         txnAip = null;
         txnAtc = null;
         cryptogramSent = false;
+        scriptHits = 0;
     }
 
     private byte[] aipForMac() {
@@ -238,6 +254,43 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private byte[] rawRec(int sfi, int rec) {
         return cap("rec" + sfi + "_" + rec);
+    }
+
+    // ---------- the cardholder ----------
+
+    /**
+     * The name shown when the card is presented. The editor's NAME field wins;
+     * if it is empty we fall back to whatever the reader staged, so a card read
+     * off a real card names itself without anyone typing.
+     */
+    private String holderName() {
+        return p("name", p("cap_holder", ""));
+    }
+
+    /** What pops up on screen at the start of a tap. */
+    private String nameLine() {
+        String h = holderName();
+        String pan = p("pan", "");
+        String tail = pan.length() >= 4 ? "  \u2022\u2022" + pan.substring(pan.length() - 4) : "";
+        if (h.isEmpty()) return pan.isEmpty() ? "Tapping - card is empty" : "Tapping" + tail;
+        return h + tail;
+    }
+
+    /**
+     * 5F20 - Cardholder Name. Optional in the record, but it is what the host
+     * puts on the slip, so a receipt carries a name instead of a bare PAN.
+     *
+     * Format "a", 2-26 characters, EMV character set. Sanitised because a stray
+     * lowercase or an accent can upset a strict terminal.
+     */
+    private byte[] holder() {
+        String h = holderName().toUpperCase()
+                .replaceAll("[^A-Z0-9 ./'-]", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (h.length() < 2) return null;
+        if (h.length() > 26) h = h.substring(0, 26);
+        return h.getBytes(StandardCharsets.ISO_8859_1);
     }
 
     // ---------- script overrides ----------
@@ -297,7 +350,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (a.startsWith("A000000004")) return 2;   // Mastercard
         if (a.startsWith("A000000065")) return 5;   // JCB
         if (a.startsWith("A000000025")) return 4;   // Amex
-        if (a.startsWith("A000000333")) return 7;   // UnionPay (was 6 = Discover's)
+        if (a.startsWith("A000000333")) return 7;   // UnionPay
         return 3;                                   // Visa and anything else
     }
 
@@ -394,10 +447,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     /**
      * Build the AFL from the record keys actually stored, so it can never point
-     * at a record we do not hold. This was the bug: rewriteGpo() passed the real
-     * card's AFL through untouched while readRecord() served a different layout,
-     * so the terminal walked an AFL that did not match the data and gave up
-     * without reading anything.
+     * at a record we do not hold.
      *
      * Keys look like "<card>_cap_rec<sfi>_<rec>". If none exist we advertise
      * SFI 1 record 1, which the synthetic record below always answers.
@@ -482,10 +532,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (psn.isEmpty()) psn = "01";
         if (pan.length() % 2 != 0) pan += "F";
 
+        byte[] h = holder();
+
         return tlv(0x70, cat(
                 tlv(0x5A, hex(pan)),
-                tlv(0x5F34, hex(psn)),            // PAN sequence number - was missing
+                tlv(0x5F34, hex(psn)),            // PAN sequence number
                 tlv(0x5F24, hex(exp)),
+                h == null ? new byte[0] : tlv(0x5F20, h),   // cardholder name
                 tlv(0x57, track2()),
                 tlv(0x8C, hex(CDOL1)),
                 tlv(0x8D, hex(CDOL2)),
@@ -515,6 +568,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                         resetTransaction();
                         int n = scriptLines();
                         if (n > 0) tap("-- script armed: " + n + " line(s)");
+                        // the card is being presented - say whose it is
+                        popup(nameLine());
                     }
                 }
             }
@@ -526,6 +581,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             String hit = scriptMatch(apdu);
             if (hit != null) {
                 byte[] out = hex(hit);
+                scriptHits++;
                 tap("-- script hit " + out.length + " bytes");
                 int hi = out.length >= 2 ? (out[out.length - 2] & 0xFF) : 0;
                 if (hi != 0x90 && (hi & 0xF0) != 0x60) {
@@ -739,10 +795,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * MAC input is CDOL data, then AIP, then ATC. keyvar bit 1 flips that order
      * and bit 0 picks the diversification option - the key scan sets keyvar when
      * it finds a match, so the found key is used exactly the way it verified.
-     *
-     * Note: EMV also defines CDOL-related data (the tag/length descriptors built
-     * from CDOL1). It is not included here. If a real ARQC never matches, that is
-     * the first thing to add.
      */
     private byte[] computeAc(String atc, byte[] cdol) {
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -787,7 +839,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return n;
     }
 
-    private String verdict() {
+    private String baseVerdict() {
         String l = tapLog.toString();
         if (l.isEmpty()) return "TAP: nothing recorded";
 
@@ -817,6 +869,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
+    /** The verdict, plus whether the script did anything. */
+    private String verdict() {
+        String v = baseVerdict();
+        int armed = scriptLines();
+        if (scriptHits > 0) return v + " | script hit " + scriptHits + "x";
+        if (armed > 0) return v + " | script armed " + armed + " line(s) but never matched";
+        return v;
+    }
+
     @Override
     public void onDeactivated(int reason) {
         // End the transaction with the tap. Without this a tap that skips the
@@ -834,14 +895,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             try {
                 prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
             } catch (Exception ignored) { }
-            try {
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(HceCcEmulationServiceVisa.this, v, Toast.LENGTH_LONG).show();
-                    }
-                });
-            } catch (Exception ignored) { }
+            popup(v);
         }
         Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
