@@ -17,6 +17,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.PagerSnapHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -75,7 +76,7 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-            etMsd, etScript;                                 // NEW: etName
+            etMsd, etScript;
 
     private int current = 0;
     private boolean binding = false;
@@ -106,7 +107,7 @@ public class MainActivity extends AppCompatActivity {
         txtStatus = findViewById(R.id.txtStatus);
 
         etLabel = findViewById(R.id.etLabel);
-        etName = findViewById(R.id.etName);                   // NEW
+        etName = findViewById(R.id.etName);
         etPan = findViewById(R.id.etPan);
         etExpiry = findViewById(R.id.etExpiry);
         etService = findViewById(R.id.etService);
@@ -181,7 +182,7 @@ public class MainActivity extends AppCompatActivity {
         };
         EditText[] fields = { etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
                 etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-                etMsd, etScript };                            // NEW: etName
+                etMsd, etScript };
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
         // paste a dump into either of these and the card fills itself in
@@ -205,6 +206,19 @@ public class MainActivity extends AppCompatActivity {
      */
     private void autoFill() {
         if (binding) return;
+
+        // A track 1 paste carries the name between the two '^' marks. Track 2
+        // has no name at all, which is why pasting one never fills it in.
+        if (t(etName).isEmpty()) {
+            String n = nameFromTrack1(t(etTrack2));
+            if (n.isEmpty()) n = nameFromTrack1(t(etPan));
+            if (!n.isEmpty()) {
+                binding = true;
+                etName.setText(n);
+                binding = false;
+                collect();
+            }
+        }
 
         String fromTrack = normaliseTrack2(t(etTrack2));
         String fromPan = normaliseTrack2(t(etPan));
@@ -301,7 +315,7 @@ public class MainActivity extends AppCompatActivity {
         int i = current;
         SharedPreferences.Editor e = prefs.edit();
         e.putString(key(i, "label"), t(etLabel));
-        e.putString(key(i, "name"), t(etName).toUpperCase());   // NEW
+        e.putString(key(i, "name"), t(etName).toUpperCase());
         e.putString(key(i, "pan"), digits(t(etPan)));
         e.putString(key(i, "expiry"), t(etExpiry));
         e.putString(key(i, "service"), t(etService));
@@ -337,7 +351,7 @@ public class MainActivity extends AppCompatActivity {
         binding = true;
         current = i;
         etLabel.setText(prefs.getString(key(i, "label"), ""));
-        etName.setText(prefs.getString(key(i, "name"), ""));    // NEW
+        etName.setText(prefs.getString(key(i, "name"), ""));
         etPan.setText(prefs.getString(key(i, "pan"), ""));
         etExpiry.setText(prefs.getString(key(i, "expiry"), ""));
         etService.setText(prefs.getString(key(i, "service"), "201"));
@@ -418,7 +432,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5F24 expiry: ").append(expOut).append('\n');
         sb.append("5F20 name  : ")
                 .append(t(etName).isEmpty() ? "(empty - slip shows no name)" : t(etName).toUpperCase())
-                .append('\n');                                  // NEW
+                .append('\n');
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
@@ -837,14 +851,17 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
         copyStagingToCard(current);
 
-        // if the reader captured a name, surface it so it can be corrected
+        // The PAN has no name in it - the name only exists on the card, as 5F20
+        // inside a record. So a card cloned with READ CARD names itself, and a
+        // card built by hand from a bare track 2 has to have the name typed once.
         if (t(etName).isEmpty()) {
-            String h = prefs.getString(key(current, "cap_holder"), "");
+            String h = holderFromCapture(current);
             if (!h.isEmpty()) {
                 binding = true;
-                etName.setText(h.toUpperCase());
+                etName.setText(h);
                 binding = false;
                 collect();
+                txtStatus.setText("Name read off the card: " + h);
             }
         }
 
@@ -886,6 +903,47 @@ public class MainActivity extends AppCompatActivity {
             if (k.startsWith(p)) n++;
         }
         return n;
+    }
+
+    /**
+     * Lift the cardholder name out of whatever the reader captured. 5F20 sits
+     * inside a record, so scan every captured record for it and take the first
+     * usable one. A card whose records carry no 5F20 returns nothing.
+     */
+    private String holderFromCapture(int index) {
+        String prefix = key(index, "cap_rec");
+        for (String k : prefs.getAll().keySet()) {
+            if (!k.startsWith(prefix)) continue;
+            String hex = prefs.getString(k, "");
+            if (hex == null || hex.isEmpty()) continue;
+            try {
+                byte[] v = tagOf(hexToBytes(hex), 0x5F20);
+                if (v == null || v.length < 2) continue;
+                String n = new String(v, StandardCharsets.ISO_8859_1);
+                n = n.toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
+                if (n.length() >= 2) return n.length() > 26 ? n.substring(0, 26) : n;
+            } catch (Exception ignored) { }
+        }
+        return "";
+    }
+
+    /**
+     * Track 1 carries the name between the two '^' marks:
+     *   B<PAN>^SURNAME/FIRSTNAME^<expiry><service><discretionary>
+     * Track 2 has no name at all, which is why pasting one never fills this in.
+     */
+    private static String nameFromTrack1(String raw) {
+        if (raw == null) return "";
+        int a = raw.indexOf('^');
+        if (a < 0) return "";
+        int b = raw.indexOf('^', a + 1);
+        if (b < 0) return "";
+        String n = raw.substring(a + 1, b).toUpperCase()
+                .replaceAll("[^A-Z0-9 ./'-]", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (n.length() < 2) return "";
+        return n.length() > 26 ? n.substring(0, 26) : n;
     }
 
     /** Start the clone's ATC just above the value the real card last used. */
