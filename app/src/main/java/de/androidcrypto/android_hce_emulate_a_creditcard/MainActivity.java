@@ -43,7 +43,7 @@ public class MainActivity extends AppCompatActivity {
             {"JCB",                    "A0000000651010"},
             {"UnionPay",               "A000000333010101"},
             {"Interac",                "A0000002771010"},
-            {"Eftpos",                 "A00000038410"},
+            {"Eftpos",                 "A0000003841010"},   // was A00000038410 - short by a byte
             {"Girocard",               "A0000003591010"},
     };
 
@@ -74,7 +74,8 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtCount, txtStatus;
 
     private EditText etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
-            etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd;
+            etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
+            etScript;                                        // NEW
 
     private int current = 0;
     private boolean binding = false;
@@ -119,6 +120,7 @@ public class MainActivity extends AppCompatActivity {
         etIad = findViewById(R.id.etIad);
         etMkac = findViewById(R.id.etMkac);
         etMsd = findViewById(R.id.etMsd);
+        etScript = findViewById(R.id.etScript);              // NEW
 
         adapter = new CardAdapter();
         layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
@@ -177,7 +179,8 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         EditText[] fields = { etLabel, etPan, etExpiry, etService, etDiscretionary, etTrack2,
-                etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd };
+                etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac, etMsd,
+                etScript };                                  // NEW
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
         // paste a dump into either of these and the card fills itself in
@@ -311,6 +314,8 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
         e.putString(key(i, "iad"), t(etIad).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
+        // script keeps its own case - '#' comments read better in lower case
+        e.putString(key(i, "script"), t(etScript));          // NEW
         e.putInt(key(i, "msd"), "0".equals(t(etMsd)) ? 0 : 1);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
@@ -336,7 +341,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "1880"));
+        etAip.setText(prefs.getString(key(i, "aip"), "3080"));   // matches the service
         etAfl.setText(prefs.getString(key(i, "afl"), "08010100"));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -344,6 +349,7 @@ public class MainActivity extends AppCompatActivity {
         etIad.setText(prefs.getString(key(i, "iad"), ""));
         etMkac.setText(prefs.getString(key(i, "mkac"), ""));
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 1)));
+        etScript.setText(prefs.getString(key(i, "script"), "")); // NEW - empty = service default
         binding = false;
         updateCount();
         txtStatus.setText("");
@@ -395,7 +401,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "1880" : t(etAip).toUpperCase()).append('\n');
+                .append(t(etAip).isEmpty() ? "3080" : t(etAip).toUpperCase()).append('\n');
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
         sb.append('\n');
@@ -409,6 +415,16 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5F24 expiry: ").append(expOut).append('\n');
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
+
+        String script = t(etScript);
+        int scriptLines = 0;
+        for (String line : script.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            if (line.indexOf('=') > 0) scriptLines++;
+        }
+        sb.append("script     : ").append(scriptLines == 0
+                ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
 
         // ---- traps ----
         String trackPan = track2.contains("D")
