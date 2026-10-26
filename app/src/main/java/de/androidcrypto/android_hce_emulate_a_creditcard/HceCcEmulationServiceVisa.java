@@ -734,7 +734,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] masked = new byte[]{(byte) (aip[0] & AIP_ODA_MASK), aip[1]};
+        // FIX: AIP byte 2 bit 8 must AGREE with the framing we are about to send:
+        //   77 template -> EMV mode   -> bit set
+        //   80 template -> magstripe  -> bit clear
+        // Never inherit this from the captured card. A real magstripe card hands
+        // over byte 2 = 0x00; if we then answer in EMV format, an EMV-only
+        // terminal sees a card that speaks neither of the modes it supports and
+        // bails right after the GPO - no READ RECORD, no GENERATE AC. That is the
+        // "read no records" failure, and this line makes it impossible.
         if (msd) masked[1] &= (byte) ~AIP_EMV_MODE;
+        else     masked[1] |= AIP_EMV_MODE;
         txnAip = masked;
 
         byte[] a = afl();
