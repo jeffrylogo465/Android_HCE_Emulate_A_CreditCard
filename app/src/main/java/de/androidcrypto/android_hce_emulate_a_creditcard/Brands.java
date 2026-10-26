@@ -161,8 +161,10 @@ public final class Brands {
         }
         if (c == '6') {
             if (d.startsWith("6011") || d.startsWith("65")) return Network.DISCOVER;
-            if (d.startsWith("62")) return Network.UNIONPAY;
+            // FIX: 622 must be tested BEFORE the bare 62. 62 used to swallow it,
+            // so the 622126-622925 Discover co-brand range was unreachable.
             if (d.startsWith("622")) return Network.DISCOVER;
+            if (d.startsWith("62")) return Network.UNIONPAY;
             int three = num(d, 3);
             if (three >= 644 && three <= 649) return Network.DISCOVER;
             return Network.UNKNOWN;
@@ -217,16 +219,29 @@ public final class Brands {
         return best;
     }
 
-    /** Keyword match against an issuer name from BinLookup. */
+    /**
+     * Keyword match against an issuer name from BinLookup.
+     *
+     * FIX: LONGEST matching keyword wins, not the first one in array order.
+     * First-match-wins meant "CITIZENS BANK" hit CITI's keyword at index 3 and
+     * was labelled CITI before CITIZENS at index 22 was ever consulted. It also
+     * stops the weak 2-char "53" keyword for Fifth Third from stealing any name
+     * that merely contains "53".
+     */
     public static String bankKeywordFromIssuer(String issuerName) {
         if (issuerName == null || issuerName.isEmpty()) return null;
         String n = normalise(issuerName);
+        String best = null;
+        int bestLen = 0;
         for (Bank b : BANKS) {
             for (String k : b.keywords) {
-                if (n.contains(k)) return k;
+                if (k.length() > bestLen && n.contains(k)) {
+                    best = k;
+                    bestLen = k.length();
+                }
             }
         }
-        return null;
+        return best;
     }
 
     private static Bank bankFor(String keyword) {
@@ -249,6 +264,7 @@ public final class Brands {
 
         Bank bank = bankFor(keyword);
         if (bank != null) {
+            // keyword is a single split entry, so there are no pipes left to expand
             String name = keyword.replace("|", " / ");
             String icon = bank.domain == null ? null : LOGO + bank.domain;
             return new Style(name, icon, networkIcon(net), networkTint(net),
