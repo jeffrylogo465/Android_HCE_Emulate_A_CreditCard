@@ -4,7 +4,10 @@
 
     <uses-permission android:name="android.permission.NFC" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    
+
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="true" />
     <uses-feature
         android:name="android.hardware.nfc.hce"
         android:required="true" />
@@ -36,9 +39,13 @@
             android:name=".CaptureActivity"
             android:exported="false" />
 
+        <!-- Only ONE HCE service may be declared here. If you ever add the
+             Mastercard variant back, it needs its own aid-group with different
+             AIDs or the two will fight over the same ones. -->
         <service
             android:name=".HceCcEmulationServiceVisa"
             android:exported="true"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_NFC_SERVICE">
             <intent-filter>
                 <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
