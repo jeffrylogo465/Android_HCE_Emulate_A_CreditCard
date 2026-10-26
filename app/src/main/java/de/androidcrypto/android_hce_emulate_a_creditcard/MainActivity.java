@@ -78,6 +78,10 @@ public class MainActivity extends AppCompatActivity {
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
             etMsd, etScript;
 
+    // the two pages and the two nav items
+    private View pageWallet, pageEdit;
+    private TextView navWallet, navEdit;
+
     private int current = 0;
     private boolean binding = false;
 
@@ -124,6 +128,15 @@ public class MainActivity extends AppCompatActivity {
         etMsd = findViewById(R.id.etMsd);
         etScript = findViewById(R.id.etScript);
 
+        // ---- pages ----
+        pageWallet = findViewById(R.id.pageWallet);
+        pageEdit   = findViewById(R.id.pageEdit);
+        navWallet  = findViewById(R.id.navWallet);
+        navEdit    = findViewById(R.id.navEdit);
+
+        navWallet.setOnClickListener(v -> showPage(0));
+        navEdit.setOnClickListener(v -> showPage(1));
+
         adapter = new CardAdapter();
         layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
         snapHelper = new PagerSnapHelper();
@@ -158,7 +171,7 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.btnSave).setOnClickListener(v -> onSave());
         findViewById(R.id.btnSave).setOnLongClickListener(v -> { showPreview(); return true; });
-        findViewById(R.id.btnAdd).setOnClickListener(v -> onAdd());
+        findViewById(R.id.btnAdd).setOnClickListener(v -> { onAdd(); showPage(1); });
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
             startReader();
@@ -195,6 +208,27 @@ public class MainActivity extends AppCompatActivity {
         };
         etTrack2.addTextChangedListener(filler);
         etPan.addTextChangedListener(filler);
+
+        showPage(0);
+    }
+
+    // ---------- pages ----------
+
+    private void showPage(int page) {
+        pageWallet.setVisibility(page == 0 ? View.VISIBLE : View.GONE);
+        pageEdit.setVisibility(page == 1 ? View.VISIBLE : View.GONE);
+        navWallet.setTextColor(page == 0 ? 0xFF14B8A6 : 0xFF4B5563);
+        navEdit.setTextColor(page == 1 ? 0xFF14B8A6 : 0xFF4B5563);
+        if (page == 0) hideKeyboard();
+    }
+
+    private void hideKeyboard() {
+        View v = getCurrentFocus();
+        if (v == null) return;
+        android.view.inputmethod.InputMethodManager im =
+                (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
+        v.clearFocus();
     }
 
     /**
@@ -303,7 +337,7 @@ public class MainActivity extends AppCompatActivity {
             c.pan = prefs.getString(key(i, "pan"), "");
             c.expiry = prefs.getString(key(i, "expiry"), "");
             c.aid = prefs.getString(key(i, "aid"), "");
-            c.msd = prefs.getInt(key(i, "msd"), 1);
+            c.msd = prefs.getInt(key(i, "msd"), 0);
             cards.add(c);
         }
         if (cards.isEmpty()) cards.add(new CardAdapter.CardModel());
@@ -365,7 +399,10 @@ public class MainActivity extends AppCompatActivity {
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
         etIad.setText(prefs.getString(key(i, "iad"), ""));
         etMkac.setText(prefs.getString(key(i, "mkac"), ""));
-        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 1)));
+        // 0 = EMV. The right default for a hand-typed card, because EMV is the
+        // only mode that can reach a cryptogram. A cloned card overrides this
+        // from the capture, so a real magstripe card still lands on 1.
+        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
         etScript.setText(prefs.getString(key(i, "script"), ""));
         binding = false;
         updateCount();
@@ -406,7 +443,7 @@ public class MainActivity extends AppCompatActivity {
         String sc = digits(t(etService));
         String disc = t(etDiscretionary).toUpperCase();
         String aid = t(etAid).toUpperCase();
-        String msd = t(etMsd).isEmpty() ? "1" : t(etMsd);
+        String msd = t(etMsd).isEmpty() ? "0" : t(etMsd);
 
         String track2 = normaliseTrack2(t(etTrack2));
         if (track2.isEmpty() && !pan.isEmpty()) {
@@ -730,6 +767,7 @@ public class MainActivity extends AppCompatActivity {
 
         txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
         Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
+        showPage(0);                              // back to the wallet where the status lives
     }
 
     private void onAdd() {
@@ -837,10 +875,6 @@ public class MainActivity extends AppCompatActivity {
         etService.setText(service);
         etTrack2.setText(track2);
         etAid.setText(aid);
-        // MSD framing must follow the card we captured, not a hardcoded default.
-        // The reader stored a 77 GPO response for an EMV card; answering in
-        // magstripe framing made the terminal give up before the cryptogram.
-        etMsd.setText(String.valueOf(msdFromCapture()));
         etDiscretionary.setText(track2.isEmpty() ? disc : "");
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
@@ -849,7 +883,16 @@ public class MainActivity extends AppCompatActivity {
 
         collect();
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
+
+        // Move the capture onto the card FIRST, so msdFromCapture can read it off
+        // the card itself rather than depending on the staging area still being
+        // there. Staging is burned by this call.
         copyStagingToCard(current);
+
+        binding = true;
+        etMsd.setText(String.valueOf(msdFromCapture(current)));
+        binding = false;
+        collect();
 
         adapter.notifyItemChanged(current);
         pager.smoothScrollToPosition(current);
@@ -880,6 +923,7 @@ public class MainActivity extends AppCompatActivity {
         txtStatus.setText(st);
 
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
+        showPage(1);                              // straight into the editor to review
 
         // the reader just captured a real cryptogram - hunt for the issuer key
         if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
@@ -888,9 +932,13 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** 1 = magstripe framing, 0 = EMV framing. Read it off the captured GPO. */
-    private int msdFromCapture() {
-        String gpo = prefs.getString("cap_rawgpo", "");
+    /**
+     * 1 = magstripe framing, 0 = EMV framing. Read off the captured GPO.
+     * Reads the card's own key, so it must be called after copyStagingToCard.
+     */
+    private int msdFromCapture(int index) {
+        String gpo = prefs.getString(key(index, "cap_rawgpo"), "");
+        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");   // staging fallback
         if (gpo.length() < 2) return 1;
         try {
             return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
