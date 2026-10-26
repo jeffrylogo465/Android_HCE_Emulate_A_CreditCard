@@ -53,7 +53,7 @@ public class MainActivity extends AppCompatActivity {
     };
 
     /**
-     * FIX: every <aid-filter> in apduservice.xml, mirrored here.
+     * Every <aid-filter> in apduservice.xml, mirrored here.
      *
      * Android matches AID filters by PREFIX, so startsWith() below reproduces
      * exactly what the platform will route. An AID the PPSE advertises but this
@@ -225,7 +225,7 @@ public class MainActivity extends AppCompatActivity {
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
-        navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });   // NEW
+        navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -373,9 +373,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * FIX: AID routability. Prefix match, mirroring how Android routes, against
-     * the filters in apduservice.xml. An AID outside this list is advertised in
-     * the PPSE but never delivered to the service - the terminal SELECTs into a
+     * AID routability. Prefix match, mirroring how Android routes, against the
+     * filters in apduservice.xml. An AID outside this list is advertised in the
+     * PPSE but never delivered to the service - the terminal SELECTs into a
      * void and the tap dies with nothing in the log.
      */
     private static boolean routable(String aid) {
@@ -422,8 +422,8 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         // script keeps its own case - '#' comments read better in lower case
         e.putString(key(i, "script"), t(etScript));
-        // FIX: was "0".equals(t(etMsd)) ? 0 : 1 - so a blank or a typo silently
-        // meant magstripe. Parse it, and default to 0 (EMV) like the service now does.
+        // was "0".equals(t(etMsd)) ? 0 : 1 - a blank or a typo silently meant
+        // magstripe. Parse it, and default to 0 (EMV) like the service does.
         e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
@@ -435,7 +435,6 @@ public class MainActivity extends AppCompatActivity {
             c.pan = t(etPan);
             c.expiry = t(etExpiry);
             c.aid = t(etAid);
-            // FIX: same coercion, same fix
             c.msd = t(etMsd).startsWith("1") ? 1 : 0;
         }
     }
@@ -452,7 +451,7 @@ public class MainActivity extends AppCompatActivity {
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
         etAip.setText(prefs.getString(key(i, "aip"), "3080"));
-        // FIX: default is now EMPTY, not "08010100". The service reads this field,
+        // default is now EMPTY, not "08010100". The service reads this field,
         // and an empty value means "derive the AFL from the records we hold".
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
@@ -556,13 +555,13 @@ public class MainActivity extends AppCompatActivity {
         if (aid.isEmpty()) {
             sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
         }
-        // FIX: the silent-death trap. Advertised but not routable.
+        // the silent-death trap. Advertised but not routable.
         if (!aid.isEmpty() && !routable(aid)) {
             sb.append('\n').append("!! AID has no <aid-filter> in apduservice.xml\n");
             sb.append("   Android will not route the SELECT - tap dies with NO log line\n");
             sb.append("   add: <aid-filter android:name=\"").append(aid).append("\" />\n");
         }
-        // FIX: was !"0".equals(msd) - it fired on magstripe but talked about EMV
+        // was !"0".equals(msd) - it fired on magstripe but talked about EMV
         if ("0".equals(msd)) {
             sb.append('\n').append("note: MSD=0 is EMV mode - terminal walks the AFL, ARQC matters\n");
         }
@@ -594,7 +593,7 @@ public class MainActivity extends AppCompatActivity {
         return sb.toString();
     }
 
-    // ---------- routing self-check ----------   // NEW
+    // ---------- routing self-check ----------
 
     /**
      * Long-press WALLET. Answers the only question that matters before a real
@@ -620,8 +619,9 @@ public class MainActivity extends AppCompatActivity {
         sb.append('\n');
 
         CardEmulation ce = null;
+        // FIX: Throwable, not Exception. Nothing here is API 24+, but be uniform.
         if (nfc != null) {
-            try { ce = CardEmulation.getInstance(nfc); } catch (Exception ignored) { }
+            try { ce = CardEmulation.getInstance(nfc); } catch (Throwable ignored) { }
         }
         if (ce == null) {
             sb.append("CardEmulation unavailable - HCE not supported on this device\n");
@@ -635,8 +635,13 @@ public class MainActivity extends AppCompatActivity {
                 ? "  good - you outrank Google Wallet for the big-brand AIDs\n"
                 : "  NOT default - you only get AIDs no payment app claims\n");
 
+        // FIX: supportsAidPrefixRegistration() is API 24 and minSdk is 21. On
+        // API 21-23 the method is absent from the runtime class, so this throws
+        // NoSuchMethodError - which extends Error, NOT Exception. The old
+        // catch(Exception) never fired, so the whole check died before it
+        // printed a single routing line.
         String prefix = "?";
-        try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Exception ignored) { }
+        try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Throwable ignored) { }
         sb.append("prefix AID matching : ").append(prefix).append("\n\n");
 
         // The PPSE first - if the terminal cannot read the directory, nothing
@@ -658,9 +663,11 @@ public class MainActivity extends AppCompatActivity {
                 continue;
             }
             boolean routed;
+            // FIX: Throwable. This one is inside the loop, so an Error here would
+            // print BLOCKED for every AID with no explanation.
             try {
                 routed = ce.isDefaultServiceForAid(me, a);
-            } catch (Exception e) {
+            } catch (Throwable ignored) {
                 routed = false;
             }
             if (routed) {
@@ -680,7 +687,7 @@ public class MainActivity extends AppCompatActivity {
         dialog("Can the terminal reach us?", sb.toString());
     }
 
-    /** Small dialog helper for the self-check. */   // NEW
+    /** Small dialog helper for the self-check. */
     private void dialog(String title, String body) {
         new AlertDialog.Builder(this)
                 .setTitle(title)
@@ -928,7 +935,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // FIX: the silent-death check. Everything above validates the DATA; this
+        // the silent-death check. Everything above validates the DATA; this
         // validates whether the terminal can reach us at all.
         String aidNow = t(etAid).toUpperCase();
         if (!routable(aidNow)) {
@@ -1052,7 +1059,7 @@ public class MainActivity extends AppCompatActivity {
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
-        // FIX: leave the AFL empty on a clone so the service derives it from the
+        // leave the AFL empty on a clone so the service derives it from the
         // records that actually landed. A leftover "08010100" would advertise
         // SFI 1 record 1 only and silently ignore every captured record.
         etAfl.setText("");
