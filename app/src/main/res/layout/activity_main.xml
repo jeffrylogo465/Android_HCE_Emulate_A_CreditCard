@@ -105,6 +105,16 @@
 
                 </LinearLayout>
 
+                <Button
+                    android:id="@+id/btnCallBank"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="8dp"
+                    android:backgroundTint="#1F2430"
+                    android:text="CALL ISSUER / CHECK IF LIVE"
+                    android:textColor="#9CA3AF"
+                    android:textSize="10sp" />
+
                 <TextView
                     android:id="@+id/txtStatus"
                     android:layout_width="match_parent"
