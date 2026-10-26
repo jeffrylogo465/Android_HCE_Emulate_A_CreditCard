@@ -53,12 +53,26 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte CID_ARQC = (byte) 0x80;   // go online
 
     /**
+     * true  - answer ARQC on the first cryptogram request, so the terminal goes
+     *         online. The host receives the PAN, does not recognise the card,
+     *         and declines - and a decline is the one outcome that reliably
+     *         prints a slip carrying the PAN.
+     *
+     *         An offline TC approve usually prints nothing, which is why this is
+     *         the setting to use when you want a receipt.
+     *
+     * false - the logic below: ARQC when we hold a genuine key, TC otherwise.
+     */
+    private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = true;
+
+    /**
      * true  - when we actually hold a matching MK-AC, answer ARQC and let the
      *         issuer judge a cryptogram that is real. Without a key the ARQC
      *         would be eight zero bytes, which the host almost always rejects,
      *         so in that case we fall through to FORCE_OFFLINE_TC instead.
      * false - always fall through to the flag below. Use this to test whether
      *         the terminal approves offline, independent of any key work.
+     * Only consulted when ALWAYS_ONLINE_FOR_RECEIPT is false.
      */
     private static final boolean FORCE_ONLINE_ARQC = true;
 
@@ -67,6 +81,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      *         unverifiable ARQC never gets judged. Needs a small amount and a
      *         terminal that is not configured forced-online.
      * false - mirror what the terminal asked for.
+     * Only consulted when ALWAYS_ONLINE_FOR_RECEIPT is false.
      */
     private static final boolean FORCE_OFFLINE_TC = true;
 
@@ -87,6 +102,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private byte[] txnAip;
     /** One ATC per tap, shared by the GPO response and the cryptogram. */
     private String txnAtc;
+    /** True once this tap has produced a cryptogram, so a second request completes with TC. */
+    private boolean cryptogramSent;
 
     private void tap(String s) {
         tapLog.append(s).append('\n');
@@ -182,6 +199,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private void resetTransaction() {
         txnAip = null;
         txnAtc = null;
+        cryptogramSent = false;
     }
 
     private byte[] aipForMac() {
@@ -567,12 +585,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         // 0x80 = ARQC wanted, 0x40 = TC wanted, 0x00 = AAC wanted.
         // These are the same encoding, but they are two different fields - do
         // not assume the terminal wants back the byte it just sent.
-        //
-        // Going online is only worth it when the ARQC is genuine. Without a key
-        // it is eight zero bytes, so answer TC and let the terminal approve
-        // offline rather than handing the host a cryptogram it will reject.
         byte cid;
-        if (haveKey() && FORCE_ONLINE_ARQC) {
+        if (ALWAYS_ONLINE_FOR_RECEIPT && !cryptogramSent) {
+            cid = CID_ARQC;                              // first AC - go online
+        } else if (cryptogramSent) {
+            cid = CID_TC;                                // second AC after the online round trip - complete
+        } else if (haveKey() && FORCE_ONLINE_ARQC) {
             cid = CID_ARQC;                              // real ARQC - let the issuer judge
         } else if (FORCE_OFFLINE_TC) {
             cid = CID_TC;                                // no key - approve offline
@@ -597,6 +615,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
 
         byte[] ac = computeAc(atc, cdol);
+        cryptogramSent = true;
 
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + String.format("%02X", cid)
