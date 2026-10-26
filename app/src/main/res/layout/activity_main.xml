@@ -104,6 +104,7 @@
             android:fontFamily="monospace"
             android:hint="SURNAME/FIRSTNAME"
             android:inputType="textNoSuggestions|textCapCharacters"
+            android:maxLength="26"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
             android:textColor="#E5E7EB"
