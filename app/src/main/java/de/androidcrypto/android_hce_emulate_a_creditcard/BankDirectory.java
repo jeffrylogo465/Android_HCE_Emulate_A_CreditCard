@@ -97,15 +97,23 @@ public final class BankDirectory {
         return d;
     }
 
-    private static boolean luhn(String d) {
+    /**
+     * Standard Luhn. The rightmost digit is NEVER doubled, so the toggle must
+     * start false and flip AFTER the digit has been added to the sum.
+     */
+    private static boolean luhn(String raw) {
+        String d = digits(raw);
+        if (d.length() < 12 || d.length() > 19) return false;
         int sum = 0;
-        boolean alt = false;
+        boolean doubleIt = false;
         for (int i = d.length() - 1; i >= 0; i--) {
             int c = d.charAt(i) - '0';
-            if (c < 0 || c > 9) return false;
-            if (alt) { c *= 2; if (c > 9) c -= 9; }
+            if (doubleIt) {
+                c *= 2;
+                if (c > 9) c -= 9;
+            }
             sum += c;
-            alt = !alt;
+            doubleIt = !doubleIt;
         }
         return sum % 10 == 0;
     }
