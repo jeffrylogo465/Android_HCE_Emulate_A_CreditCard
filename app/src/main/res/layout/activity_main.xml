@@ -11,6 +11,7 @@
         android:layout_weight="1">
 
         <!-- ================= PAGE 1 · WALLET ================= -->
+
         <ScrollView
             android:id="@+id/pageWallet"
             android:layout_width="match_parent"
@@ -26,8 +27,8 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="bottom">
+                    android:gravity="bottom"
+                    android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="0dp"
@@ -45,6 +46,7 @@
                         android:text="1 card"
                         android:textColor="#6B7280"
                         android:textSize="11sp" />
+
                 </LinearLayout>
 
                 <TextView
@@ -100,6 +102,7 @@
                         android:text="READ CARD"
                         android:textColor="#FFFFFF"
                         android:textSize="10sp" />
+
                 </LinearLayout>
 
                 <TextView
@@ -112,10 +115,13 @@
                     android:text=""
                     android:textColor="#6B7280"
                     android:textSize="11sp" />
+
             </LinearLayout>
+
         </ScrollView>
 
         <!-- ================= PAGE 2 · EDIT ================= -->
+
         <ScrollView
             android:id="@+id/pageEdit"
             android:layout_width="match_parent"
@@ -167,7 +173,7 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="4dp"
                     android:letterSpacing="0.1"
-                    android:text="NAME  (cardholder, on the slip)"
+                    android:text="NAME (cardholder, on the slip)"
                     android:textColor="#6B7280"
                     android:textSize="10sp" />
 
@@ -244,6 +250,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
 
                     <LinearLayout
@@ -275,7 +282,9 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
+
                 </LinearLayout>
 
                 <TextView
@@ -308,7 +317,7 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="4dp"
                     android:letterSpacing="0.1"
-                    android:text="TRACK 2 RAW HEX  (long-press to preview)"
+                    android:text="TRACK 2 RAW HEX (long-press to preview)"
                     android:textColor="#6B7280"
                     android:textSize="10sp" />
 
@@ -332,7 +341,7 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="4dp"
                     android:letterSpacing="0.1"
-                    android:text="AID  (long-press to pick)"
+                    android:text="AID (long-press to pick)"
                     android:textColor="#6B7280"
                     android:textSize="10sp" />
 
@@ -384,6 +393,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
 
                     <LinearLayout
@@ -398,7 +408,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginBottom="4dp"
                             android:letterSpacing="0.1"
-                            android:text="AFL"
+                            android:text="AFL (empty = auto)"
                             android:textColor="#6B7280"
                             android:textSize="10sp" />
 
@@ -408,14 +418,16 @@
                             android:layout_height="44dp"
                             android:background="@drawable/field_bg"
                             android:fontFamily="monospace"
-                            android:hint="08010100"
+                            android:hint="auto from records"
                             android:inputType="textNoSuggestions|textCapCharacters"
                             android:paddingStart="12dp"
                             android:paddingEnd="12dp"
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
+
                 </LinearLayout>
 
                 <LinearLayout
@@ -435,7 +447,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginBottom="4dp"
                             android:letterSpacing="0.1"
-                            android:text="CID"
+                            android:text="CID (computed)"
                             android:textColor="#6B7280"
                             android:textSize="10sp" />
 
@@ -452,6 +464,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
 
                     <LinearLayout
@@ -483,7 +496,9 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
+
                     </LinearLayout>
+
                 </LinearLayout>
 
                 <LinearLayout
@@ -503,7 +518,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginBottom="4dp"
                             android:letterSpacing="0.1"
-                            android:text="ARQC / 9F26"
+                            android:text="ARQC / 9F26 (computed)"
                             android:textColor="#6B7280"
                             android:textSize="10sp" />
 
@@ -520,6 +535,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="12sp" />
+
                     </LinearLayout>
 
                     <LinearLayout
@@ -551,7 +567,9 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="12sp" />
+
                     </LinearLayout>
+
                 </LinearLayout>
 
                 <TextView
@@ -584,7 +602,7 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="4dp"
                     android:letterSpacing="0.1"
-                    android:text="MSD MODE  (1 = MSD, 0 = EMV)"
+                    android:text="MSD (0 = EMV, 1 = magstripe)"
                     android:textColor="#6B7280"
                     android:textSize="10sp" />
 
@@ -608,7 +626,7 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="4dp"
                     android:letterSpacing="0.1"
-                    android:text="SCRIPT  (match=response, one per line)"
+                    android:text="SCRIPT (match=response, one per line)"
                     android:textColor="#6B7280"
                     android:textSize="10sp" />
 
@@ -644,11 +662,15 @@
                     android:textColor="#FFFFFF"
                     android:textSize="11sp"
                     android:textStyle="bold" />
+
             </LinearLayout>
+
         </ScrollView>
+
     </FrameLayout>
 
     <!-- ================= NAV ================= -->
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="54dp"
@@ -675,5 +697,7 @@
             android:text="EDIT"
             android:textColor="#4B5563"
             android:textSize="10sp" />
+
     </LinearLayout>
+
 </LinearLayout>
