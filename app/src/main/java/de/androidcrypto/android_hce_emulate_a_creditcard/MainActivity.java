@@ -48,6 +48,45 @@ public class MainActivity extends AppCompatActivity {
             {"Girocard",               "A0000003591010"},
     };
 
+    /**
+     * FIX: every <aid-filter> in apduservice.xml, mirrored here.
+     *
+     * Android matches AID filters by PREFIX, so startsWith() below reproduces
+     * exactly what the platform will route. An AID the PPSE advertises but this
+     * list does not cover is the nastiest failure in the whole app: the terminal
+     * SELECTs, Android never delivers the APDU to the service, and you get NO log
+     * line at all - indistinguishable from a dead reader.
+     *
+     * Keep in sync with apduservice.xml. Drift is silent.
+     */
+    private static final String[] ROUTABLE = {
+            "325041592E5359532E4444463031",
+            // Visa
+            "A0000000031010", "A0000000031020", "A0000000032010",
+            "A0000000032020", "A0000000038010",
+            // Mastercard / Maestro / Cirrus
+            "A0000000041010", "A0000000041000", "A0000000043060",
+            "A0000000046000", "A0000000048002", "A0000000050001",
+            // American Express
+            "A00000002501", "A0000000250104", "A0000000250001",
+            // Discover / Diners
+            "A0000001523010", "A0000001524010", "A0000001521010",
+            "A0000001522010", "A0000001522001", "A0000001522300",
+            "A0000001522400", "A0000000152001", "A0000000152010",
+            "A0000000152020", "A0000000152200", "A0000000152300",
+            "A0000000152400", "A0000000010101",
+            // JCB
+            "A0000000651010", "A0000000650000",
+            // UnionPay
+            "A0000003330101", "A000000333010101", "A000000333010102",
+            "A000000333010103",
+            // Interac / Eftpos / Girocard / others
+            "A0000002771010", "A0000003845010", "A0000003841010",
+            "A00000038410", "F0010203040506",
+            "A0000003591010", "A0000003591010028001", "A00000000386980701",
+            "A0000000410100", "A0000000422035",
+    };
+
     /** Lazy defaults and common test keys for the issuer-key hunt. The user's
      *  own list, typed into the key editor, is added on top of these. */
     private static final String[] SEED_KEYS = {
@@ -328,6 +367,18 @@ public class MainActivity extends AppCompatActivity {
         return s.replaceAll("[^0-9]", "");
     }
 
+    /**
+     * FIX: AID routability. Prefix match, mirroring how Android routes, against
+     * the filters in apduservice.xml. An AID outside this list is advertised in
+     * the PPSE but never delivered to the service - the terminal SELECTs into a
+     * void and the tap dies with nothing in the log.
+     */
+    private static boolean routable(String aid) {
+        if (aid == null || aid.isEmpty()) return false;
+        for (String f : ROUTABLE) if (aid.startsWith(f)) return true;
+        return false;
+    }
+
     private void loadAll() {
         cards.clear();
         int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
@@ -366,7 +417,9 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         // script keeps its own case - '#' comments read better in lower case
         e.putString(key(i, "script"), t(etScript));
-        e.putInt(key(i, "msd"), "0".equals(t(etMsd)) ? 0 : 1);
+        // FIX: was "0".equals(t(etMsd)) ? 0 : 1 - so a blank or a typo silently
+        // meant magstripe. Parse it, and default to 0 (EMV) like the service now does.
+        e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
         e.apply();
@@ -377,7 +430,8 @@ public class MainActivity extends AppCompatActivity {
             c.pan = t(etPan);
             c.expiry = t(etExpiry);
             c.aid = t(etAid);
-            c.msd = "0".equals(t(etMsd)) ? 0 : 1;
+            // FIX: same coercion, same fix
+            c.msd = t(etMsd).startsWith("1") ? 1 : 0;
         }
     }
 
@@ -393,7 +447,9 @@ public class MainActivity extends AppCompatActivity {
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
         etAip.setText(prefs.getString(key(i, "aip"), "3080"));
-        etAfl.setText(prefs.getString(key(i, "afl"), "08010100"));
+        // FIX: default is now EMPTY, not "08010100". The service reads this field,
+        // and an empty value means "derive the AFL from the records we hold".
+        etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
@@ -495,8 +551,15 @@ public class MainActivity extends AppCompatActivity {
         if (aid.isEmpty()) {
             sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
         }
-        if (!"0".equals(msd) && !track2.isEmpty()) {
-            sb.append('\n').append("note: MSD=0 means EMV mode, so the ARQC matters\n");
+        // FIX: the silent-death trap. Advertised but not routable.
+        if (!aid.isEmpty() && !routable(aid)) {
+            sb.append('\n').append("!! AID has no <aid-filter> in apduservice.xml\n");
+            sb.append("   Android will not route the SELECT - tap dies with NO log line\n");
+            sb.append("   add: <aid-filter android:name=\"").append(aid).append("\" />\n");
+        }
+        // FIX: was !"0".equals(msd) - it fired on magstripe but talked about EMV
+        if ("0".equals(msd)) {
+            sb.append('\n').append("note: MSD=0 is EMV mode - terminal walks the AFL, ARQC matters\n");
         }
         if (track2.length() % 2 != 0) {
             sb.append('\n').append("track 2 is odd length - gets an F pad (normal)\n");
@@ -765,6 +828,16 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // FIX: the silent-death check. Everything above validates the DATA; this
+        // validates whether the terminal can reach us at all.
+        String aidNow = t(etAid).toUpperCase();
+        if (!routable(aidNow)) {
+            txtStatus.setText("Saved - AID " + aidNow + " is not in apduservice.xml, tap will die silently");
+            Toast.makeText(this, "AID not routable - add an <aid-filter>", Toast.LENGTH_LONG).show();
+            showPage(0);
+            return;
+        }
+
         txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
         Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
         showPage(0);                              // back to the wallet where the status lives
@@ -879,6 +952,10 @@ public class MainActivity extends AppCompatActivity {
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
+        // FIX: leave the AFL empty on a clone so the service derives it from the
+        // records that actually landed. A leftover "08010100" would advertise
+        // SFI 1 record 1 only and silently ignore every captured record.
+        etAfl.setText("");
         binding = false;
 
         collect();
