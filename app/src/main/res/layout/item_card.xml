@@ -7,22 +7,25 @@
     android:orientation="vertical"
     android:padding="16dp">
 
+    <!-- top: bank logo left, mode badge + index right -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/cardBrand"
+        <ImageView
+            android:id="@+id/ivBankLogo"
+            android:layout_width="wrap_content"
+            android:layout_height="28dp"
+            android:adjustViewBounds="true"
+            android:contentDescription="@null"
+            android:scaleType="fitStart" />
+
+        <Space
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:letterSpacing="0.16"
-            android:text="CARD"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
         <TextView
             android:id="@+id/cardMode"
@@ -54,11 +57,36 @@
         android:layout_weight="1" />
 
     <TextView
+        android:id="@+id/cardBrand"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:letterSpacing="0.16"
+        android:maxLines="1"
+        android:text="CARD"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:letterSpacing="0.08"
+        android:maxLines="1"
+        android:textColor="#B3FFFFFF"
+        android:textSize="9sp" />
+
+    <TextView
         android:id="@+id/cardPan"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:fontFamily="monospace"
         android:letterSpacing="0.07"
+        android:maxLines="1"
         android:text="0000 0000 0000 0000"
         android:textColor="#FFFFFF"
         android:textSize="18sp" />
@@ -67,6 +95,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <LinearLayout
@@ -76,6 +105,7 @@
             android:orientation="vertical">
 
             <TextView
+                android:id="@+id/tvValidLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:letterSpacing="0.12"
@@ -100,6 +130,7 @@
             android:orientation="vertical">
 
             <TextView
+                android:id="@+id/tvAidLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:letterSpacing="0.12"
@@ -109,12 +140,23 @@
 
             <TextView
                 android:id="@+id/cardAid"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:ellipsize="end"
                 android:fontFamily="monospace"
+                android:maxLines="1"
                 android:text="--"
                 android:textColor="#FFFFFF"
                 android:textSize="10sp" />
         </LinearLayout>
+
+        <ImageView
+            android:id="@+id/ivNetworkLogo"
+            android:layout_width="wrap_content"
+            android:layout_height="22dp"
+            android:layout_marginStart="10dp"
+            android:adjustViewBounds="true"
+            android:contentDescription="@null"
+            android:scaleType="fitEnd" />
     </LinearLayout>
 </LinearLayout>
