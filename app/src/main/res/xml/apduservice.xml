@@ -1,11 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  HCE routing notes, because two of these rules are invisible and both bite:
+
+  1. <aid-filter> matches by PREFIX. A 6-byte filter catches every longer AID
+     that starts with those 6 bytes. Always write the full AID so it is obvious
+     what is covered.
+
+  2. INVARIANT: every AID buildPpse() can advertise must appear here. The PPSE
+     lists the card's own AID plus Visa and Mastercard fallbacks. If the terminal
+     selects an AID that has no filter, Android never routes the APDU to this
+     service and the tap dies silently - no log line, nothing to debug.
+
+  3. category="payment" is deliberate. "other" can never outrank Google Wallet
+     for the Visa/Mastercard AIDs. Payment-category + being the selected default
+     payment app is the only combination that wins them. If you are NOT set as
+     the default payment app, you only receive the AIDs Wallet ignores.
+
+  4. requireDeviceUnlock="false" so a locked screen still taps.
+-->
 <host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/app_name"
     android:apduServiceBanner="@drawable/hce_260_96"
     android:requireDeviceUnlock="false">
+
     <aid-group
         android:category="payment"
         android:description="@string/app_name">
+
         <aid-filter android:name="325041592E5359532E4444463031" />
 
         <!-- Visa -->
@@ -57,6 +78,8 @@
         <!-- Interac / Eftpos / Girocard / others -->
         <aid-filter android:name="A0000002771010" />
         <aid-filter android:name="A0000003845010" />
+        <!-- full eftpos AID - was only covered by the 6-byte prefix above -->
+        <aid-filter android:name="A0000003841010" />
         <aid-filter android:name="A00000038410" />
         <aid-filter android:name="F0010203040506" />
         <aid-filter android:name="A0000003591010" />
@@ -64,5 +87,6 @@
         <aid-filter android:name="A00000000386980701" />
         <aid-filter android:name="A0000000410100" />
         <aid-filter android:name="A0000000422035" />
+
     </aid-group>
 </host-apdu-service>
