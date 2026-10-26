@@ -5,68 +5,123 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Brand / issuer detection and card styling.
+ * Card identity and styling.
  *
- * NETWORK comes from the captured AID - authoritative, no guessing.
- * BANK comes from a BIN table on the first 4-6 digits of the PAN. A PAN has no
- * bank field in it, so a lookup table is the only way; extend BIN as you meet
- * new cards. Longest matching prefix wins.
- *
- * Colours are per-bank so the tile looks like the real card. Logo slugs point at
- * the Iconify API and are consumed by LogoLoader.
+ * NETWORK  <- the captured AID. Authoritative.
+ * BANK     <- a BIN quick table, else the issuer name BinLookup resolved.
+ *            Keyword-matched, so it works for any bank on earth.
+ * Unknown banks still get their real name on a neutral card.
  */
 public final class Brands {
 
     public enum Network { VISA, MASTERCARD, AMEX, DISCOVER, JCB, UNIONPAY, DINERS, UNKNOWN }
 
-    /** Everything the adapter needs to paint one tile. Immutable. */
     public static final class Style {
-        public final String bankName;        // "BANK OF AMERICA"; network label if unknown
-        public final String bankIcon;        // "prefix/slug" or null
-        public final String networkIcon;     // "prefix/slug" or null
-        public final int bg;
-        public final int fg;
-        public final int muted;
-        public final String bankIconTint;    // "FFFFFF" to force white, or null
-        public final String networkIconTint;
+        public final String bankName;
+        public final String bankIcon;     // full URL or null
+        public final String networkIcon;  // iconify slug or null
+        public final String networkTint;  // "FFFFFF" on dark cards, else null
+        public final boolean knownBank;
+        public final int bg, fg, muted;
 
-        Style(String bankName, String bankIcon, String networkIcon,
-              int bg, int fg, int muted, String bankIconTint, String networkIconTint) {
+        Style(String bankName, String bankIcon, String networkIcon, String networkTint,
+              boolean knownBank, int bg, int fg, int muted) {
             this.bankName = bankName;
             this.bankIcon = bankIcon;
             this.networkIcon = networkIcon;
+            this.networkTint = networkTint;
+            this.knownBank = knownBank;
             this.bg = bg;
             this.fg = fg;
             this.muted = muted;
-            this.bankIconTint = bankIconTint;
-            this.networkIconTint = networkIconTint;
         }
     }
 
-    /** prefix -> bankId. Longest match wins, so both "4117" and "411773" are fine. */
+    private static final String LOGO = "https://logo.clearbit.com/";
+
+    private static final class Bank {
+        final String[] keywords;
+        final String domain;
+        final int bg, fg, muted;
+        Bank(String keywords, String domain, int bg, int fg, int muted) {
+            this.keywords = keywords.split("\\|");
+            this.domain = domain;
+            this.bg = bg; this.fg = fg; this.muted = muted;
+        }
+    }
+
+    /** Specific before generic. Keywords are pre-normalised (no dots/punctuation). */
+    private static final Bank[] BANKS = {
+            new Bank("BANK OF AMERICA|B OF A|BAC", "bankofamerica.com", 0xFFFFFFFF, 0xFF0B1A3A, 0xFF5B6B8A),
+            new Bank("CHASE|JPMORGAN",             "chase.com",         0xFF0B2D5C, 0xFFFFFFFF, 0xFF9FC0E8),
+            new Bank("WELLS FARGO",                "wellsfargo.com",    0xFFC8102E, 0xFFFFFFFF, 0xFFF7C9D0),
+            new Bank("CITI",                       "citi.com",          0xFF056DAE, 0xFFFFFFFF, 0xFFB7DCF3),
+            new Bank("CAPITAL ONE",                "capitalone.com",    0xFFF7F7F5, 0xFF0D2B45, 0xFF6B7280),
+            new Bank("DISCOVER",                   "discover.com",      0xFFF4F4F2, 0xFF1C1917, 0xFF6B7280),
+            new Bank("US BANK|USBANK",             "usbank.com",        0xFF0C2074, 0xFFFFFFFF, 0xFFA9B8E8),
+            new Bank("PNC",                        "pnc.com",           0xFF1F3B70, 0xFFFFFFFF, 0xFFB8C7E0),
+            new Bank("TD BANK|TD BANKN",           "tdbank.com",        0xFF54B948, 0xFF0B2B06, 0xFF2F6B27),
+            new Bank("ALLY",                       "ally.com",          0xFF6C2EB9, 0xFFFFFFFF, 0xFFD9C6F0),
+            new Bank("AMERICAN EXPRESS|AMEX",      "americanexpress.com",0xFF006FCF, 0xFFFFFFFF, 0xFFCFE4FF),
+            new Bank("BARCLAYS",                   "barclays.com",      0xFF00AEEF, 0xFF002A45, 0xFF00689C),
+            new Bank("HSBC",                       "hsbc.com",          0xFFDB0011, 0xFFFFFFFF, 0xFFF7C7CC),
+            new Bank("SANTANDER",                  "santander.com",     0xFFEC0000, 0xFFFFFFFF, 0xFFF7C7C7),
+            new Bank("NAVY FEDERAL",               "navyfederal.org",   0xFF003057, 0xFFFFFFFF, 0xFFB3C4D6),
+            new Bank("USAA",                       "usaa.com",          0xFF00447C, 0xFFFFFFFF, 0xFFBFD4E6),
+            new Bank("SCHWAB",                     "schwab.com",        0xFF00A0DF, 0xFF002A45, 0xFF00689C),
+            new Bank("FIDELITY",                   "fidelity.com",      0xFF4A9E2F, 0xFFFFFFFF, 0xFFCDE8C4),
+            new Bank("REGIONS",                    "regions.com",       0xFF007A33, 0xFFFFFFFF, 0xFFBFE3CB),
+            new Bank("KEYBANK",                    "keybank.com",       0xFF1B365D, 0xFFFFFFFF, 0xFFB9C5D6),
+            new Bank("FIFTH THIRD|53",             "53.com",            0xFF00447C, 0xFFFFFFFF, 0xFFBFD4E6),
+            new Bank("HUNTINGTON",                 "huntington.com",    0xFF007A33, 0xFFFFFFFF, 0xFFBFE3CB),
+            new Bank("CITIZENS",                   "citizensbank.com",  0xFF00843D, 0xFFFFFFFF, 0xFFBFE4CE),
+            new Bank("TRUIST|BBT|SUNTRUST",        "truist.com",        0xFF4F2D7F, 0xFFFFFFFF, 0xFFD2C6E5),
+            new Bank("BMO|HARRIS BANK",            "bmo.com",           0xFF0079C1, 0xFFFFFFFF, 0xFFBEE0F4),
+            new Bank("SYNCHRONY",                  "synchronybank.com", 0xFF1D3E8E, 0xFFFFFFFF, 0xFFC3CEEB),
+            new Bank("GOLDMAN|MARCUS",             "goldmansachs.com",  0xFF7399C6, 0xFF0B1A3A, 0xFF4A6E9E),
+            new Bank("SOFI",                       "sofi.com",          0xFF00A5B5, 0xFF00262B, 0xFF00838F),
+            new Bank("CHIME",                      "chime.com",         0xFF1EC677, 0xFF00261A, 0xFF0E7A47),
+            new Bank("VARO",                       "varo.com",          0xFF3B2E8C, 0xFFFFFFFF, 0xFFC8C2EC),
+            new Bank("CURRENT",                    "current.com",       0xFF0B0B0B, 0xFFFFFFFF, 0xFF9CA3AF),
+            new Bank("NETSPEND",                   "netspend.com",      0xFFF58220, 0xFF1A1A1A, 0xFFB25C10),
+            new Bank("GREEN DOT|GREENDOT",         "greendot.com",      0xFF4CB748, 0xFFFFFFFF, 0xFFC9E8C6),
+            new Bank("TARGET",                     "target.com",        0xFFCC0000, 0xFFFFFFFF, 0xFFF7C7C7),
+            new Bank("WALMART",                    "walmart.com",       0xFF0071CE, 0xFFFFFFFF, 0xFFBFDFF5),
+            new Bank("AMAZON",                     "amazon.com",        0xFF232F3E, 0xFFFFFFFF, 0xFFB9C0C9),
+            new Bank("STARBUCKS",                  "starbucks.com",     0xFF00704A, 0xFFFFFFFF, 0xFFB8D9CB),
+            new Bank("BEST BUY",                   "bestbuy.com",       0xFF0046BE, 0xFFFFF200, 0xFFBFCDE8),
+            new Bank("HOME DEPOT",                 "homedepot.com",     0xFFF96302, 0xFF1A1A1A, 0xFFB34A02),
+            new Bank("LOWES",                      "lowes.com",         0xFF004990, 0xFFFFFFFF, 0xFFB3C9DF),
+            new Bank("MACYS",                      "macys.com",         0xFFE21A2C, 0xFFFFFFFF, 0xFFF7C7CC),
+            new Bank("NORDSTROM",                  "nordstrom.com",     0xFF1A1A1A, 0xFFFFFFFF, 0xFF9CA3AF),
+            new Bank("KOHLS",                      "kohls.com",         0xFF002D62, 0xFFFFFFFF, 0xFFB3C0D6),
+            new Bank("COSTCO",                     "costco.com",        0xFFE31837, 0xFFFFFFFF, 0xFFF7C9D0),
+            new Bank("KROGER",                     "kroger.com",        0xFF003DA5, 0xFFFFFFFF, 0xFFB3C8E8),
+            new Bank("ALDI",                       "aldi.com",          0xFF001E5A, 0xFFFFFFFF, 0xFFB3BFD6),
+            new Bank("APPLE",                      "apple.com",         0xFF1A1A1A, 0xFFFFFFFF, 0xFF9CA3AF),
+            new Bank("SHELL",                      "shell.com",         0xFFFBCE07, 0xFF1A1A1A, 0xFF8A6F00),
+            new Bank("CHEVRON",                    "chevron.com",       0xFF0C5AA8, 0xFFFFFFFF, 0xFFB6CDE8),
+            new Bank("EXXON",                      "exxon.com",         0xFFE50000, 0xFFFFFFFF, 0xFFF7C7C7),
+    };
+
+    /** Instant offline hits for the BINs you already know. Value is a keyword. */
     private static final Map<String, String> BIN = new LinkedHashMap<>();
-
     static {
-        BIN.put("4117", "bofa");
-        BIN.put("411773", "bofa");
-        BIN.put("43568", "bofa");
-
-        BIN.put("4124", "chase");
-        BIN.put("414734", "chase");
-        BIN.put("4366", "chase");
-
-        BIN.put("4128", "citi");
-        BIN.put("436618", "usbank");
-        BIN.put("412266", "td");
-
-        // Capital One debit, mid-migration: the Mastercard BINs are being retired
-        // onto these Discover ones. Same bank, same product, two networks.
-        BIN.put("510805", "capitalone");
-        BIN.put("514745", "capitalone");
-        BIN.put("514759", "capitalone");
-        BIN.put("601141", "capitalone");
-        BIN.put("601144", "capitalone");
-        BIN.put("601146", "capitalone");
+        BIN.put("4117",   "BANK OF AMERICA");
+        BIN.put("411773", "BANK OF AMERICA");
+        BIN.put("43568",  "BANK OF AMERICA");
+        BIN.put("4124",   "CHASE");
+        BIN.put("414734", "CHASE");
+        BIN.put("4366",   "CHASE");
+        BIN.put("4128",   "CITI");
+        BIN.put("436618", "US BANK");
+        BIN.put("412266", "TD BANK");
+        BIN.put("510805", "CAPITAL ONE");
+        BIN.put("514745", "CAPITAL ONE");
+        BIN.put("514759", "CAPITAL ONE");
+        BIN.put("601141", "CAPITAL ONE");
+        BIN.put("601144", "CAPITAL ONE");
+        BIN.put("601146", "CAPITAL ONE");
     }
 
     private Brands() {
@@ -77,7 +132,7 @@ public final class Brands {
     public static Network network(String aid, String pan) {
         if (aid != null) {
             String a = aid.toUpperCase(Locale.US).replaceAll("[^0-9A-F]", "");
-            if (a.startsWith("A000000152")) return Network.DISCOVER;    // D-PAS
+            if (a.startsWith("A000000152")) return Network.DISCOVER;
             if (a.startsWith("A000000003")) return Network.VISA;
             if (a.startsWith("A000000004")) return Network.MASTERCARD;
             if (a.startsWith("A000000025")) return Network.AMEX;
@@ -88,15 +143,11 @@ public final class Brands {
         return networkFromPan(pan);
     }
 
-    /** Rule-only fallback, used when no AID was captured. */
     public static Network networkFromPan(String pan) {
-        if (pan == null) return Network.UNKNOWN;
         String d = digits(pan);
         if (d.length() < 2) return Network.UNKNOWN;
-
         char c = d.charAt(0);
         if (c == '4') return Network.VISA;
-
         if (c == '3') {
             if (d.startsWith("34") || d.startsWith("37")) return Network.AMEX;
             if (d.startsWith("35")) return Network.JCB;
@@ -104,12 +155,10 @@ public final class Brands {
                 return Network.DINERS;
             return Network.UNKNOWN;
         }
-
         if (c == '5') {
             int two = num(d, 2);
             return (two >= 51 && two <= 55) ? Network.MASTERCARD : Network.UNKNOWN;
         }
-
         if (c == '6') {
             if (d.startsWith("6011") || d.startsWith("65")) return Network.DISCOVER;
             if (d.startsWith("62")) return Network.UNIONPAY;
@@ -118,7 +167,6 @@ public final class Brands {
             if (three >= 644 && three <= 649) return Network.DISCOVER;
             return Network.UNKNOWN;
         }
-
         if (c == '2') {
             int four = num(d, 4);
             if (four >= 2221 && four <= 2720) return Network.MASTERCARD;
@@ -154,104 +202,98 @@ public final class Brands {
 
     // --------------------------------------------------------------------- bank
 
-    public static String bankId(String pan) {
+    /** Longest matching BIN prefix wins. */
+    public static String bankKeywordFromBin(String pan) {
         String d = digits(pan);
         if (d.isEmpty()) return null;
         String best = null;
         int bestLen = 0;
         for (Map.Entry<String, String> e : BIN.entrySet()) {
-            String p = e.getKey();
-            if (p.length() > bestLen && d.startsWith(p)) {
+            if (e.getKey().length() > bestLen && d.startsWith(e.getKey())) {
                 best = e.getValue();
-                bestLen = p.length();
+                bestLen = e.getKey().length();
             }
         }
         return best;
     }
 
-    private static String bankName(String bankId) {
-        if (bankId == null) return null;
-        switch (bankId) {
-            case "bofa":       return "BANK OF AMERICA";
-            case "chase":      return "CHASE BANK";
-            case "citi":       return "CITIBANK";
-            case "usbank":     return "U.S. BANK";
-            case "td":         return "TD BANK";
-            case "capitalone": return "CAPITAL ONE";
-            default:           return null;
+    /** Keyword match against an issuer name from BinLookup. */
+    public static String bankKeywordFromIssuer(String issuerName) {
+        if (issuerName == null || issuerName.isEmpty()) return null;
+        String n = normalise(issuerName);
+        for (Bank b : BANKS) {
+            for (String k : b.keywords) {
+                if (n.contains(k)) return k;
+            }
         }
+        return null;
     }
 
-    private static String bankIcon(String bankId) {
-        if (bankId == null) return null;
-        switch (bankId) {
-            case "bofa":       return "simple-icons/bankofamerica";
-            case "chase":      return "simple-icons/chase";
-            case "citi":       return "simple-icons/citi";
-            case "capitalone": return "logos/capital-one";   // not in the simple-icons set
-            default:           return null;                  // blank logo, wordmark carries it
+    private static Bank bankFor(String keyword) {
+        if (keyword == null) return null;
+        for (Bank b : BANKS) {
+            for (String k : b.keywords) {
+                if (k.equals(keyword)) return b;
+            }
         }
+        return null;
     }
 
     // -------------------------------------------------------------------- style
 
-    public static Style styleFor(String pan, String aid) {
+    public static Style styleFor(String pan, String aid, String issuerName, String issuerDomain) {
         Network net = network(aid, pan);
-        String bank = bankId(pan);
 
+        String keyword = bankKeywordFromBin(pan);
+        if (keyword == null) keyword = bankKeywordFromIssuer(issuerName);
+
+        Bank bank = bankFor(keyword);
         if (bank != null) {
-            String name = bankName(bank);
-            String icon = bankIcon(bank);
-            switch (bank) {
-                case "bofa":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFFFFFFFF, 0xFF0B1A3A, 0xFF5B6B8A, null, null);
-                case "chase":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFF0B2D5C, 0xFFFFFFFF, 0xFF9FC0E8, "FFFFFF", "FFFFFF");
-                case "citi":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFF056DAE, 0xFFFFFFFF, 0xFFB7DCF3, "FFFFFF", "FFFFFF");
-                case "usbank":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFF0C2074, 0xFFFFFFFF, 0xFFA9B8E8, "FFFFFF", "FFFFFF");
-                case "td":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFF54B948, 0xFF0B2B06, 0xFF2F6B27, null, null);
-                case "capitalone":
-                    return new Style(name, icon, networkIcon(net),
-                            0xFFF7F7F5, 0xFF0D2B45, 0xFF6B7280, null, null);
-                default:
-                    break;
-            }
+            String name = keyword.replace("|", " / ");
+            String icon = bank.domain == null ? null : LOGO + bank.domain;
+            return new Style(name, icon, networkIcon(net), networkTint(net),
+                    true, bank.bg, bank.fg, bank.muted);
         }
 
-        // No bank match: neutral card in the network's own colours.
+        // Issuer known by name but not in our keyword table: real name, real logo
+        // from its domain, neutral colours. Still recognisably that bank.
+        if (issuerName != null && !issuerName.isEmpty()) {
+            String icon = issuerDomain == null ? null : LOGO + issuerDomain;
+            return new Style(issuerName, icon, networkIcon(net), networkTint(net),
+                    true, 0xFF1F2937, 0xFFFFFFFF, 0xFF9CA3AF);
+        }
+
         String label = networkLabel(net);
-        String icon = networkIcon(net);
         switch (net) {
             case VISA:
-                return new Style(label, null, icon, 0xFF1A1F71, 0xFFFFFFFF, 0xFFB9BEDC, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF1A1F71, 0xFFFFFFFF, 0xFFB9BEDC);
             case AMEX:
-                return new Style(label, null, icon, 0xFF006FCF, 0xFFFFFFFF, 0xFFCFE4FF, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF006FCF, 0xFFFFFFFF, 0xFFCFE4FF);
             case DISCOVER:
-                return new Style(label, null, icon, 0xFFF4F4F2, 0xFF1C1917, 0xFF6B7280, null, null);
+                return new Style(label, null, networkIcon(net), null, false, 0xFFF4F4F2, 0xFF1C1917, 0xFF6B7280);
             case JCB:
-                return new Style(label, null, icon, 0xFF0B4EA2, 0xFFFFFFFF, 0xFFC2D6F0, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF0B4EA2, 0xFFFFFFFF, 0xFFC2D6F0);
             case UNIONPAY:
-                return new Style(label, null, icon, 0xFF00447C, 0xFFFFFFFF, 0xFFBFD4E6, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF00447C, 0xFFFFFFFF, 0xFFBFD4E6);
             case DINERS:
-                return new Style(label, null, icon, 0xFF0079BE, 0xFFFFFFFF, 0xFFC2E0F2, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF0079BE, 0xFFFFFFFF, 0xFFC2E0F2);
             case MASTERCARD:
-                return new Style(label, null, icon, 0xFF141414, 0xFFFFFFFF, 0xFF9CA3AF, null, "FFFFFF");
+                return new Style(label, null, networkIcon(net), "FFFFFF", false, 0xFF141414, 0xFFFFFFFF, 0xFF9CA3AF);
             default:
-                return new Style("UNKNOWN ISSUER", null, icon, 0xFF1F2937, 0xFFFFFFFF, 0xFF9CA3AF, null, "FFFFFF");
+                return new Style("UNKNOWN ISSUER", null, networkIcon(net), "FFFFFF", false, 0xFF1F2937, 0xFFFFFFFF, 0xFF9CA3AF);
+        }
+    }
+
+    /** White network mark on dark cards, brand colour on light ones. */
+    private static String networkTint(Network n) {
+        switch (n) {
+            case DISCOVER: return null;
+            default:       return "FFFFFF";
         }
     }
 
     // ---------------------------------------------------------------- formatting
 
-    /** Groups the PAN correctly, including the 15-digit Amex 4-4-4-3 case. */
     public static String formatPan(String pan) {
         String d = digits(pan);
         if (d.isEmpty()) return "";
@@ -278,6 +320,10 @@ public final class Brands {
 
     private static String digits(String s) {
         return s == null ? "" : s.replaceAll("[^0-9]", "");
+    }
+
+    private static String normalise(String s) {
+        return s.toUpperCase(Locale.US).replaceAll("[^A-Z0-9 ]", "").replaceAll(" +", " ").trim();
     }
 
     private static int num(String s, int len) {
