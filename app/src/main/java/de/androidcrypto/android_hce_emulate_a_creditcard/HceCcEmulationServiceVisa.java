@@ -54,6 +54,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      *
      * Named KEEP, not MASK - it is an AND that keeps bits, and the old name read
      * like it cleared them.
+     *
+     * NOTE: gpo() no longer applies this when a capture is present - see gpo().
+     * It survives only for aipForMac()'s no-GPO fallback.
      */
     private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
@@ -61,6 +64,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * AIP byte 2 bit 8, the app's own marker that byte 2 agrees with the framing
      * we send. Real cards hand back byte 2 = 0x00 here, so it is a convention and
      * not a spec bit. Only ever set with EMV framing.
+     *
+     * NOTE: gpo() no longer sets this either. Kept for reference.
      */
     private static final byte AIP_EMV_MODE = (byte) 0x80;
 
@@ -802,48 +807,76 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Magstripe branch, back to the author's original shape: 80 <len> <AIP 2>
-     * <57 track 2>, no AFL.
+     * CHANGED. Replay the card's captured GPO byte for byte.
      *
-     * The MSD field deliberately WINS over the captured framing, so MSD is
-     * selectable on a clone - the old behaviour made the editor switch
-     * decorative. Be aware it means a capture no longer reproduces the card it
-     * came from: forcing MSD on a card captured in EMV mode exercises a path the
-     * real card never used. A disagreement is logged.
+     * The old version took the captured AIP, masked byte 1 with AIP_KEEP_MASK and
+     * force-set byte 2 with AIP_EMV_MODE, then built a FRESH AFL from the cap_rec
+     * keys. The real card's AIP is 19 00; the mask turned it into 18 80 (or 10 80
+     * with no capture). So the terminal received an AIP no real card produces,
+     * next to an AFL this app invented, and it cross-checked the pair, found no
+     * match, and quit right after GPO - before it ever sent READ RECORD. That was
+     * the "Rejected AFL".
+     *
+     * AIP and AFL are only meaningful together. Replaying the capture keeps them
+     * paired exactly as the terminal already accepts them from the real card,
+     * because they ARE the real card's bytes.
+     *
+     * The MSD field still wins: if you tick MSD on a card captured in EMV mode,
+     * the framing genuinely has to change, so the built path is used and the AIP
+     * is no longer masked there either.
+     *
+     * NOTE: while a capture is present, a typed 'aip' or 'afl' override is
+     * bypassed. Clear cap_rawgpo to get the built path back.
      */
     private byte[] gpo() {
         byte[] raw = rawGpo();
-
         boolean msd = isMsd();
-        if (raw != null && raw.length > 0) {
+
+        if (raw != null && raw.length >= 4) {
             int[] q = new int[1];
             int outer = readTag(raw, q);
-            boolean capMsd = (outer == 0x80);
-            if (capMsd != msd) {
-                tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
-            } else {
-                tap("-- msd " + msd + " agrees with the capture");
+            int olen  = readLen(raw, q);
+
+            // Tolerate a capture that kept its trailing 9000.
+            if (q[0] + olen + 2 == raw.length
+                    && (raw[raw.length - 2] & 0xFF) == 0x90
+                    && (raw[raw.length - 1] & 0xFF) == 0x00) {
+                raw = Arrays.copyOf(raw, raw.length - 2);
             }
+
+            boolean capMsd = (outer == 0x80);
+
+            if (capMsd == msd) {
+                byte[] aip = capturedAip(raw);
+                if (aip != null && aip.length >= 2) {
+                    txnAip = aip;
+                    tap("-- gpo replay verbatim aip=" + bytesToHex(aip)
+                            + " len=" + raw.length);
+                } else {
+                    tap("-- gpo replay verbatim len=" + raw.length);
+                }
+                return cat(raw, SW_OK);
+            }
+            tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
         }
 
         byte[] aip = capturedAip(raw);
         if (aip == null || aip.length < 2) aip = hex(p("aip", DEFAULT_AIP));
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
-        byte[] masked = new byte[]{(byte) (aip[0] & AIP_KEEP_MASK), aip[1]};
-        if (msd) masked[1] &= (byte) ~AIP_EMV_MODE;
-        else     masked[1] |= AIP_EMV_MODE;
-        txnAip = masked;
+        // No mask: the card's own AIP is what the terminal already trusts.
+        byte[] used = new byte[]{aip[0], aip[1]};
+        txnAip = used;
 
         byte[] a = afl();
-        tap("-- gpo msd=" + msd + " aip=" + bytesToHex(masked) + " afl=" + bytesToHex(a));
+        tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a));
 
         if (msd) {
-            byte[] payload = cat(masked, tlv(0x57, track2()));
+            byte[] payload = cat(used, tlv(0x57, track2()));
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
-        return cat(tlv(0x77, cat(tlv(0x82, masked), tlv(0x94, a))), SW_OK);
+        return cat(tlv(0x77, cat(tlv(0x82, used), tlv(0x94, a))), SW_OK);
     }
 
     /**
