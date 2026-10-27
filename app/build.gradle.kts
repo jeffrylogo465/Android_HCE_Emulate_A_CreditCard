@@ -10,8 +10,8 @@ android {
         applicationId = "de.androidcrypto.android_hce_emulate_a_creditcard"
         minSdk = 21
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 5
+        versionName = "1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
