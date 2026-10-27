@@ -390,29 +390,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * The track 2 is a capture, so if the PAN box differs from it, the
-     * difference IS the typo. Names the exact position instead of guessing at
-     * the check digit, which points at the wrong end of the number.
-     */
-    private String diffAgainstTrack2(String pan) {
-        String ref = panFromTrack2();
-        if (ref.isEmpty() || ref.equals(pan)) return null;
-        if (ref.length() != pan.length()) {
-            return "PAN is " + pan.length() + " digits, TRACK 2 has " + ref.length()
-                    + " - different cards";
-        }
-        for (int i = 0; i < pan.length(); i++) {
-            if (pan.charAt(i) != ref.charAt(i)) {
-                return "Digit " + (i + 1) + " is " + pan.charAt(i)
-                        + ", TRACK 2 has " + ref.charAt(i) + " - use the TRACK 2 value";
-            }
-        }
-        return null;
-    }
-
-    /**
      * The last digit this PAN should have. Naming it turns "fails Luhn" from a
-     * dead end into an actionable hint.
+     * dead end into "your last digit is wrong", which is the whole point.
+     *
+     * Note it only knows the number you gave it: with a one-digit typo
+     * elsewhere, moving the check digit also fixes Luhn. diffAgainstTrack2()
+     * is the precise test.
      */
     private static int expectedCheckDigit(String pan) {
         if (pan.length() < 2) return -1;
@@ -429,6 +412,27 @@ public class MainActivity extends AppCompatActivity {
             dbl = !dbl;
         }
         return (10 - (sum % 10)) % 10;
+    }
+
+    /**
+     * The track 2 is a capture, so if the PAN box differs from it the difference
+     * IS the typo. Names the exact position instead of guessing at the check
+     * digit. Returns null when there is no track 2, or they already agree.
+     */
+    private String diffAgainstTrack2(String pan) {
+        String ref = panFromTrack2();
+        if (ref.isEmpty() || ref.equals(pan)) return null;
+        if (ref.length() != pan.length()) {
+            return "PAN is " + pan.length() + " digits, TRACK 2 has " + ref.length()
+                    + " - different cards";
+        }
+        for (int i = 0; i < pan.length(); i++) {
+            if (pan.charAt(i) != ref.charAt(i)) {
+                return "Digit " + (i + 1) + " is " + pan.charAt(i)
+                        + ", TRACK 2 has " + ref.charAt(i) + " - use the TRACK 2 value";
+            }
+        }
+        return null;
     }
 
     /**
@@ -582,13 +586,14 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5A  PAN    : ")
                 .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
                 .append('\n');
-        // a typo here is the single most common save failure, so check it here too
+        // a bad check digit is the single most common save failure, so check it
+        // here too rather than making SAVE be the first thing that tells you
         if (!pan.isEmpty()) {
             sb.append("   check digit : ")
                     .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
                             + expectedCheckDigit(pan)).append('\n');
             String diff = diffAgainstTrack2(pan);
-            if (diff != null) sb.append("   ").append(diff).append('\n');
+            if (diff != null) sb.append("   !! ").append(diff).append('\n');
         }
         // the emulator pads YYMM to YYMM01 - show what actually goes on the wire
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
@@ -970,6 +975,10 @@ public class MainActivity extends AppCompatActivity {
      */
     private void callIssuer() {
         String pan = digits(t(etPan));
+        if (pan.isEmpty() || pan.length() < 12 || pan.length() > 19) {
+            // the PAN box may be mid-edit; fall back to the track 2
+            pan = panFromTrack2();
+        }
         if (pan.isEmpty()) {
             Toast.makeText(this, "Fill the PAN first", Toast.LENGTH_SHORT).show();
             return;
@@ -980,8 +989,8 @@ public class MainActivity extends AppCompatActivity {
     private void onSave() {
         syncFieldsFromTrack2();                   // SAVE puts everything in its place
 
-        // FIX: the track 2 is a capture and carries its own check digit, while
-        // the PAN box is usually hand-typed and is where typos land. When they
+        // The track 2 is a capture and carries its own check digit, while the
+        // PAN box is usually hand-typed and is where typos land. When they
         // disagree, take the track 2 value instead of bouncing the card with a
         // check-digit error the user has no way to act on.
         String trackPan = panFromTrack2();
@@ -1007,9 +1016,8 @@ public class MainActivity extends AppCompatActivity {
                     Toast.LENGTH_LONG).show();
             return;
         }
-        // FIX: name the bad digit. A Luhn failure with a track 2 in hand is a
-        // diff, not a check-digit guess - the guess points at the wrong end.
         if (!luhn(pan)) {
+            // name the exact digit when we can, fall back to the check digit
             String diff = diffAgainstTrack2(pan);
             if (diff != null) {
                 txtStatus.setText(diff);
@@ -1085,9 +1093,7 @@ public class MainActivity extends AppCompatActivity {
         final int victim = current;
         new AlertDialog.Builder(this)
                 .setTitle("Delete card " + (victim + 1) + "?")
-                .setMessage(cards.size() == 1
-                        ? "This is your only card - it will be emptied, not removed."
-                        : "This cannot be undone.")
+                .setMessage("This cannot be undone.")
                 .setPositiveButton("Delete", (d, w) -> doDelete(victim))
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -1096,12 +1102,12 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Remove one card and close the gap.
      *
-     * The keys are card<N>_*, so dropping card 2 of 5 leaves a hole at 2 with
+     * Keys are card<N>_*, so dropping card 2 of 5 would leave a hole at 2 with
      * card_count 4 - the pager then shows a blank slot and the last card is
      * unreachable. Everything above the victim is shifted down one slot.
      *
-     * key(i, "") is "card<i>_", and the trailing underscore is what stops
-     * card1_ matching card10_ or card11_.
+     * key(i, "") is "card<i>_" and is NOT a prefix of "card10_" - the underscore
+     * is what stops card1 and card10 cannibalising each other.
      */
     private void doDelete(int index) {
         SharedPreferences.Editor e = prefs.edit();
@@ -1115,8 +1121,8 @@ public class MainActivity extends AppCompatActivity {
         }
 
         // 2. shift everything above it down one slot. Clear the destination
-        //    first, or a field the source card does not have survives from the
-        //    previous occupant of that slot.
+        //    first, or a field the source card does not have would survive from
+        //    the previous occupant of that slot.
         for (int i = index; i < n - 1; i++) {
             String from = key(i + 1, "");
             String to = key(i, "");
@@ -1144,15 +1150,13 @@ public class MainActivity extends AppCompatActivity {
         loadAll();
         current = Math.max(0, Math.min(index, cards.size() - 1));
         bindCard(current);
-        pager.smoothScrollToPosition(current);
-        pager.post(this::applyTransforms);
         txtStatus.setText("Card deleted - " + cards.size() + " left");
         showPage(0);
     }
 
     /** Correct as written - the rightmost digit is never doubled, and the
-     *  toggle flips AFTER the digit is added. Bound the length so a whole dump
-     *  pasted into the PAN box cannot slip through as a 31-digit "PAN". */
+     *  toggle flips AFTER the digit is added. The length bound stops a whole
+     *  dump pasted into the PAN box from validating as one 31-digit number. */
     private static boolean luhn(String s) {
         String d = digits(s);
         if (d.length() < 12 || d.length() > 19) return false;
