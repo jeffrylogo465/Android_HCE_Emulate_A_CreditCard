@@ -30,15 +30,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     /**
      * Fallback AIP when the card has no captured GPO.
      *
-     * FIX: the byte-1 bit map here used to be shifted by one. The EMV Contactless
-     * AIP byte 1 is:
+     * The EMV Contactless AIP byte 1 is:
      *   0x40 SDA supported        0x10 cardholder verification supported
      *   0x20 DDA supported        0x08 terminal risk management to be performed
      *   0x01 CDA supported        0x04 issuer authentication supported
      * 0x80 and 0x02 are RFU.
-     *
-     * So the old mask of 0x30 was KEEPING DDA, not clearing it, and every card
-     * advertised an offline data authentication method it cannot pass.
      *
      * 0x10 = CV only. No ODA of any kind, no TRM, no issuer auth - nothing for
      * the terminal to check and fail.
@@ -316,9 +312,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
-        // FIX: the directory label was hardcoded "CARD" while the FCI used the
-        // card's own label, so the terminal showed two different names for the
-        // same application. Both come from the label now.
+        // The directory label and the FCI label both come from the card's label
+        // now, so the terminal shows one name instead of two.
         String lbl = p("label", "CARD");
         if (lbl.length() > 16) lbl = lbl.substring(0, 16);
 
@@ -527,9 +522,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 byte[] out = hex(hit);
                 scriptHits++;
 
-                // FIX: a response whose last two bytes are not a status word gets
-                // 9000 appended. Putting 9000 on its own line is the classic way
-                // to lose it, and the terminal then reads payload as the SW.
+                // A response whose last two bytes are not a status word gets 9000
+                // appended. Putting 9000 on its own line is the classic way to
+                // lose it, and the terminal then reads payload as the SW.
                 if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
                     tap("-- script response had no status word - appended 9000");
                     out = cat(out, SW_OK);
@@ -599,14 +594,23 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 + " | card is " + (real.isEmpty() ? "?" : real));
 
         byte[] captured = rawFci();
+        tap("-- fci source: " + (captured == null ? "generated" : "captured " + captured.length + "B"));
         if (captured != null) {
             return cat(patchFci(captured, name), SW_OK);
         }
 
+        // The generated FCI now matches what patchA5() maintains for a captured
+        // one: it carries 9F2A. Telling the terminal "kernel 2" in the directory
+        // and then not repeating it in the FCI left the kernel with nothing to
+        // confirm against. 9F11 and 9F12 come along because every real card's FCI
+        // has them and this one looked bare next to a capture.
         String label = p("label", "CARD");
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
+                tlv(0x9F11, new byte[]{0x01}),
+                tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
                 tlv(0x9F38, hex(PDOL)));
         byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
         return cat(tlv(0x6F, inner), SW_OK);
