@@ -1032,6 +1032,9 @@ public class MainActivity extends AppCompatActivity {
                     + "Re-copy the line from the source.";
             txtStatus.setText(msg);
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            // txtStatus lives on the wallet page. Without this you stay on the
+            // edit page and never see why it refused.
+            showPage(0);
             return;
         }
         if (t(etExpiry).length() != 4) {
