@@ -12,6 +12,7 @@ import android.widget.Toast;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
@@ -24,6 +25,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte[] SW_OK          = hex("9000");
     private static final byte[] SW_BAD         = hex("6A82");
     private static final byte[] SW_UNSUPPORTED = hex("6D00");
+    private static final byte[] SW_MALFORMED   = hex("6700");
     private static final byte[] SW_NO_RECORD   = hex("6A83");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
@@ -47,17 +49,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * clone can never satisfy, and keeps CV (0x10) and TRM (0x08) so the editor
      * can still choose them. A field of 3080 becomes 1080; a field of 1800 stays
      * 1800.
+     *
+     * Named KEEP, not MASK - it is an AND that keeps bits, and the old name read
+     * like it cleared them.
      */
-    private static final byte AIP_ODA_MASK = (byte) 0x18;
+    private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
     /**
-     * AIP byte 2 bit 8. Only meaningful with EMV framing - a magstripe response
-     * must not claim EMV mode.
-     *
-     * Note: real cards hand back byte 2 = 0x00 here, so this is the app's own
-     * convention rather than a spec bit. It is kept because it makes byte 2 agree
-     * with the framing we send, which is the part that actually matters. If a
-     * terminal ever objects, set this to 0x00 and rebuild.
+     * AIP byte 2 bit 8, the app's own marker that byte 2 agrees with the framing
+     * we send. Real cards hand back byte 2 = 0x00 here, so it is a convention and
+     * not a spec bit. Only ever set with EMV framing.
      */
     private static final byte AIP_EMV_MODE = (byte) 0x80;
 
@@ -90,7 +91,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
-          + "# 80A80000=770A82021000940408010100 9000\n"
+          + "# 80A80000=770A82021080940408010100 9000\n"
           + "# 00B2010C=70265A0860114994320077045F24033112318C149F02069F03069F1A0295055F2A029A039C019F3704 9000\n";
 
     private final StringBuilder tapLog = new StringBuilder();
@@ -101,9 +102,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private boolean cryptogramSent;
     private int scriptHits;
 
+    // Counted, not scraped out of the log text. tapLog is trimmed from the front
+    // when it gets long, and the PPSE line lives at the very front - so a
+    // string-search verdict could lose the one fact it depends on.
+    private boolean sawPpse;
+    private int nSelects, nGpos, nRecs, nGens;
+    private String lastCid = "";
+
     private void tap(String s) {
         tapLog.append(s).append('\n');
-        if (tapLog.length() > 6000) tapLog.delete(0, 3000);
+        if (tapLog.length() > 32000) tapLog.delete(0, 16000);
     }
 
     private void popup(final String s) {
@@ -119,9 +127,45 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     static byte[] hex(String s) { return Hex.hex(s); }
-    static byte[] tlv(int tag, byte[] v) { return Tlv.t(tag, v); }
     static byte[] cat(byte[]... arrs) { return Tlv.cat(arrs); }
     private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
+
+    /**
+     * Local TLV writer, so the service no longer depends on how Tlv.t encodes
+     * the length.
+     *
+     * FIX: patchFci() wraps a whole captured FCI and buildPpse() wraps the whole
+     * directory, both of which can pass 127 bytes. A one-byte length there is
+     * simply wrong, and a wrong outer length on the FCI is exactly "the terminal
+     * read the app then stopped".
+     */
+    static byte[] tlv(int tag, byte[] v) {
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        if ((tag & 0xFF00) != 0) {
+            o.write((tag >> 8) & 0xFF);
+            o.write(tag & 0xFF);
+        } else {
+            o.write(tag & 0xFF);
+        }
+        int n = v.length;
+        if (n < 0x80) {
+            o.write(n);
+        } else if (n <= 0xFF) {
+            o.write(0x81);
+            o.write(n);
+        } else if (n <= 0xFFFF) {
+            o.write(0x82);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        } else {
+            o.write(0x83);
+            o.write((n >> 16) & 0xFF);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        }
+        o.write(v, 0, n);
+        return o.toByteArray();
+    }
 
     private static int readTag(byte[] b, int[] pos) {
         if (pos[0] >= b.length) return 0;
@@ -153,10 +197,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * Lc of an incoming APDU, extended length included.
      *
      * FIX: reading apdu[4] as a plain Lc gives 0 for an extended APDU. The
-     * reader emits extended when a PDOL or CDOL1 is over 255 bytes, and the two
-     * consequences were both silent: a long SELECT took the empty-name path and
+     * reader emits extended when a PDOL or CDOL1 is over 255 bytes, and both
+     * consequences were silent: a long SELECT took the empty-name path and
      * selected the card's own AID, and a long GENERATE AC MACed over an empty
-     * CDOL. Neither raised anything.
+     * CDOL.
      */
     private static int lcOf(byte[] apdu) {
         if (apdu.length < 5) return 0;
@@ -248,19 +292,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         txnAtc = null;
         cryptogramSent = false;
         scriptHits = 0;
+        sawPpse = false;
+        nSelects = nGpos = nRecs = nGens = 0;
+        lastCid = "";
     }
 
     /**
-     * FIX: this used to hand back the raw field when gpo() had not run - which
-     * happens whenever a script line serves the GPO. The ARQC was then MACed
-     * over an AIP that was never sent. The mask is applied here too, so the MAC
-     * input matches the wire either way.
+     * The AIP that goes into the MAC input.
+     *
+     * FIX: it used to mask the prefs value whenever gpo() had not run, which is
+     * whenever a script line served the GPO - but a script can return its own
+     * 82 02 xxxx, and the MAC then ran over a completely different AIP than the
+     * one on the wire. The script branch now parses that AIP and parks it in
+     * txnAip, so this only falls back when there genuinely was no GPO at all.
      */
     private byte[] aipForMac() {
         byte[] a = txnAip;
         if (a == null) {
             a = hex(p("aip", DEFAULT_AIP));
-            if (a.length >= 2) a = new byte[]{(byte) (a[0] & AIP_ODA_MASK), a[1]};
+            if (a.length >= 2) a = new byte[]{(byte) (a[0] & AIP_KEEP_MASK), a[1]};
         }
         if (a.length < 2) a = hex(DEFAULT_AIP);
         return a;
@@ -425,32 +475,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * FIX: this used to only rewrite 9F2A when it was already there. A captured
-     * FCI that carried no kernel identifier stayed without one, while the
-     * generated FCI has it - so the two paths disagreed about the same card.
-     * It is now added when missing.
+     * FIX: this used to append 9F2A when it was missing, which put it after
+     * BF0C - and 9F2A (0x9F2A) sorts before BF0C (0xBF0C), so the template came
+     * out of ascending order. It now rebuilds the template through a sorted map,
+     * which both inserts 9F2A in position and rewrites it when it is already
+     * there.
      */
     private byte[] patchA5(byte[] a5, byte[] aid) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        boolean sawKernel = false;
+        TreeMap<Integer, byte[]> tags = new TreeMap<>();
         int i = 0;
         while (i < a5.length) {
             int[] q = new int[]{i};
             int t = readTag(a5, q);
             int l = readLen(a5, q);
             if (q[0] + l > a5.length) break;
-            byte[] v = Arrays.copyOfRange(a5, q[0], q[0] + l);
+            tags.put(t, Arrays.copyOfRange(a5, q[0], q[0] + l));
             i = q[0] + l;
-
-            if (t == 0x9F2A && v.length >= 1) {
-                sawKernel = true;
-                v = new byte[]{(byte) kernelFor(bytesToHex(aid))};
-            }
-            byte[] one = tlv(t, v);
-            out.write(one, 0, one.length);
         }
-        if (!sawKernel) {
-            byte[] one = tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
+        tags.put(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (Map.Entry<Integer, byte[]> e : tags.entrySet()) {
+            byte[] one = tlv(e.getKey(), e.getValue());
             out.write(one, 0, one.length);
         }
         return out.toByteArray();
@@ -518,15 +564,21 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     /**
      * FIX: a five digit value used to fall through every branch and land on the
-     * hardcoded 311201. Anything at least four long is now treated as YYMM with
-     * a day appended.
+     * hardcoded 311201, and the two digit branch hardcoded the year 27. A two
+     * digit value up to 12 is now read as a month with the current year, anything
+     * else as a year with month 01.
      */
     private String expiry6() {
         String d = p("expiry", "3112").replaceAll("[^0-9]", "");
         if (d.length() >= 6) return d.substring(0, 6);
         if (d.length() == 5) return d.substring(0, 4) + "01";
         if (d.length() == 4) return d + "01";
-        if (d.length() == 2) return "27" + d + "01";
+        if (d.length() == 2) {
+            String yy = String.format("%02d", Calendar.getInstance().get(Calendar.YEAR) % 100);
+            int v = Integer.parseInt(d);
+            if (v >= 1 && v <= 12) return yy + d + "01";
+            return d + "0101";
+        }
         return "311201";
     }
 
@@ -550,17 +602,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private byte[] syntheticRecord() {
-        String pan = pan();
-        String exp = expiry6();
-        String psn = psn();
-        if (pan.length() % 2 != 0) pan += "F";
+        String panS = pan();
+        String expS = expiry6();
+        String psnS = psn();
+        if (panS.length() % 2 != 0) panS += "F";
 
         byte[] h = holder();
 
         return tlv(0x70, cat(
-                tlv(0x5A, hex(pan)),
-                tlv(0x5F34, hex(psn)),
-                tlv(0x5F24, hex(exp)),
+                tlv(0x5A, hex(panS)),
+                tlv(0x5F34, hex(psnS)),
+                tlv(0x5F24, hex(expS)),
                 h == null ? new byte[0] : tlv(0x5F20, h),
                 tlv(0x57, track2()),
                 tlv(0x8C, hex(CDOL1)),
@@ -571,14 +623,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
         try {
-            if (apdu == null || apdu.length < 4) return SW_BAD;
+            if (apdu == null || apdu.length < 4) return SW_MALFORMED;
 
             int ins = apdu[1] & 0xFF;
             int p1  = apdu[2] & 0xFF;
             int p2  = apdu[3] & 0xFF;
 
-            // FIX: any P1 now counts. A SELECT with P1 02 used to fall through
-            // every branch and get 6A82.
             boolean isSelect = (ins == 0xA4);
 
             if (isSelect && apdu.length >= 5) {
@@ -590,6 +640,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     if (Arrays.equals(nm, PPSE)) {
                         tapLog.setLength(0);
                         resetTransaction();
+                        sawPpse = true;
                         int n = scriptLines();
                         if (n > 0) tap("-- script armed: " + n + " line(s)");
                         popup(nameLine());
@@ -598,6 +649,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             }
 
             tap(">> " + bytesToHex(apdu));
+
+            // Counted here, before the script branch, so a scripted response
+            // still registers.
+            if (isSelect)        nSelects++;
+            else if (ins == 0xA8) nGpos++;
+            else if (ins == 0xB2) nRecs++;
+            else if (ins == 0xAE) nGens++;
 
             String hit = scriptMatch(apdu);
             if (hit != null) {
@@ -612,6 +670,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 }
 
                 if (ins == 0xA8) {
+                    // Park the script's own AIP so the MAC input matches the wire.
+                    byte[] sa = capturedAip(out);
+                    if (sa != null && sa.length >= 2) {
+                        txnAip = sa;
+                        tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
+                    }
                     tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
                 }
                 tap("-- script hit " + out.length + " bytes");
@@ -621,7 +685,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             byte[] out;
             if (isSelect) {
-                if (apdu.length < dataOff(apdu)) return SW_BAD;
+                if (apdu.length < dataOff(apdu)) return SW_MALFORMED;
                 out = select(apdu);
             } else if (ins == 0xA8) {
                 out = gpo();
@@ -640,7 +704,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             } else if (ins == 0x88) {
                 out = SW_UNSUPPORTED;
             } else {
-                out = SW_BAD;
+                // FIX: an unknown INS is 6D00, not 6A82.
+                out = SW_UNSUPPORTED;
             }
 
             tap("<< " + bytesToHex(out));
@@ -654,7 +719,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private byte[] select(byte[] apdu) {
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
-        if (apdu.length < off + lc) return SW_BAD;
+        if (apdu.length < off + lc) return SW_MALFORMED;
         byte[] name = new byte[lc];
         System.arraycopy(apdu, off, name, 0, lc);
 
@@ -695,10 +760,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * Magstripe branch, back to the author's original shape: 80 <len> <AIP 2>
      * <57 track 2>, no AFL.
      *
-     * FIX: the MSD field now WINS over the captured framing instead of the other
-     * way round, so MSD is actually selectable on a clone. The old behaviour made
-     * the editor switch decorative - a clone of an EMV card could never be put
-     * into the no-crypto lane. A disagreement is logged.
+     * The MSD field deliberately WINS over the captured framing, so MSD is
+     * selectable on a clone - the old behaviour made the editor switch
+     * decorative. Be aware it means a capture no longer reproduces the card it
+     * came from: forcing MSD on a card captured in EMV mode exercises a path the
+     * real card never used. A disagreement is logged.
      */
     private byte[] gpo() {
         byte[] raw = rawGpo();
@@ -719,7 +785,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip == null || aip.length < 2) aip = hex(p("aip", DEFAULT_AIP));
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
-        byte[] masked = new byte[]{(byte) (aip[0] & AIP_ODA_MASK), aip[1]};
+        byte[] masked = new byte[]{(byte) (aip[0] & AIP_KEEP_MASK), aip[1]};
         if (msd) masked[1] &= (byte) ~AIP_EMV_MODE;
         else     masked[1] |= AIP_EMV_MODE;
         txnAip = masked;
@@ -792,7 +858,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (ALWAYS_ONLINE_FOR_RECEIPT && !cryptogramSent) {
             cid = CID_ARQC;
         } else if (cryptogramSent) {
-            cid = CID_TC;
+            // FIX: the second GENERATE AC carries the host's decision in P1. It
+            // used to answer TC unconditionally, so a declined online
+            // transaction still came back "approved" from the card.
+            cid = (requested == 0x00) ? CID_AAC : CID_TC;
         } else if (haveKey() && FORCE_ONLINE_ARQC) {
             cid = CID_ARQC;
         } else if (FORCE_OFFLINE_TC) {
@@ -807,6 +876,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             cid = CID_TC;
         }
 
+        lastCid = String.format("%02X", cid);
         String atc = txnAtc();
 
         byte[] cdol = new byte[0];
@@ -820,7 +890,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         cryptogramSent = true;
 
         tap("-- genac requested=" + String.format("%02X", requested)
-                + " cid=" + String.format("%02X", cid)
+                + " cid=" + lastCid
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         return cat(tlv(0x77, cat(
@@ -836,10 +906,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             tap("!! no MK-AC set - ARQC will be all zeros");
             return new byte[8];
         }
+        // FIX: keyvar was stripped to digits, so a hex entry like 0A lost its
+        // letter. Parsed as decimal when it is all digits, hex otherwise.
         int variant = 0;
         try {
-            variant = Integer.parseInt(p("keyvar", "0").replaceAll("[^0-9]", ""));
+            String kv = p("keyvar", "0").replaceAll("[^0-9A-Fa-f]", "");
+            if (!kv.isEmpty()) {
+                variant = kv.matches("[0-9]+")
+                        ? Integer.parseInt(kv)
+                        : Integer.parseInt(kv, 16);
+            }
         } catch (Exception ignored) { }
+        variant &= 0x03;
+
         try {
             byte[] macIn = ((variant & 2) != 0)
                     ? cat(aipForMac(), hex(atc), cdol)
@@ -857,45 +936,38 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (tag == 0x9F36)      return cat(tlv(0x9F36, hex(txnAtc())), SW_OK);
         else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("00")), SW_OK);
         else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
+        // FIX: 9F4F is the log format that goes with the 9F4D entries.
+        else if (tag == 0x9F4F) return cat(tlv(0x9F4F, hex("9F4D020B0A")), SW_OK);
         return SW_BAD;
     }
 
-    private static int countOf(String hay, String needle) {
-        int n = 0, i = 0;
-        while ((i = hay.indexOf(needle, i)) >= 0) { n++; i += needle.length(); }
-        return n;
-    }
-
+    /**
+     * Built from counters, not from searching the log text - tapLog is trimmed
+     * from the front when it gets long and the PPSE line sits at the very front.
+     */
     private String baseVerdict() {
-        String l = tapLog.toString();
-        if (l.isEmpty()) return "TAP: nothing recorded";
+        if (tapLog.length() == 0) return "TAP: nothing recorded";
 
-        boolean ppse = l.contains("325041592E5359532E4444463031");
-        int selects = countOf(l, ">> 00A40400");
-        int gpos    = countOf(l, ">> 80A80000");
-        int recs    = countOf(l, ">> 00B2");
-        int gens    = countOf(l, ">> 80AE");
-
-        if (!ppse)        return "TAP: terminal never asked for the directory - it never read the phone";
-        if (selects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
-        if (gpos == 0)    return "TAP: terminal picked an app then stopped - it rejected the FCI";
+        if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
+        if (nSelects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
+        if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
-            if (gens == 0)              return "TAP: MSD mode - terminal took the track 2 and decided on its own";
-            if (gens >= 2)              return "TAP: MSD mode - terminal WENT ONLINE";
-            if (l.contains("9F270140")) return "TAP: MSD mode - we answered TC, terminal should APPROVE";
-            if (l.contains("9F270180")) return "TAP: MSD mode - we answered ARQC, terminal must go online";
-            if (l.contains("9F270100")) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
+            if (nGens == 0)          return "TAP: MSD mode - terminal took the track 2 and decided on its own";
+            if (nGens >= 2)          return "TAP: MSD mode - terminal WENT ONLINE";
+            if ("40".equals(lastCid)) return "TAP: MSD mode - we answered TC, terminal should APPROVE";
+            if ("80".equals(lastCid)) return "TAP: MSD mode - we answered ARQC, terminal must go online";
+            if ("00".equals(lastCid)) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
             return "TAP: MSD mode - terminal asked for a cryptogram and we did not answer TC";
         }
 
-        if (recs == 0)    return "TAP: terminal started a transaction but read no records - check the logged AFL";
-        if (gens == 0)    return "TAP: terminal read " + recs
+        if (nRecs == 0)   return "TAP: terminal started a transaction but read no records - check the logged AFL";
+        if (nGens == 0)   return "TAP: terminal read " + nRecs
                 + " records then quit before the cryptogram - its own ODA or CVM check failed";
-        if (gens >= 2)    return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
-        if (l.contains("9F270140")) return "TAP: we answered TC - terminal should have APPROVED offline";
-        if (l.contains("9F270180")) return "TAP: we answered ARQC - terminal must go online";
-        if (l.contains("9F270100")) return "TAP: we answered AAC - terminal treated it as an offline decline";
+        if (nGens >= 2)   return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
+        if ("40".equals(lastCid)) return "TAP: we answered TC - terminal should have APPROVED offline";
+        if ("80".equals(lastCid)) return "TAP: we answered ARQC - terminal must go online";
+        if ("00".equals(lastCid)) return "TAP: we answered AAC - terminal treated it as an offline decline";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
@@ -907,11 +979,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return v;
     }
 
-    /**
-     * FIX: verdict() was computed AFTER resetTransaction(), which zeroes
-     * scriptHits - so the "script hit Nx" suffix could never appear. The verdict
-     * is now taken while the tap counters are still live.
-     */
     @Override
     public void onDeactivated(int reason) {
         final String t = tapLog.toString();
