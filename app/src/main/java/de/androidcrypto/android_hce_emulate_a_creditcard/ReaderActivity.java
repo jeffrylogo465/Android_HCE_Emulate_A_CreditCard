@@ -49,7 +49,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private String ttq = "4000";
     private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
 
-    /** entry index to override (-1 = off), and the byte to fill it with. */
+    /** entry index to override (-1 = off, -2 = unknown tags only) */
     private int variantEntry = -1;
     private byte variantByte = 0x00;
 
@@ -283,7 +283,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
         log("   PDOL " + bytesToHex(pdol));
         log("   PDOL tags " + describePdol(pdol));
-        log("   PDOL entries " + countEntries(pdol) + ", length " + pdolDataLen(pdol));
+        log("   PDOL entries " + countEntries(pdol) + ", data length " + pdolDataLen(pdol));
 
         byte[] gpo = null;
         try {
@@ -465,19 +465,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return true;
     }
 
-    /**
-     * stage 1  mode x unknown-tag fill
-     * stage 2  EVERY entry by index, overridden to 00 / FF / 01
-     * stage 3  total-length fuzz (+/- 2)
-     * stage 4  empty
-     * Any non-6A80 tells you something; any 9000 names the field.
-     */
     private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
         final String preferred = ttq;
         IOException last = null;
         int n = countEntries(pdolTemplate);
 
-        // ---- stage 1
+        // stage 1 - mode x unknown-tag fill
         variantEntry = -2;
         for (byte fill : new byte[]{0x00, (byte) 0xFF}) {
             variantByte = fill;
@@ -497,7 +490,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
         }
 
-        // ---- stage 2: every entry, by index. nothing can be skipped.
+        // stage 2 - every entry by index, 00 / FF / 01
         variantEntry = -1;
         ttq = preferred;
         for (int e = 0; e < n; e++) {
@@ -521,15 +514,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
         variantEntry = -1;
 
-        // ---- stage 3: length fuzz. the card may not want 34 after all.
-        int want = pdolDataLen(pdolTemplate);
+        // stage 3 - total length fuzz
         byte[] canon = buildCdolData(pdolTemplate);
+        int want = canon.length;
         for (int delta : new int[]{-2, -1, 1, 2}) {
             int L = want + delta;
             if (L < 1) continue;
             byte[] d = new byte[L];
             System.arraycopy(canon, 0, d, 0, Math.min(canon.length, L));
-            log("   GPO length " + L + " (" + (delta > 0 ? "+" : "") + delta + ")");
+            log("   GPO length " + L);
             try {
                 byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
                 log("   >>> GPO ok at length " + L + " <<<");
@@ -541,7 +534,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
         }
 
-        // ---- stage 4: empty
+        // stage 4 - empty
         log("   GPO last resort: empty data");
         try {
             byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, new byte[0], 0x00));
@@ -905,13 +898,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return out;
     }
 
-    private static byte[] bytesToHex(byte[] d) {
+    private static String bytesToHex(byte[] d) {
         StringBuilder sb = new StringBuilder();
         for (byte b : d) sb.append(String.format(Locale.US, "%02X", b & 0xFF));
         return sb.toString();
     }
-
-    private static byte[] bytesToHexArr(byte[] d) { return d; }
 
     private static String bcd(byte[] d) {
         String h = bytesToHex(d);
