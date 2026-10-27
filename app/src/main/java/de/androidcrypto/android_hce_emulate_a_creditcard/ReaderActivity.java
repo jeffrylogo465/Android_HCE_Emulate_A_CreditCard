@@ -60,6 +60,18 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PREF = "hce_card";
     private static final String PPSE = "325041592E5359532E4444463031";
 
+    /**
+     * TTQ sent inside the PDOL. 0x80 = magstripe mode supported, 0x40 = EMV mode
+     * supported.
+     *
+     * 8000 sets ONLY the magstripe bit, so a card that supports MSD answers the
+     * GPO in format 1. Every capture so far has been a 77 because 3600 asked for
+     * EMV - which is why the MSD payload shape has never been settled. Flip this
+     * back to "3600" once the shape is known and you want the EMV read path with
+     * a real GENERATE AC.
+     */
+    private static final String TTQ = "8000";
+
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
             "A00000002501", "A0000000651010", "A000000333010101"
@@ -107,7 +119,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         TextView hint = new TextView(this);
         hint.setText("Hold the physical card flat against the back of the phone.\n"
-                + "One read per tap. PPSE, GPO, records, then GENERATE AC.");
+                + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
+                + "TTQ " + TTQ + " - magstripe bit only, so an MSD card answers format 1.");
         hint.setTextColor(0xFF9CA3AF);
         hint.setTextSize(12);
         hint.setPadding(0, dp(6), 0, dp(10));
@@ -240,7 +253,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         stage("cap_rawfci", bytesToHex(fci));
         stage("cap_aid", rAid);
 
-        log("-- GET PROCESSING OPTIONS");
+        log("-- GET PROCESSING OPTIONS (TTQ " + TTQ + ")");
         List<byte[]> pdolL = new ArrayList<>();
         collect(fci, 0x9F38, pdolL);
         byte[] pdolData = pdolL.isEmpty() ? new byte[0] : buildCdolData(pdolL.get(0));
@@ -248,11 +261,41 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         stage("cap_rawgpo", bytesToHex(gpo));
 
         byte[] aip = null, afl = null;
-        if (gpo.length > 1 && (gpo[0] & 0xFF) == 0x80) {
-            int len = gpo[1] & 0xFF;
-            if (len >= 2 && 2 + len <= gpo.length) {
-                aip = Arrays.copyOfRange(gpo, 2, 4);
-                afl = Arrays.copyOfRange(gpo, 4, 2 + len);
+        if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
+            // Format 1: 80 <len> <AIP 2> <payload>. The length can be long form.
+            int l = gpo[1] & 0xFF;
+            int off = 2;
+            if (l == 0x81 && gpo.length > 2) {
+                l = gpo[2] & 0xFF;
+                off = 3;
+            } else if (l == 0x82 && gpo.length > 3) {
+                l = ((gpo[2] & 0xFF) << 8) | (gpo[3] & 0xFF);
+                off = 4;
+            }
+            int end = Math.min(gpo.length, off + l);
+
+            if (end - off >= 2) {
+                aip = Arrays.copyOfRange(gpo, off, off + 2);
+                byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
+                log("   format 1 - after the AIP: " + bytesToHex(rest));
+
+                // FIX: this used to assume AIP + AFL unconditionally. If the real
+                // payload is 57 <len> <track 2> then the track 2 was being parsed
+                // as an AFL - nonsense SFIs, 6A83 on every record, no CDOL1 and
+                // so no ARQC. The three shapes are told apart here instead, and
+                // the raw bytes are logged so a wrong guess is visible.
+                if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
+                        && (rest[1] & 0xFF) == rest.length - 2) {
+                    rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
+                    log("   payload is 57 <len> track 2 - no AFL, MSD never walks records");
+                } else if (rest.length % 4 == 0) {
+                    afl = rest;
+                    log("   payload looks like a bare AFL");
+                } else {
+                    afl = Arrays.copyOfRange(rest, 0, 4);
+                    rTrack2 = bcd(Arrays.copyOfRange(rest, 4, rest.length));
+                    log("   first 4 bytes taken as an AFL, the rest as the track 2");
+                }
             }
         } else {
             List<byte[]> l = new ArrayList<>();
@@ -274,8 +317,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
-                if (sfi == 0 || first == 0) continue;
-                if (last == 0 || last < first) last = first;
+                // Sanity: a real AFL entry has SFI 1-10 and record numbers 1-31.
+                if (sfi < 1 || sfi > 10 || first < 1 || first > 31) continue;
+                if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
                     try {
                         byte[] rec = send(iso, apdu(0x00, 0xB2, r, (sfi << 3) | 4, null, 0x00));
@@ -346,6 +390,18 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             if (rService.isEmpty()) rService = rTrack2.substring(dsep + 5, dsep + 8);
             if (rDisc.isEmpty()) rDisc = rTrack2.substring(dsep + 8);
         }
+
+        // FIX: the PAN used to come only from 5A inside a record, so an MSD read
+        // - which has no records at all - produced no PAN, read stayed false and
+        // the whole capture was discarded. Fall back to the track 2.
+        if (rPan.isEmpty() && !rTrack2.isEmpty()) {
+            int d = rTrack2.indexOf('D');
+            if (d >= 12 && d <= 19) {
+                rPan = rTrack2.substring(0, d);
+                log("   PAN taken from the track 2");
+            }
+        }
+
         if (rService.length() != 3) rService = "201";
         if (rPsn.length() > 2) rPsn = rPsn.substring(0, 2);
         if (rExpiry.length() > 4) rExpiry = rExpiry.substring(0, 4);
@@ -441,19 +497,34 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
     }
 
+    /**
+     * FIX: data.length used to be written straight into one byte, so anything
+     * over 255 silently wrapped. Extended length is now used when it is needed
+     * and short form stays the default, because plenty of cards still reject
+     * extended APDUs.
+     */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
             return new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2, (byte) le};
         }
-        byte[] out = new byte[5 + data.length + 1];
-        out[0] = (byte) cla;
-        out[1] = (byte) ins;
-        out[2] = (byte) p1;
-        out[3] = (byte) p2;
-        out[4] = (byte) data.length;
-        System.arraycopy(data, 0, out, 5, data.length);
-        out[out.length - 1] = (byte) le;
-        return out;
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        o.write(cla & 0xFF);
+        o.write(ins & 0xFF);
+        o.write(p1 & 0xFF);
+        o.write(p2 & 0xFF);
+        if (data.length > 255) {
+            o.write(0x00);
+            o.write((data.length >> 8) & 0xFF);
+            o.write(data.length & 0xFF);
+            o.write(data, 0, data.length);
+            o.write(0x00);
+            o.write(0x00);
+        } else {
+            o.write(data.length & 0xFF);
+            o.write(data, 0, data.length);
+            o.write(le & 0xFF);
+        }
+        return o.toByteArray();
     }
 
     private byte[] send(IsoDep iso, byte[] apdu) throws IOException {
@@ -561,7 +632,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F33: return hexToBytes("000000");
             case 0x9F34: return hexToBytes("000000");
             case 0x9F40: return hexToBytes("0000000000");
-            case 0x9F66: return hexToBytes("3600");
+            case 0x9F66: return hexToBytes(TTQ);
             default: return new byte[len];
         }
     }
