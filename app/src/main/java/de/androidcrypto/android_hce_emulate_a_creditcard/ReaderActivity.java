@@ -3,7 +3,6 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
@@ -43,6 +42,20 @@ import java.util.Random;
  *   cap_holder           -> fallback cardholder name
  * All of these live under the "cap_" prefix, which copyStagingToCard() moves to
  * "card<N>_cap_...".
+ *
+ * TTQ. There is ONE field, ttq, read by the hint, the log, the button and
+ * defaultFor(), and persisted so a good value survives a restart. 0x36 is NOT a
+ * valid mode value (0x3600 sets neither the magstripe nor the EMV bit), so the
+ * cycle is 4000 / C000 / 8000 and nothing else. A stale pref is normalised on
+ * load so an old "3600" is never tried.
+ *
+ * gpoWithRetry() sweeps the mode values if the first is refused, so a read
+ * heals itself instead of dying on a guess. On a total failure the preferred
+ * value is restored, so the button, the hint and the next read stay in step.
+ *
+ * A 6A80 from every value means the problem is a PDOL *value*, not the mode -
+ * the log prints the PDOL and the exact bytes sent, and names every tag
+ * defaultFor() does not know, so the failing tag identifies itself.
  */
 public class ReaderActivity extends AppCompatActivity implements NfcAdapter.ReaderCallback {
 
@@ -63,23 +76,22 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String TTQ_KEY = "readerttq";
 
     /**
-     * TTQ sent inside the PDOL. 0x80 = magstripe mode supported, 0x40 = EMV mode
-     * supported.
+     * TTQ sent inside the PDOL.
+     *   0x80 magstripe mode supported   0x40 EMV mode supported
      *
-     * 8000 sets ONLY the magstripe bit, so a card that supports MSD answers the
-     * GPO in format 1. 3600 asks for EMV, so the card answers format 2 with an
-     * AFL, records and a real GENERATE AC.
+     * 4000 = EMV mode only. Format 2, an AFL, records and a real GENERATE AC -
+     *        this is the read the clone and the key scan actually need.
+     * C000 = both modes, the card chooses.
+     * 8000 = magstripe only. Format 1, no AFL, no records, no cryptogram.
      *
-     * This is now a runtime toggle (the TTQ button) rather than a constant, so
-     * the two reads - 8000 for the MSD payload shape, 3600 for the ARQC
-     * reference - no longer need a rebuild between them. Default is 3600, the
-     * terminal-accurate path the clone actually needs.
+     * First in the cycle is the default. Persisted, and normalised on load.
      */
-    private String ttq = "3600";
+    private String ttq = "4000";
+    private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
 
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
-            "A00000002501", "A0000000651010", "A000000333010101"
+            "A0000000250101", "A0000000651010", "A000000333010101"
     };
 
     private SharedPreferences prefs;
@@ -99,7 +111,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
-        ttq = prefs.getString(TTQ_KEY, "3600");
+        // FIX: a pref written by an older build can hold "3600", which is not a
+        // valid mode value. Normalise against the cycle so it is never tried.
+        ttq = prefs.getString(TTQ_KEY, "4000");
+        if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
         buildUi();
         nfc = NfcAdapter.getDefaultAdapter(this);
         if (nfc == null) log("No NFC adapter on this device");
@@ -165,17 +180,21 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     }
 
     private void updateHint() {
-        txtHint.setText("Hold the physical card flat against the back of the phone.\n"
+        txtHint.setText("Hold the physical card flat against the back of the phone,\n"
+                + "and keep it still until it says USE CARD.\n"
                 + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
                 + "TTQ " + ttq + ("8000".equals(ttq)
-                    ? " - magstripe bit only, so an MSD card answers format 1."
-                    : " - EMV mode, so a card that supports it answers format 2"
-                      + " with an AFL and a real GENERATE AC.")
+                    ? " - magstripe only: format 1, no records, no cryptogram."
+                    : " - EMV mode: format 2, an AFL, records and a real ARQC.")
                 + "\nTap the TTQ button to switch.");
     }
 
     private void toggleTtq() {
-        ttq = "8000".equals(ttq) ? "3600" : "8000";
+        int i = 0;
+        for (int k = 0; k < TTQ_CYCLE.length; k++) {
+            if (TTQ_CYCLE[k].equals(ttq)) { i = (k + 1) % TTQ_CYCLE.length; break; }
+        }
+        ttq = TTQ_CYCLE[i];
         prefs.edit().putString(TTQ_KEY, ttq).apply();
         if (btnTtq != null) btnTtq.setText("TTQ: " + ttq);
         updateHint();
@@ -267,8 +286,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 rAid = bytesToHex(a);
                 log("   ok " + rAid);
                 break;
-            } catch (IOException ignored) {
-                log("   no " + bytesToHex(a));
+            } catch (IOException e) {
+                // FIX: the reason used to be swallowed, so a dead connection
+                // after "Tag was lost" read exactly like a card refusing every
+                // AID. Say what actually happened.
+                log("   no " + bytesToHex(a) + " -> " + e.getMessage());
             }
         }
         if (fci == null) {
@@ -294,57 +316,76 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
         }
 
-        log("-- GET PROCESSING OPTIONS (TTQ " + ttq + ")");
+        log("-- GET PROCESSING OPTIONS");
         List<byte[]> pdolL = new ArrayList<>();
         collect(fci, 0x9F38, pdolL);
-        byte[] pdolData = pdolL.isEmpty() ? new byte[0] : buildCdolData(pdolL.get(0));
-        byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, pdolData, 0x00));
-        stage("cap_rawgpo", bytesToHex(gpo));
+        byte[] pdol = pdolL.isEmpty() ? null : pdolL.get(0);
+
+        // FIX: neither the PDOL nor the bytes built from it were ever logged, so
+        // a 6A80 was a complaint about data nobody could see. Both are printed
+        // now, and every tag defaultFor() does not know is named.
+        log("   PDOL " + (pdol == null ? "(none found on the FCI)" : bytesToHex(pdol)));
+
+        byte[] gpo = null;
+        try {
+            gpo = gpoWithRetry(iso, pdol);
+        } catch (IOException e) {
+            log("   GPO failed on every TTQ value: " + e.getMessage());
+        }
 
         byte[] aip = null, afl = null;
-        if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
-            // Format 1: 80 <len> <AIP 2> <payload>. The length can be long form.
-            int l = gpo[1] & 0xFF;
-            int off = 2;
-            if (l == 0x81 && gpo.length > 2) {
-                l = gpo[2] & 0xFF;
-                off = 3;
-            } else if (l == 0x82 && gpo.length > 3) {
-                l = ((gpo[2] & 0xFF) << 8) | (gpo[3] & 0xFF);
-                off = 4;
-            }
-            int end = Math.min(gpo.length, off + l);
+        if (gpo != null) {
+            stage("cap_rawgpo", bytesToHex(gpo));
 
-            if (end - off >= 2) {
-                aip = Arrays.copyOfRange(gpo, off, off + 2);
-                byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
-                log("   format 1 - after the AIP: " + bytesToHex(rest));
-
-                // FIX: this used to assume AIP + AFL unconditionally. If the real
-                // payload is 57 <len> <track 2> then the track 2 was being parsed
-                // as an AFL - nonsense SFIs, 6A83 on every record, no CDOL1 and
-                // so no ARQC. The three shapes are told apart here instead, and
-                // the raw bytes are logged so a wrong guess is visible.
-                if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
-                        && (rest[1] & 0xFF) == rest.length - 2) {
-                    rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
-                    log("   payload is 57 <len> track 2 - no AFL, MSD never walks records");
-                } else if (rest.length % 4 == 0) {
-                    afl = rest;
-                    log("   payload looks like a bare AFL");
-                } else {
-                    afl = Arrays.copyOfRange(rest, 0, 4);
-                    rTrack2 = bcd(Arrays.copyOfRange(rest, 4, rest.length));
-                    log("   first 4 bytes taken as an AFL, the rest as the track 2");
+            if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
+                // Format 1: 80 <len> <AIP 2> <payload>. The length can be long form.
+                int l = gpo[1] & 0xFF;
+                int off = 2;
+                if (l == 0x81 && gpo.length > 2) {
+                    l = gpo[2] & 0xFF;
+                    off = 3;
+                } else if (l == 0x82 && gpo.length > 3) {
+                    l = ((gpo[2] & 0xFF) << 8) | (gpo[3] & 0xFF);
+                    off = 4;
                 }
+                int end = Math.min(gpo.length, off + l);
+
+                if (end - off >= 2) {
+                    aip = Arrays.copyOfRange(gpo, off, off + 2);
+                    byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
+                    log("   format 1 - after the AIP: " + bytesToHex(rest));
+
+                    // FIX: the bare-AFL branch used to fire on length alone, and
+                    // a track 2 of 16 or 20 bytes is a multiple of four - so an
+                    // AIP + raw track 2 payload was read as an AFL and produced
+                    // nonsense SFIs. looksLikeAfl() checks the one bit pattern an
+                    // AFL entry always has and a track 2 almost never does: the
+                    // low three bits of the first byte are zero (it is SFI<<3).
+                    if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
+                            && (rest[1] & 0xFF) == rest.length - 2) {
+                        rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
+                        log("   payload is 57 <len> track 2 - no AFL, MSD never walks records");
+                    } else if (rest.length % 4 == 0 && looksLikeAfl(rest)) {
+                        afl = rest;
+                        log("   payload looks like a bare AFL");
+                    } else if (rest.length > 4
+                            && looksLikeAfl(Arrays.copyOfRange(rest, 0, 4))) {
+                        afl = Arrays.copyOfRange(rest, 0, 4);
+                        rTrack2 = bcd(Arrays.copyOfRange(rest, 4, rest.length));
+                        log("   first 4 bytes as an AFL, rest as track 2");
+                    } else {
+                        rTrack2 = bcd(rest);
+                        log("   payload read as a bare track 2");
+                    }
+                }
+            } else {
+                List<byte[]> l = new ArrayList<>();
+                collect(gpo, 0x82, l);
+                if (!l.isEmpty()) aip = l.get(0);
+                l.clear();
+                collect(gpo, 0x94, l);
+                if (!l.isEmpty()) afl = l.get(0);
             }
-        } else {
-            List<byte[]> l = new ArrayList<>();
-            collect(gpo, 0x82, l);
-            if (!l.isEmpty()) aip = l.get(0);
-            l.clear();
-            collect(gpo, 0x94, l);
-            if (!l.isEmpty()) afl = l.get(0);
         }
         if (aip != null) rAip = bytesToHex(aip);
         log("   AIP " + (rAip.isEmpty() ? "(none)" : rAip)
@@ -358,14 +399,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
-                // Sanity: a real AFL entry has SFI 1-10 and record numbers 1-31.
                 if (sfi < 1 || sfi > 10 || first < 1 || first > 31) continue;
                 if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
                     try {
                         byte[] rec = send(iso, apdu(0x00, 0xB2, r, (sfi << 3) | 4, null, 0x00));
-                        // KEY NAME: cap_rec<sfi>_<rec> - the service parses the
-                        // underscore. A flat cap_rec0 is silently dropped by afl().
                         stage("cap_rec" + sfi + "_" + r, bytesToHex(rec));
                         records.add(rec);
                         recNo++;
@@ -432,9 +470,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             if (rDisc.isEmpty()) rDisc = rTrack2.substring(dsep + 8);
         }
 
-        // FIX: the PAN used to come only from 5A inside a record, so an MSD read
-        // - which has no records at all - produced no PAN, read stayed false and
-        // the whole capture was discarded. Fall back to the track 2.
         if (rPan.isEmpty() && !rTrack2.isEmpty()) {
             int d = rTrack2.indexOf('D');
             if (d >= 12 && d <= 19) {
@@ -500,6 +535,71 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         });
     }
 
+    /**
+     * An AFL entry's first byte is SFI<<3, so the low three bits are zero and the
+     * SFI is 1..10. A track 2 starts with two BCD PAN digits, which rarely
+     * satisfies that. This is what tells an AIP + track 2 payload apart from an
+     * AIP + AFL one when there is no 57 tag to go on.
+     */
+    private static boolean looksLikeAfl(byte[] b) {
+        if (b.length < 4 || b.length % 4 != 0) return false;
+        for (int i = 0; i + 3 < b.length; i += 4) {
+            int sfi = (b[i] & 0xFF) >> 3;
+            int first = b[i + 1] & 0xFF;
+            int last = b[i + 2] & 0xFF;
+            if ((b[i] & 0x07) != 0) return false;
+            if (sfi < 1 || sfi > 10) return false;
+            if (first < 1 || first > 31) return false;
+            if (last < first || last > 31) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Try the selected TTQ first, then the others. A card that refuses the mode
+     * with 6A80 usually takes one of them, and the value that worked is kept so
+     * the next read starts there instead of rediscovering it.
+     *
+     * FIX: on a total failure the preferred value is restored and persisted, so
+     * the field, the button label, the hint and the next read stay in step
+     * instead of the field silently drifting to whatever was tried last.
+     */
+    private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
+        final String preferred = ttq;
+
+        List<String> order = new ArrayList<>();
+        order.add(ttq);
+        for (String t : TTQ_CYCLE) if (!t.equals(ttq)) order.add(t);
+
+        IOException last = null;
+        for (String t : order) {
+            ttq = t;
+            byte[] pdolData = pdolTemplate == null ? new byte[0] : buildCdolData(pdolTemplate);
+            log("   GPO try TTQ " + t + "  data " + bytesToHex(pdolData));
+            try {
+                byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, pdolData, 0x00));
+                prefs.edit().putString(TTQ_KEY, ttq).apply();
+                ui.post(() -> {
+                    if (btnTtq != null) btnTtq.setText("TTQ: " + ttq);
+                    updateHint();
+                });
+                log("   GPO ok with TTQ " + t);
+                return gpo;
+            } catch (IOException e) {
+                log("   GPO TTQ " + t + " -> " + e.getMessage());
+                last = e;
+            }
+        }
+
+        ttq = preferred;
+        prefs.edit().putString(TTQ_KEY, ttq).apply();
+        ui.post(() -> {
+            if (btnTtq != null) btnTtq.setText("TTQ: " + ttq);
+            updateHint();
+        });
+        throw last;
+    }
+
     private void returnResult() {
         if (!read) {
             Toast.makeText(this, "Nothing read yet", Toast.LENGTH_SHORT).show();
@@ -538,12 +638,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
     }
 
-    /**
-     * FIX: data.length used to be written straight into one byte, so anything
-     * over 255 silently wrapped. Extended length is now used when it is needed
-     * and short form stays the default, because plenty of cards still reject
-     * extended APDUs.
-     */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
             return new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2, (byte) le};
@@ -554,10 +648,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         o.write(p1 & 0xFF);
         o.write(p2 & 0xFF);
         if (data.length > 255) {
+            // extended: 00 LcHi LcLo <data> 00 LeHi LeLo
             o.write(0x00);
             o.write((data.length >> 8) & 0xFF);
             o.write(data.length & 0xFF);
             o.write(data, 0, data.length);
+            o.write(0x00);
             o.write(0x00);
             o.write(0x00);
         } else {
@@ -572,15 +668,19 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         byte[] rsp = iso.transceive(apdu);
         int code = sw(rsp);
 
+        // FIX: on an extended APDU the last byte is LeLo, so LeHi has to be
+        // cleared as well or the retry sends 00 xx where it means 00 00 xx.
         if ((code & 0xFF00) == 0x6C00 && apdu.length >= 1) {
             byte[] retry = apdu.clone();
+            boolean ext = apdu.length > 6 && (apdu[4] & 0xFF) == 0x00;
+            if (ext) retry[retry.length - 3] = 0x00;
             retry[retry.length - 1] = (byte) (code & 0xFF);
             rsp = iso.transceive(retry);
             code = sw(rsp);
         }
 
-        // FIX: 61xx used to fetch exactly one block, so a response longer than a
-        // single Le window threw "SW 61xx" instead of chaining. Loop it, bounded.
+        // FIX: 61xx used to fetch exactly one block, so a longer response threw
+        // instead of chaining. Loop it, bounded.
         if ((code & 0xFF00) == 0x6100) {
             ByteArrayOutputStream acc = new ByteArrayOutputStream();
             acc.write(rsp, 0, rsp.length - 2);
@@ -653,12 +753,28 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                     len = (len << 8) | (template[i++] & 0xFF);
                 }
             }
+            if (!knownTag(tag)) {
+                log("   template asks for unknown tag "
+                        + String.format(Locale.US, "%04X", tag) + " len " + len
+                        + " - sending zeros");
+            }
             byte[] v = defaultFor(tag, len);
             for (int k = 0; k < len; k++) {
                 out.write(k < v.length ? v[k] : 0);
             }
         }
         return out.toByteArray();
+    }
+
+    private static boolean knownTag(int tag) {
+        switch (tag) {
+            case 0x9F02: case 0x9F03: case 0x9F1A: case 0x5F2A: case 0x9A:
+            case 0x9C: case 0x9F21: case 0x9F37: case 0x9F35: case 0x9F33:
+            case 0x9F34: case 0x9F40: case 0x9F66: case 0x95:
+                return true;
+            default:
+                return false;
+        }
     }
 
     private byte[] defaultFor(int tag, int len) {
@@ -674,6 +790,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                         c.get(Calendar.MONTH) + 1,
                         c.get(Calendar.DAY_OF_MONTH)));
             }
+            case 0x9C: return hexToBytes("00");
+            case 0x95: return hexToBytes("0000000000");
             case 0x9F21: return hexToBytes("120000");
             case 0x9F37: {
                 byte[] r = new byte[4];
@@ -681,24 +799,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 return r;
             }
             case 0x9F35: return hexToBytes("22");
-            case 0x9F33: return hexToBytes("000000");
-            case 0x9F34: return hexToBytes("000000");
-            case 0x9F40: return hexToBytes("0000000000");
+            // FIX: all three were zeros - "this terminal has no card input, no
+            // CVM and no security capability". A card can refuse that with 6A80.
+            case 0x9F33: return hexToBytes("E0F8C8");
+            case 0x9F34: return hexToBytes("1F0002");
+            case 0x9F40: return hexToBytes("F0F0F0F0F0");
             case 0x9F66: return hexToBytes(ttq);
             default: return new byte[len];
         }
-    }
-
-    private static byte[] cat(byte[]... arrs) {
-        int n = 0;
-        for (byte[] a : arrs) n += a.length;
-        byte[] out = new byte[n];
-        int p = 0;
-        for (byte[] a : arrs) {
-            System.arraycopy(a, 0, out, p, a.length);
-            p += a.length;
-        }
-        return out;
     }
 
     private static byte[] hexToBytes(String h) {
