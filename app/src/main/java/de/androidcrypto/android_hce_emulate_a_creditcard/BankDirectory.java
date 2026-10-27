@@ -98,24 +98,14 @@ public final class BankDirectory {
     }
 
     /**
-     * Standard Luhn. The rightmost digit is NEVER doubled, so the toggle must
-     * start false and flip AFTER the digit has been added to the sum.
+     * FIX: a thin wrapper over Luhn.valid().
+     *
+     * This file and MainActivity both used to carry their own copy of the
+     * algorithm. Two copies of a check that decides whether a card is usable is
+     * two chances to drift apart. Kept as a wrapper so no call site changes.
      */
     private static boolean luhn(String raw) {
-        String d = digits(raw);
-        if (d.length() < 12 || d.length() > 19) return false;
-        int sum = 0;
-        boolean doubleIt = false;
-        for (int i = d.length() - 1; i >= 0; i--) {
-            int c = d.charAt(i) - '0';
-            if (doubleIt) {
-                c *= 2;
-                if (c > 9) c -= 9;
-            }
-            sum += c;
-            doubleIt = !doubleIt;
-        }
-        return sum % 10 == 0;
+        return Luhn.valid(raw);
     }
 
     // ------------------------------------------------------------------ entry points
