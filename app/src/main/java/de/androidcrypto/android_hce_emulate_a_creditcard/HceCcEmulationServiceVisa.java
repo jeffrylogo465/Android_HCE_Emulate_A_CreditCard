@@ -136,9 +136,46 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     // the counters, and the wrong one sends you hunting the PPSE.
     private boolean sawError;
 
+    /** Name of the on-device terminal log. App-private, no permission needed. */
+    private static final String TERM_LOG = "term_log.txt";
+
+    /**
+     * NEW. The tap log, persisted to a file as well as the in-memory buffer.
+     *
+     * The clipboard copy in onDeactivated() only ever holds the LAST tap, and a
+     * terminal that gives up early fires onDeactivated with a log you cannot
+     * compare against the previous attempt. The file keeps a short history, and
+     * CaptureActivity prints its tail on screen.
+     *
+     * Trimmed to ~30 KB once it passes 60 KB so it cannot grow without bound.
+     * Never throws: a logging failure must not take the card down.
+     */
+    private void termLog(String s) {
+        try {
+            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(s + "\n");
+            w.close();
+
+            if (f.length() > 60000) {
+                long keep = 30000;
+                byte[] buf = new byte[(int) keep];
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
+                raf.seek(f.length() - keep);
+                raf.readFully(buf);
+                raf.setLength(0);
+                raf.write(buf);
+                raf.close();
+            }
+        } catch (Throwable ignored) { }
+    }
+
     private void tap(String s) {
         tapLog.append(s).append('\n');
         if (tapLog.length() > 32000) tapLog.delete(0, 16000);
+        // NEW: mirror every line to the file, so the log survives the tap and
+        // can be read back on screen instead of only via the clipboard.
+        termLog(s);
     }
 
     private void popup(final String s) {
@@ -691,6 +728,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                         tapLog.setLength(0);
                         resetTransaction();
                         sawPpse = true;
+                        // NEW: a session marker in the file, so a log with two
+                        // taps in it is readable and you can see which attempt
+                        // is which.
+                        termLog("=== tap "
+                                + new java.text.SimpleDateFormat("HH:mm:ss",
+                                        java.util.Locale.US).format(new java.util.Date())
+                                + " ===");
                         int n = scriptLines();
                         if (n > 0) {
                             tap("-- script armed: " + n + " line(s), gate="
@@ -1142,6 +1186,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             v = "TAP: verdict failed - " + e;
         }
         resetTransaction();
+
+        // NEW: the verdict is the single most useful line in the whole log, and
+        // the popup that shows it is gone in two seconds. Write it down.
+        if (!t.isEmpty()) termLog("!! verdict: " + v);
 
         if (!t.isEmpty()) {
             try {
