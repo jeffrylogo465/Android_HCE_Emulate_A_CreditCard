@@ -661,17 +661,37 @@
                     android:textColorHint="#4B5563"
                     android:textSize="12sp" />
 
-                <Button
-                    android:id="@+id/btnSave"
+                <LinearLayout
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
+                    android:layout_height="wrap_content"
                     android:layout_marginTop="16dp"
                     android:layout_marginBottom="24dp"
-                    android:backgroundTint="#4F46E5"
-                    android:text="SAVE CARD"
-                    android:textColor="#FFFFFF"
-                    android:textSize="11sp"
-                    android:textStyle="bold" />
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btnSave"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="2"
+                        android:backgroundTint="#4F46E5"
+                        android:text="SAVE CARD"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/btnDelete"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="#7F1D1D"
+                        android:text="DELETE"
+                        android:textColor="#FCA5A5"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                </LinearLayout>
 
             </LinearLayout>
 
