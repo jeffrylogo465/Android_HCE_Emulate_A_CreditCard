@@ -468,7 +468,18 @@ public class MainActivity extends AppCompatActivity {
         // was unreachable.
         etAip.setText(prefs.getString(key(i, "aip"), "1080"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
-        etCid.setText(prefs.getString(key(i, "cid"), "80"));
+        // CHANGED. CID is an OVERRIDE, so its default is EMPTY, not "80".
+        //
+        // genac() lets a two-digit CID box win on the first GENERATE AC. With a
+        // "80" default the box was ALWAYS populated, so the forced branch always
+        // fired, every tap answered ARQC, the terminal always went online and
+        // the host always judged a cryptogram it had never issued - a decline.
+        //
+        // Empty means "let the logic decide", which is:
+        //   no MK-AC set -> TC   (approve OFFLINE, terminal never asks the host)
+        //   key found    -> ARQC (go online)
+        // Type 40 to force an offline approve, 80 to force online, 00 to decline.
+        etCid.setText(prefs.getString(key(i, "cid"), ""));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
         etIad.setText(prefs.getString(key(i, "iad"), ""));
@@ -548,6 +559,9 @@ public class MainActivity extends AppCompatActivity {
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
                 .append(t(etAip).isEmpty() ? "1080" : t(etAip).toUpperCase()).append('\n');
+        sb.append("CID        : ")
+                .append(t(etCid).isEmpty() ? "(empty - logic decides: TC offline, ARQC if key)"
+                        : t(etCid).toUpperCase() + "  (FORCED - overrides the logic)").append('\n');
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
         sb.append('\n');
@@ -1216,6 +1230,9 @@ public class MainActivity extends AppCompatActivity {
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
         etAfl.setText("");
+        // A fresh clone starts with an EMPTY CID override, so the logic decides
+        // rather than a leftover "80" pinning every tap to ARQC.
+        etCid.setText("");
         binding = false;
 
         collect();
