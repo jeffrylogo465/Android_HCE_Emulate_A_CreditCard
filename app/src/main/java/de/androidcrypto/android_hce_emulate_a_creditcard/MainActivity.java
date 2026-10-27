@@ -96,8 +96,9 @@ public class MainActivity extends AppCompatActivity {
 
     private int current = 0;
     private boolean binding = false;
-    /** Set by onActivityResult so onResume() does not overwrite the clone summary
-     *  with the last tap verdict before the user can read it. */
+
+    // Set when returning from the reader: onResume() would otherwise overwrite
+    // the clone status the moment the activity comes back.
     private boolean suppressResumeStatus = false;
 
     @Override
@@ -242,21 +243,6 @@ public class MainActivity extends AppCompatActivity {
         v.clearFocus();
     }
 
-    /** Count the script lines the service's engine will actually match: a line
-     *  needs a '=' with at least one character before it, and '#' starts a
-     *  comment. Kept in one place so the preview and the usescript gate can
-     *  never disagree about whether the script is armed. */
-    private static int armedLines(String script) {
-        if (script == null) return 0;
-        int n = 0;
-        for (String line : script.split("\\R")) {
-            int hash = line.indexOf('#');
-            if (hash >= 0) line = line.substring(0, hash);
-            if (line.indexOf('=') > 0) n++;
-        }
-        return n;
-    }
-
     /** Paste "5287250556251985=310420113264855" into the track 2 or PAN field and
      *  the rest fills itself in. The separator is the only reliable split point;
      *  everything after it is positional, and the tail (the CVC) is kept whole. */
@@ -264,9 +250,8 @@ public class MainActivity extends AppCompatActivity {
         if (binding) return;
 
         if (t(etName).isEmpty()) {
-            // Only the track 2 box can carry a track 1 name: the PAN box is
-            // inputType=number, so '^' never survives a paste into it.
             String n = nameFromTrack1(t(etTrack2));
+            if (n.isEmpty()) n = nameFromTrack1(t(etPan));
             if (!n.isEmpty()) {
                 binding = true;
                 etName.setText(n);
@@ -360,7 +345,7 @@ public class MainActivity extends AppCompatActivity {
 
     /** The last digit this PAN should have. It only knows the number you gave
      *  it: with a one-digit typo elsewhere, moving the check digit also fixes
-     *  Luhn. diffAgainstTrack2() is the precise test. */
+     *  Luhn. boxDiff() is the precise test. */
     private static int expectedCheckDigit(String pan) {
         if (pan.length() < 2) return -1;
         String body = pan.substring(0, pan.length() - 1);
@@ -376,8 +361,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** The track 2 is a capture, so a difference from the PAN box IS the typo.
-     *  Names the exact position instead of guessing at the check digit. */
-    private String diffAgainstTrack2(String pan) {
+     *  Names the exact position instead of guessing at the check digit.
+     *
+     *  FIX: an empty PAN box is not a mismatch. autoFill() usually fills it
+     *  first, but on a pasted track 2 alone this used to say
+     *  "PAN is 0 digits, TRACK 2 has 16 - different cards". */
+    private String boxDiff(String pan) {
+        if (pan.isEmpty()) return null;
         String ref = panFromTrack2();
         if (ref.isEmpty() || ref.equals(pan)) return null;
         if (ref.length() != pan.length()) {
@@ -402,13 +392,7 @@ public class MainActivity extends AppCompatActivity {
     private void loadAll() {
         cards.clear();
         int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
-
-        // The usescript gate is derived from the script, but a card saved before
-        // this existed has no gate key and the service default (0) would keep a
-        // real script switched off forever. Backfill it once, here.
-        SharedPreferences.Editor back = prefs.edit();
-        boolean changed = false;
-
+        SharedPreferences.Editor e = prefs.edit();
         for (int i = 0; i < n; i++) {
             CardAdapter.CardModel c = new CardAdapter.CardModel();
             c.label = prefs.getString(key(i, "label"), "");
@@ -418,14 +402,14 @@ public class MainActivity extends AppCompatActivity {
             c.msd = prefs.getInt(key(i, "msd"), 0);
             cards.add(c);
 
-            if (!prefs.contains(key(i, "usescript"))) {
-                back.putInt(key(i, "usescript"),
-                        armedLines(prefs.getString(key(i, "script"), "")) > 0 ? 1 : 0);
-                changed = true;
-            }
+            // FIX: the service gates the script on card<N>_usescript, but nothing
+            // ever wrote it, so the script was permanently OFF. Derive it from the
+            // field: the default script is comments only, so a card with no real
+            // line stays OFF and only a pasted script arms it.
+            e.putInt(key(i, "usescript"),
+                    armedLines(prefs.getString(key(i, "script"), "")) > 0 ? 1 : 0);
         }
-        if (changed) back.apply();
-
+        e.apply();
         if (cards.isEmpty()) cards.add(new CardAdapter.CardModel());
         adapter.setCards(cards);
         updateCount();
@@ -450,11 +434,10 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "iad"), t(etIad).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         e.putString(key(i, "script"), t(etScript));
-        // The gate follows the script: armed when there is at least one live
-        // line, off when there is none. The leak fix makes this safe to derive -
-        // a blank script now really is blank for this card.
-        e.putInt(key(i, "usescript"), armedLines(t(etScript)) > 0 ? 1 : 0);
         e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
+        // written as an INT - the service must read it with getInt, not
+        // getString, or every APDU throws ClassCastException.
+        e.putInt(key(i, "usescript"), armedLines(t(etScript)) > 0 ? 1 : 0);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
         e.apply();
@@ -480,9 +463,9 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        // 1080 matches the service DEFAULT_AIP (CV only). 3080 claimed DDA the
-        // app cannot do, and because the box is never empty the service default
-        // was dead - every card advertised ODA it would then fail.
+        // 1080 matches the service's DEFAULT_AIP. 3080 claims DDA the app can
+        // never satisfy, and because the box is never empty the service default
+        // was unreachable.
         etAip.setText(prefs.getString(key(i, "aip"), "1080"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
@@ -502,13 +485,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
-
-        // Prefer the field's own value; if it is empty, surface any issuer script
-        // that came off the card, so a captured script is not invisible.
-        String sc = prefs.getString(key(i, "script"), "");
-        if (sc.isEmpty()) sc = prefs.getString(key(i, "cap_script"), "");
-        etScript.setText(sc);
-
+        etScript.setText(prefs.getString(key(i, "script"), ""));
         binding = false;
         updateCount();
         txtStatus.setText("");
@@ -517,6 +494,19 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateCount() {
         txtCount.setText(cards.size() == 1 ? "1 card" : cards.size() + " cards");
+    }
+
+    /** A script line is one with an '=' before any '#'. The default script is
+     *  comments only, so it counts zero and does not arm the gate. */
+    private static int armedLines(String script) {
+        if (script == null) return 0;
+        int n = 0;
+        for (String line : script.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            if (line.indexOf('=') > 0) n++;
+        }
+        return n;
     }
 
     // ---------- AID presets ----------
@@ -569,7 +559,7 @@ public class MainActivity extends AppCompatActivity {
             sb.append("   check digit : ")
                     .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
                             + expectedCheckDigit(pan)).append('\n');
-            String diff = diffAgainstTrack2(pan);
+            String diff = boxDiff(pan);
             if (diff != null) sb.append("   !! ").append(diff).append('\n');
         }
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
@@ -581,10 +571,10 @@ public class MainActivity extends AppCompatActivity {
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
-        int armed = armedLines(t(etScript));
-        sb.append("script     : ").append(armed == 0
-                ? "(none - service builds the GPO)"
-                : armed + " line(s) armed - gate ON").append('\n');
+        String script = t(etScript);
+        int scriptLines = armedLines(script);
+        sb.append("script     : ").append(scriptLines == 0
+                ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
 
         String trackPan = track2.contains("D")
                 ? track2.substring(0, track2.indexOf("D")) : "";
@@ -745,14 +735,14 @@ public class MainActivity extends AppCompatActivity {
 
     /** KEYFINDER: the dictionary now comes from KeyFinder - ~66k candidates from
      *  test vectors, repeated bytes, counting patterns, ASCII words and
-     *  BIN-derived values. A key already found for this BIN is tried first.
-     *  Takes the PAN so it can be built off the UI thread. */
-    private List<String> candidateKeys(String pan) {
+     *  BIN-derived values. A key already found for this BIN is tried first. */
+    private List<String> candidateKeys() {
         List<String> out = new ArrayList<>(
-                KeyFinder.candidates(pan, prefs.getString("keylist", "")));
+                KeyFinder.candidates(digits(t(etPan)), prefs.getString("keylist", "")));
 
-        if (pan.length() >= 6) {
-            String remembered = prefs.getString("keyfor_" + pan.substring(0, 6), "");
+        String bin = digits(t(etPan));
+        if (bin.length() >= 6) {
+            String remembered = prefs.getString("keyfor_" + bin.substring(0, 6), "");
             if (remembered.length() == 32 && !out.contains(remembered)) out.add(0, remembered);
         }
         return out;
@@ -768,10 +758,10 @@ public class MainActivity extends AppCompatActivity {
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
         String pan = digits(t(etPan));
 
-        // MAC over the AIP the real card actually sent in its GPO, NOT the editor
-        // box. The editor value (and its default) will not match what was on the
-        // wire, so every candidate key would MAC to the wrong value and a correct
-        // key would report as a miss.
+        // FIX: MAC over the AIP the physical card actually sent in its GPO, not
+        // the editor field. The editor value is a guess; if it differs from the
+        // wire by one bit the ARQC can never match and a correct key reports as
+        // a miss.
         String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
         if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
 
@@ -792,10 +782,10 @@ public class MainActivity extends AppCompatActivity {
         byte[] cmd = hexToBytes(cmdHex);
         byte[] rsp = hexToBytes(rspHex);
         if (cmd.length < 6) return;
+        // FIX: extended length. apdu[4] == 0x00 means a two byte Lc follows.
         int lc = cmd[4] & 0xFF;
         int off = 5;
         if (lc == 0x00) {
-            // extended length: Lc is the two bytes after the 00 marker (case 4E)
             if (cmd.length < 7) return;
             lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
             off = 7;
@@ -814,16 +804,14 @@ public class MainActivity extends AppCompatActivity {
         }
         final byte[] aip = hexToBytes(aipHex);
         final String atc = bytesToHex(atcRef);
+        // FIX: the service uses "01" as the PSN default; a mismatch here means
+        // the MAC input differs from the one the card used.
         final String psn = prefs.getString(key(current, "psn"), "01");
+        final List<String> keys = candidateKeys();
 
-        txtStatus.setText("Scanning keys x 4 variants...");
+        txtStatus.setText("Scanning " + keys.size() + " keys x 4 variants...");
 
         new Thread(() -> {
-            // Built here, not on the UI thread - ~66k candidate strings.
-            final List<String> keys = candidateKeys(pan);
-            runOnUiThread(() -> txtStatus.setText(
-                    "Scanning " + keys.size() + " keys x 4 variants..."));
-
             int tried = 0;
             for (String k : keys) {
                 for (int variant = 0; variant < 4; variant++) {
@@ -922,11 +910,10 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    /** Pull the AIP out of a captured GPO response. Handles both framings:
-     *  format 1 (tag 80 - AIP is the first two bytes of the value) and
-     *  format 2 (tag 77 - the AIP is tag 82 inside the template). Returns "" on
-     *  anything unusable so the caller can fall back to the editor box. */
-    private String aipFromGpo(String gpo) {
+    /** Pull the AIP out of the card's raw GPO. Format 1 (0x80) is
+     *  <tag><len><AIP><payload>, format 2 (0x77) carries it as 82. */
+    private static String aipFromGpo(String gpo) {
+        if (gpo == null || gpo.isEmpty()) return "";
         byte[] d = hexToBytes(gpo);
         if (d.length < 4) return "";
         int i = 0;
@@ -966,11 +953,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSave() {
-        // Compare the PAN box against the track 2 BEFORE syncFieldsFromTrack2()
-        // copies the track 2 value over the box. After that copy the two are
-        // always equal, so diffAgainstTrack2() would always return null and the
-        // "Digit N is X, TRACK 2 has Y" diagnostic could never fire from SAVE.
-        String boxDiff = diffAgainstTrack2(digits(t(etPan)));
+        // FIX: diff BEFORE the sync. syncFieldsFromTrack2() rewrites the PAN box
+        // from the track 2, so afterwards the two always agree and the typo the
+        // user needs told about is gone.
+        String diff = boxDiff(digits(t(etPan)));
 
         syncFieldsFromTrack2();
 
@@ -978,11 +964,13 @@ public class MainActivity extends AppCompatActivity {
         // PAN box is usually hand-typed. When they disagree, take the track 2
         // value rather than bouncing the card with an error the user cannot act
         // on - the correct number is sitting right there.
-        String trackPan = panFromTrack2();
-        if (!trackPan.isEmpty() && !trackPan.equals(digits(t(etPan)))) {
-            binding = true;
-            etPan.setText(trackPan);
-            binding = false;
+        if (diff != null) {
+            String trackPan = panFromTrack2();
+            if (!trackPan.isEmpty()) {
+                binding = true;
+                etPan.setText(trackPan);
+                binding = false;
+            }
         }
 
         if (t(etLabel).isEmpty()) {
@@ -1003,12 +991,10 @@ public class MainActivity extends AppCompatActivity {
         }
         if (!luhn(pan)) {
             // A differing track 2 is the precise case: the difference IS the typo.
-            // boxDiff is the pre-sync comparison, which is the only one that can
-            // still see the difference.
-            String diff = boxDiff != null ? boxDiff : diffAgainstTrack2(pan);
             if (diff != null) {
                 txtStatus.setText(diff);
                 Toast.makeText(this, diff, Toast.LENGTH_LONG).show();
+                showPage(0);
                 return;
             }
             // PAN and track 2 agree, so the paste itself is bad. The check digit
@@ -1034,16 +1020,19 @@ public class MainActivity extends AppCompatActivity {
         collect();
         adapter.notifyItemChanged(current);
 
-        // The box was reconciled to the track 2 above, so comparing the two here
-        // is always equal - report the PRE-sync difference instead.
-        if (boxDiff != null) {
-            txtStatus.setText("Saved - " + boxDiff);
-            Toast.makeText(this, boxDiff, Toast.LENGTH_LONG).show();
+        String track2 = normaliseTrack2(t(etTrack2));
+        String trackPan2 = track2.contains("D")
+                ? track2.substring(0, track2.indexOf("D")) : track2;
+        if (track2.contains("D") && !trackPan2.isEmpty() && !trackPan2.equals(pan)) {
+            txtStatus.setText("Saved - but PAN and TRACK 2 are different cards");
+            Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
+            showPage(0);
             return;
         }
         if (t(etAid).isEmpty()) {
             txtStatus.setText("Saved - but AID is empty, terminal will pick Visa");
             Toast.makeText(this, "AID is empty - long-press the AID field", Toast.LENGTH_LONG).show();
+            showPage(0);
             return;
         }
 
@@ -1055,8 +1044,11 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
-        Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
+        txtStatus.setText(diff == null
+                ? "Saved card " + (current + 1) + " of " + cards.size()
+                : "Saved - " + diff);
+        Toast.makeText(this, diff == null ? "Card saved" : "Saved using the TRACK 2 value",
+                Toast.LENGTH_SHORT).show();
         showPage(0);
     }
 
@@ -1097,9 +1089,6 @@ public class MainActivity extends AppCompatActivity {
     private void doDelete(int index) {
         SharedPreferences.Editor e = prefs.edit();
         int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
-        // A fresh install has card_count 0 while loadAll() still puts one blank
-        // card on screen - without this the dialog confirms and nothing happens.
-        if (n <= 0) n = cards.size();
         if (n <= 0) return;
 
         String victim = key(index, "");
@@ -1152,9 +1141,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // onActivityResult() runs first on the resume path, so without this the
-        // clone summary is written and immediately replaced by the last tap
-        // verdict - the most useful line the clone produces, invisible.
         if (suppressResumeStatus) {
             suppressResumeStatus = false;
             return;
@@ -1169,7 +1155,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != REQ_CLONE || resultCode != RESULT_OK || data == null) return;
-        suppressResumeStatus = true;
 
         String pan = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_PAN)));
         String expiry = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_EXPIRY)));
@@ -1217,25 +1202,6 @@ public class MainActivity extends AppCompatActivity {
             prefs.edit().putInt("card_count", cards.size()).apply();
             adapter.setCards(cards);
             current = cards.size() - 1;
-
-            // This is a FRESH card. The block below sets only the fields the
-            // capture actually carried, so every other field still holds the
-            // PREVIOUS card's text - and the collect() further down would write
-            // it onto this clone. The issuer script is the one that kills the
-            // terminal: a stale script serves a foreign GPO, gpo() never runs,
-            // and the tap dies on an AFL pointing at records that are not there.
-            // etName matters too - a leaked name makes the holderFromCapture()
-            // block below skip, so the real cardholder name never gets read.
-            binding = true;
-            etName.setText("");
-            etCid.setText("80");
-            etArqc.setText("");
-            etMkac.setText("");
-            etScript.setText("");
-            etIad.setText("");
-            etAip.setText("1080");
-            etAtc.setText("001B");
-            binding = false;
         }
 
         binding = true;
@@ -1251,21 +1217,6 @@ public class MainActivity extends AppCompatActivity {
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
         etAfl.setText("");
         binding = false;
-
-        // KEYFINDER: the reset above blanked MK-AC; if a key is remembered for
-        // this BIN, bring it onto the clone as well (bindCard is not called here,
-        // so its own lookup never ran).
-        if (t(etMkac).isEmpty()) {
-            String b6 = digits(pan);
-            if (b6.length() >= 6) {
-                String kk = prefs.getString("keyfor_" + b6.substring(0, 6), "");
-                if (kk.length() == 32) {
-                    binding = true;
-                    etMkac.setText(kk);
-                    binding = false;
-                }
-            }
-        }
 
         collect();
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "01" : psn).apply();
@@ -1302,6 +1253,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         txtStatus.setText(st);
+        suppressResumeStatus = true;
 
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
         showPage(1);
@@ -1314,6 +1266,7 @@ public class MainActivity extends AppCompatActivity {
 
     private int msdFromCapture(int index) {
         String gpo = prefs.getString(key(index, "cap_rawgpo"), "");
+        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");
         if (gpo.length() < 2) return 1;
         try {
             return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
