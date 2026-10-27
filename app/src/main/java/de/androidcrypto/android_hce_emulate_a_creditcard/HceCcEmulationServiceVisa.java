@@ -27,6 +27,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte[] SW_UNSUPPORTED = hex("6D00");
     private static final byte[] SW_MALFORMED   = hex("6700");
     private static final byte[] SW_NO_RECORD   = hex("6A83");
+    private static final byte[] SW_NOT_FOUND   = hex("6A88");
+    private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
     /**
@@ -88,6 +90,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * reads the last two payload bytes as the status word. A 77 template must
      * also declare its content length exactly: 82 02 xxxx is 4 bytes and
      * 94 04 + 4 is 6, so the content is 10 = 0x0A and the header reads 770A.
+     *
+     * GATED. The editor pre-fills this field and it cannot be cleared, so a
+     * stale line from another card was silently serving the GPO of a card that
+     * had nothing to do with it - gpo() never ran, MSD never applied, and the
+     * AFL pointed at records that did not exist. The script is now OFF unless
+     * the card's 'usescript' pref says otherwise.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
@@ -357,6 +365,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private String scriptRaw() {
         return p("script", DEFAULT_SCRIPT);
+    }
+
+    /**
+     * NEW: the script is OFF unless the card says otherwise. The editor
+     * pre-fills the field and it cannot be cleared, so without this gate a line
+     * left over from another card serves every GPO and gpo() never runs.
+     *
+     * To re-enable for a card, set 'card<N>_usescript' to 1.
+     */
+    private boolean useScript() {
+        String v = p("usescript", "0").trim();
+        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
     }
 
     private int scriptLines() {
@@ -642,7 +662,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                         resetTransaction();
                         sawPpse = true;
                         int n = scriptLines();
-                        if (n > 0) tap("-- script armed: " + n + " line(s)");
+                        if (n > 0) {
+                            tap("-- script armed: " + n + " line(s), gate="
+                                    + (useScript() ? "ON" : "OFF"));
+                        }
                         popup(nameLine());
                     }
                 }
@@ -652,12 +675,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             // Counted here, before the script branch, so a scripted response
             // still registers.
-            if (isSelect)        nSelects++;
+            if (isSelect)         nSelects++;
             else if (ins == 0xA8) nGpos++;
             else if (ins == 0xB2) nRecs++;
             else if (ins == 0xAE) nGens++;
 
-            String hit = scriptMatch(apdu);
+            String hit = useScript() ? scriptMatch(apdu) : null;
             if (hit != null) {
                 byte[] out = hex(hit);
                 scriptHits++;
@@ -701,18 +724,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 byte[] ch = new byte[8];
                 rnd.nextBytes(ch);
                 out = cat(ch, SW_OK);
-            } else if (ins == 0x88) {
-                out = SW_UNSUPPORTED;
             } else {
-                // FIX: an unknown INS is 6D00, not 6A82.
+                // FIX: an unknown INS is 6D00, not 6A82. This covers 0x88
+                // INTERNAL AUTHENTICATE too - we never claim DDA, so the old
+                // separate branch was identical to this one.
                 out = SW_UNSUPPORTED;
             }
 
             tap("<< " + bytesToHex(out));
             return out;
         } catch (Exception e) {
+            // FIX: 6A82 means 'file not found' and sent the terminal hunting for
+            // a file. 6F00 is 'command failed' and is what an exception is.
             tap("!! " + e);
-            return SW_BAD;
+            return SW_ERR;
         }
     }
 
@@ -920,6 +945,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         variant &= 0x03;
 
         try {
+            // Bit 2 set puts AIP||ATC in front of the CDOL data, bit 2 clear
+            // puts them after. CHECK EmvCrypto.arqc: it is handed variant & 1
+            // only, so it must NOT add the AIP/ATC itself or they land twice.
             byte[] macIn = ((variant & 2) != 0)
                     ? cat(aipForMac(), hex(atc), cdol)
                     : cat(cdol, aipForMac(), hex(atc));
@@ -938,7 +966,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
         // FIX: 9F4F is the log format that goes with the 9F4D entries.
         else if (tag == 0x9F4F) return cat(tlv(0x9F4F, hex("9F4D020B0A")), SW_OK);
-        return SW_BAD;
+        // FIX: an unknown tag is 6A88 'referenced data not found', not 6A82.
+        return SW_NOT_FOUND;
     }
 
     /**
@@ -971,12 +1000,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
+    /**
+     * FIX: the script state is now reported even when the script never fires,
+     * because 'armed but gated off' and 'armed but no match' are different
+     * faults and the old version could not tell them apart.
+     */
     private String verdict() {
         String v = baseVerdict();
         int armed = scriptLines();
+        if (armed == 0) return v;
+        if (!useScript()) return v + " | script armed " + armed + " line(s) but OFF";
         if (scriptHits > 0) return v + " | script hit " + scriptHits + "x";
-        if (armed > 0) return v + " | script armed " + armed + " line(s) but never matched";
-        return v;
+        return v + " | script armed " + armed + " line(s) but never matched";
     }
 
     @Override
