@@ -313,6 +313,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
 
         stage("cap_rawfci", bytesToHex(fci));
+        // the FCI in full: 9F38 in place, plus any 9F42/9F51 the card carries.
+        log("   FCI " + bytesToHex(fci));
         stage("cap_aid", rAid);
 
         List<byte[]> labL = new ArrayList<>();
@@ -864,6 +866,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F6E: case 0x9F45: case 0x9F4C: case 0x9F1C: case 0x9F4E:
             case 0x9F15: case 0x9F39: case 0x9F41: case 0x9F09: case 0x9F08:
             case 0x9F4D: case 0x9F5A:
+            // added: the Discover-proprietary entries this card's PDOL asks for.
+            // They were logging as "NOT in table" and being sent as zeros.
+            case 0xDF70: case 0xDF71: case 0xDF72:
                 return true;
             default:
                 return false;
@@ -911,6 +916,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F08: return hexToBytes("008C");           // ic version
             case 0x9F4D: return hexToBytes("0000");           // log entry
             case 0x9F5A: return hexToBytes("00");             // app program id
+            // added: Discover-proprietary, unknown semantics. Non-zero so we can
+            // tell whether the card was refusing the zeros.
+            case 0xDF70: return hexToBytes("01");
+            case 0xDF71: return hexToBytes("0001");
+            case 0xDF72: return hexToBytes("0001");
             default: return new byte[len];                    // zeros, right length
         }
     }
