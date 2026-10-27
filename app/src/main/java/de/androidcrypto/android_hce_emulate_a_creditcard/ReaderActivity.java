@@ -47,7 +47,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PPSE = "325041592E5359532E4444463031";
     private static final String TTQ_KEY = "readerttq";
     private static final String CURSOR_KEY = "sweepcursor";
-    private static final int STEPS_PER_TAP = 12;
+    private static final int STEPS_PER_TAP = 16;
 
     private String ttq = "4000";
     private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
@@ -65,6 +65,29 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String[] SUSPECTS = {
             "9C", "9F35", "9F02", "9F03", "9A", "5F2A", "9F1A", "9F37",
             "9F66", "DF70", "DF71", "DF72"
+    };
+
+    /**
+     * Whole-payload overrides, "TAG=HEX;TAG=HEX". These test combinations,
+     * which a one-field-at-a-time sweep can never reach.
+     */
+    private static final String[] PRESETS = {
+            "9F66=36000000",
+            "9F66=00004000",
+            "9F66=40003600",
+            "9F66=36004000",
+            "9F66=00000036",
+            "9F35=11",
+            "9F35=23",
+            "9F35=34",
+            "9C=01",
+            "9C=09",
+            "9F1A=0000;5F2A=0000",
+            "9A=000000",
+            "9F02=000000000000",
+            "DF70=01;DF71=0001;DF72=0001",
+            "DF70=01;DF71=0100;DF72=0100",
+            "9F66=36000000;DF70=01;DF71=0001;DF72=0001",
     };
 
     private SharedPreferences prefs;
@@ -471,18 +494,21 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     }
 
     /**
-     * Flat list of steps, 12 per tap, cursor persisted. Steps:
-     *   kind 0 = mode (TTQ_CYCLE[m])
-     *   kind 1 = entry e overridden to a byte
-     *   kind 2 = total length delta
+     * Flat plan, cursor persisted, 16 steps per tap:
+     *   kind 5 = preset whole payload
+     *   kind 4 = command shape (no Le, CLA 00, P2 01)
+     *   kind 1 = one entry overridden
+     *   kind 0 = mode
+     *   kind 2 = length
      *   kind 3 = empty
-     * Entries are tried in SUSPECTS order. A tag-lost breaks out and saves
-     * the cursor so the next tap continues instead of starting over.
      */
     private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
         int n = countEntries(pdolTemplate);
+        byte[] canon = buildCdolData(pdolTemplate);
 
         List<int[]> plan = new ArrayList<>();
+        for (int p = 0; p < PRESETS.length; p++) plan.add(new int[]{5, p, 0});
+        for (int c = 0; c < 3; c++) plan.add(new int[]{4, c, 0});
         for (int e : orderedEntries(pdolTemplate, n)) {
             plan.add(new int[]{1, e, 0x00});
             plan.add(new int[]{1, e, 0xFF});
@@ -493,10 +519,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         plan.add(new int[]{3, 0, 0});
 
         if (cursor < 0 || cursor >= plan.size()) cursor = 0;
-        log("   sweep step " + cursor + " of " + plan.size()
-                + " (" + STEPS_PER_TAP + " per tap)");
+        log("   sweep step " + cursor + " of " + plan.size() + " (" + STEPS_PER_TAP + " per tap)");
 
-        byte[] canon = null;
         IOException last = null;
         int budget = STEPS_PER_TAP;
 
@@ -504,24 +528,45 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int[] s = plan.get(cursor);
             String desc;
             byte[] d;
+            byte[] cmd = null;
 
-            if (s[0] == 1) {
+            if (s[0] == 5) {
+                String spec = PRESETS[s[1]];
+                variantEntry = -1;
+                ttq = "4000";
+                d = buildFromSpec(pdolTemplate, canon, spec);
+                desc = "preset " + spec;
+            } else if (s[0] == 4) {
+                variantEntry = -1;
+                ttq = "4000";
+                d = canon.clone();
+                if (s[1] == 0) {
+                    byte[] full = apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00);
+                    cmd = Arrays.copyOf(full, full.length - 1);      // case 3, no Le
+                    desc = "no Le";
+                } else if (s[1] == 1) {
+                    cmd = apdu(0x00, 0xA8, 0x00, 0x00, d, 0x00);
+                    desc = "CLA 00";
+                } else {
+                    cmd = apdu(0x80, 0xA8, 0x00, 0x01, d, 0x00);
+                    desc = "P2 01";
+                }
+            } else if (s[0] == 1) {
                 variantEntry = s[1];
                 variantByte = (byte) s[2];
                 ttq = "4000";
+                d = buildCdolData(pdolTemplate);
                 desc = "entry " + s[1] + " (" + entryTag(pdolTemplate, s[1])
                         + ") = " + hx((byte) s[2]);
-                d = buildCdolData(pdolTemplate);
             } else if (s[0] == 0) {
                 variantEntry = -2;
                 variantByte = 0x00;
                 ttq = TTQ_CYCLE[s[1]];
-                desc = "mode " + ttq;
                 d = buildCdolData(pdolTemplate);
+                desc = "mode " + ttq;
             } else if (s[0] == 2) {
                 variantEntry = -1;
                 ttq = "4000";
-                if (canon == null) canon = buildCdolData(pdolTemplate);
                 int L = canon.length + s[1];
                 if (L < 1) { cursor++; continue; }
                 d = new byte[L];
@@ -536,7 +581,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
             log("   [" + cursor + "] " + desc + " len " + d.length);
             try {
-                byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
+                byte[] rsp = iso.transceive(cmd != null ? cmd
+                        : apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
+                int code = sw(rsp);
+                if (code != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", code));
+                byte[] gpo = Arrays.copyOf(rsp, rsp.length - 2);
                 log("   >>> SOLVED at step " + cursor + ": " + desc + " <<<");
                 variantEntry = -1;
                 cursor = 0;
@@ -563,6 +612,38 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
         prefs.edit().putInt(CURSOR_KEY, cursor).apply();
         throw (last != null ? last : new IOException("not solved"));
+    }
+
+    /** canon with the spec's tags replaced. spec is "TAG=HEX;TAG=HEX". */
+    private byte[] buildFromSpec(byte[] pdol, byte[] canon, String spec) {
+        byte[] d = canon.clone();
+        int i = 0, off = 0;
+        while (i < pdol.length) {
+            int tag = pdol[i++] & 0xFF;
+            if ((tag & 0x1F) == 0x1F) {
+                if (i >= pdol.length) break;
+                tag = (tag << 8) | (pdol[i++] & 0xFF);
+            }
+            if (i >= pdol.length) break;
+            int len = pdol[i++] & 0xFF;
+            if ((len & 0x80) != 0) {
+                int k = len & 0x7F;
+                len = 0;
+                for (int j = 0; j < k && i < pdol.length; j++) len = (len << 8) | (pdol[i++] & 0xFF);
+            }
+            String tagS = String.format(Locale.US, "%04X", tag);
+            for (String part : spec.split(";")) {
+                int eq = part.indexOf('=');
+                if (eq <= 0) continue;
+                if (!part.substring(0, eq).trim().equalsIgnoreCase(tagS)) continue;
+                byte[] v = hexToBytes(part.substring(eq + 1));
+                for (int k = 0; k < len && k < v.length; k++) {
+                    if (off + k < d.length) d[off + k] = v[k];
+                }
+            }
+            off += len;
+        }
+        return d;
     }
 
     private int[] orderedEntries(byte[] t, int n) {
