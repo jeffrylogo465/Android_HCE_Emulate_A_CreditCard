@@ -928,18 +928,39 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return SW_NO_RECORD;
     }
 
+    /**
+     * CHANGED. The CID box in the editor now wins on the FIRST GENERATE AC.
+     *
+     * The terminal cannot check a cryptogram - it has no key. It decides on the
+     * CID alone. So this one byte IS the terminal's verdict, and it is the only
+     * lever in the app that reaches the till:
+     *
+     *   40 = TC   - approve offline, the terminal never asks the host
+     *   80 = ARQC - go online, the host judges our synthetic cryptogram
+     *   00 = AAC  - decline offline
+     *
+     * The second GENERATE AC still mirrors the host's decision in P1, so an
+     * online flow is not broken by a forced first CID.
+     *
+     * NOTE: the editor defaults this box to 80, so by default behaviour is
+     * unchanged. Clear the box to fall back to the constants below.
+     */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
 
         byte cid;
-        if (ALWAYS_ONLINE_FOR_RECEIPT && !cryptogramSent) {
-            cid = CID_ARQC;
-        } else if (cryptogramSent) {
+        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
+
+        if (cryptogramSent) {
             // FIX: the second GENERATE AC carries the host's decision in P1. It
             // used to answer TC unconditionally, so a declined online
             // transaction still came back "approved" from the card.
             cid = (requested == 0x00) ? CID_AAC : CID_TC;
+        } else if (forced.length() == 2) {
+            cid = (byte) Integer.parseInt(forced, 16);
+        } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
+            cid = CID_ARQC;
         } else if (haveKey() && FORCE_ONLINE_ARQC) {
             cid = CID_ARQC;
         } else if (FORCE_OFFLINE_TC) {
@@ -969,6 +990,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
+                + (forced.length() == 2 ? " (forced from the CID box)" : "")
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         return cat(tlv(0x77, cat(
