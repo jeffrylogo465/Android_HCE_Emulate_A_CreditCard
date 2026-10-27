@@ -389,6 +389,32 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
+     * FIX: the track 2 is a capture, so if the PAN box differs from it the
+     * difference IS the typo. Returns a message naming the exact position, or
+     * null when there is no track 2 to compare against, or they already match.
+     *
+     * Previously a single bad digit only produced "last digit should be X",
+     * which is true but points at the wrong end of the number - the typo is
+     * usually somewhere in the middle and the check digit is just what
+     * happens to notice.
+     */
+    private String diffAgainstTrack2(String pan) {
+        String ref = panFromTrack2();
+        if (ref.isEmpty() || ref.equals(pan)) return null;
+        if (ref.length() != pan.length()) {
+            return "PAN is " + pan.length() + " digits, TRACK 2 has " + ref.length()
+                    + " - different cards";
+        }
+        for (int i = 0; i < pan.length(); i++) {
+            if (pan.charAt(i) != ref.charAt(i)) {
+                return "Digit " + (i + 1) + " is " + pan.charAt(i)
+                        + ", TRACK 2 has " + ref.charAt(i) + " - use the TRACK 2 value";
+            }
+        }
+        return null;
+    }
+
+    /**
      * The last digit this PAN should have. Naming it turns "fails Luhn" from a
      * dead end into "your 12th digit is wrong", which is the whole point.
      */
@@ -565,6 +591,9 @@ public class MainActivity extends AppCompatActivity {
             sb.append("   check digit : ")
                     .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
                             + expectedCheckDigit(pan)).append('\n');
+            // FIX: if the PAN and the track 2 disagree, say which digit.
+            String diff = diffAgainstTrack2(pan);
+            if (diff != null) sb.append("   ").append(diff).append('\n');
         }
         // the emulator pads YYMM to YYMM01 - show what actually goes on the wire
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
@@ -985,13 +1014,25 @@ public class MainActivity extends AppCompatActivity {
                     Toast.LENGTH_LONG).show();
             return;
         }
-        // FIX: name the expected last digit. "pass Luhn" is a dead end; telling
-        // you the digit is right there is actionable.
+        // FIX: name the offending digit. If the PAN and TRACK 2 disagree, the
+        // difference IS the typo, so report the position. If they already agree,
+        // the typo came in with the source line - say so, because "last digit
+        // should be X" alone sends you to the wrong end of the number.
         if (!luhn(pan)) {
+            String diff = diffAgainstTrack2(pan);
+            if (diff != null) {
+                txtStatus.setText(diff);
+                Toast.makeText(this, diff, Toast.LENGTH_LONG).show();
+                return;
+            }
             String want = String.valueOf(expectedCheckDigit(pan));
-            txtStatus.setText("PAN check digit wrong - last digit should be " + want);
-            Toast.makeText(this, "PAN check digit wrong. Last digit should be " + want
-                    + ", not " + pan.substring(pan.length() - 1), Toast.LENGTH_LONG).show();
+            String last = pan.substring(pan.length() - 1);
+            String msg = panFromTrack2().isEmpty()
+                    ? "PAN check digit wrong. Last digit should be " + want + ", not " + last
+                    : "PAN and TRACK 2 both read " + pan + " - the typo came from your source line. "
+                      + "Last digit should be " + want + ".";
+            txtStatus.setText(msg);
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             return;
         }
         if (t(etExpiry).length() != 4) {
