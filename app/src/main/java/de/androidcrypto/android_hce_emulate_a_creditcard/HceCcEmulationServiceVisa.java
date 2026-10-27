@@ -149,6 +149,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return l;
     }
 
+    /**
+     * Lc of an incoming APDU, extended length included.
+     *
+     * FIX: reading apdu[4] as a plain Lc gives 0 for an extended APDU. The
+     * reader emits extended when a PDOL or CDOL1 is over 255 bytes, and the two
+     * consequences were both silent: a long SELECT took the empty-name path and
+     * selected the card's own AID, and a long GENERATE AC MACed over an empty
+     * CDOL. Neither raised anything.
+     */
+    private static int lcOf(byte[] apdu) {
+        if (apdu.length < 5) return 0;
+        int lc = apdu[4] & 0xFF;
+        if (lc != 0x00) return lc;
+        if (apdu.length < 7) return 0;
+        return ((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF);
+    }
+
+    /** Offset of the data field, past an extended length if there is one. */
+    private static int dataOff(byte[] apdu) {
+        return (apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00) ? 7 : 5;
+    }
+
     private static byte[] hexOrNull(String s) {
         return (s == null || s.isEmpty()) ? null : hex(s);
     }
@@ -196,6 +218,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (s.length() > 2) s = s.substring(0, 2);
         if (s.length() == 1) s = "0" + s;
         return s;
+    }
+
+    /** Directory label: the editor field wins, then whatever the reader saw. */
+    private String labelText() {
+        String s = p("label", p("cap_label", "CARD"));
+        return s.length() > 16 ? s.substring(0, 16) : s;
     }
 
     private String nextAtc() {
@@ -347,8 +375,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
-        String lbl = p("label", "CARD");
-        if (lbl.length() > 16) lbl = lbl.substring(0, 16);
+        String lbl = labelText();
 
         ByteArrayOutputStream dir = new ByteArrayOutputStream();
 
@@ -555,10 +582,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             boolean isSelect = (ins == 0xA4);
 
             if (isSelect && apdu.length >= 5) {
-                int lc0 = apdu[4] & 0xFF;
-                if (apdu.length >= 5 + lc0) {
+                int lc0 = lcOf(apdu);
+                int off0 = dataOff(apdu);
+                if (apdu.length >= off0 + lc0) {
                     byte[] nm = new byte[lc0];
-                    System.arraycopy(apdu, 5, nm, 0, lc0);
+                    System.arraycopy(apdu, off0, nm, 0, lc0);
                     if (Arrays.equals(nm, PPSE)) {
                         tapLog.setLength(0);
                         resetTransaction();
@@ -593,7 +621,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             byte[] out;
             if (isSelect) {
-                if (apdu.length < 5) return SW_BAD;
+                if (apdu.length < dataOff(apdu)) return SW_BAD;
                 out = select(apdu);
             } else if (ins == 0xA8) {
                 out = gpo();
@@ -624,10 +652,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private byte[] select(byte[] apdu) {
-        int lc = apdu[4] & 0xFF;
-        if (apdu.length < 5 + lc) return SW_BAD;
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (apdu.length < off + lc) return SW_BAD;
         byte[] name = new byte[lc];
-        System.arraycopy(apdu, 5, name, 0, lc);
+        System.arraycopy(apdu, off, name, 0, lc);
 
         if (Arrays.equals(name, PPSE)) {
             return cat(buildPpse(), SW_OK);
@@ -650,7 +679,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(patchFci(captured, name), SW_OK);
         }
 
-        String label = p("label", "CARD");
+        String label = labelText();
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
@@ -663,13 +692,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Magstripe branch, back to the author's original shape.
+     * Magstripe branch, back to the author's original shape: 80 <len> <AIP 2>
+     * <57 track 2>, no AFL.
      *
-     * Format 1 is: 80 <len> <AIP 2> <track 2>, with the 57 tag left around the
-     * track 2 and NO AFL. Sending a bare AFL before a raw track 2 would leave the
-     * terminal no way to find where the AFL ends, so it is left out for now.
-     * Reading a card with the reader's TTQ set to 8000 will produce a real MSD
-     * capture and settle the shape for good - the payload is logged below.
+     * FIX: the MSD field now WINS over the captured framing instead of the other
+     * way round, so MSD is actually selectable on a clone. The old behaviour made
+     * the editor switch decorative - a clone of an EMV card could never be put
+     * into the no-crypto lane. A disagreement is logged.
      */
     private byte[] gpo() {
         byte[] raw = rawGpo();
@@ -678,9 +707,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (raw != null && raw.length > 0) {
             int[] q = new int[1];
             int outer = readTag(raw, q);
-            if (outer == 0x80) msd = true;
-            else if (outer == 0x77) msd = false;
-            tap("-- msd overridden from captured GPO framing: " + msd);
+            boolean capMsd = (outer == 0x80);
+            if (capMsd != msd) {
+                tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
+            } else {
+                tap("-- msd " + msd + " agrees with the capture");
+            }
         }
 
         byte[] aip = capturedAip(raw);
@@ -703,11 +735,22 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return cat(tlv(0x77, cat(tlv(0x82, masked), tlv(0x94, a))), SW_OK);
     }
 
+    /**
+     * FIX: the format 1 branch used raw[2] and raw[3], which is only right for a
+     * short-form length. A long-form payload (0x81 xx) put the AIP two bytes
+     * further along, so the AIP came out as the length byte plus the real AIP[0].
+     */
     private byte[] capturedAip(byte[] raw) {
         if (raw == null || raw.length < 4) return null;
         int[] pos = new int[1];
         int outer = readTag(raw, pos);
-        if (outer == 0x80) return new byte[]{raw[2], raw[3]};
+        if (outer == 0x80) {
+            int l = readLen(raw, pos);
+            if (l >= 2 && pos[0] + 2 <= raw.length) {
+                return Arrays.copyOfRange(raw, pos[0], pos[0] + 2);
+            }
+            return null;
+        }
         int len = readLen(raw, pos);
         int end = Math.min(raw.length, pos[0] + len);
         int i = pos[0];
@@ -767,11 +810,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String atc = txnAtc();
 
         byte[] cdol = new byte[0];
-        if (apdu.length >= 5) {
-            int lc = apdu[4] & 0xFF;
-            if (lc > 0 && apdu.length >= 5 + lc) {
-                cdol = Arrays.copyOfRange(apdu, 5, 5 + lc);
-            }
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            cdol = Arrays.copyOfRange(apdu, off, off + lc);
         }
 
         byte[] ac = computeAc(atc, cdol);
