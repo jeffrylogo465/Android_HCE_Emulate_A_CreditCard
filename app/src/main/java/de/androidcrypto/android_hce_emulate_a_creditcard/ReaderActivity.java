@@ -49,8 +49,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String CURSOR_KEY = "sweepcursor";
     private static final int STEPS_PER_TAP = 16;
 
-    private String ttq = "4000";
-    private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
+    /**
+     * TTQ. The original used 0x76 (EMV mode + contact chip + ODA-online +
+     * online PIN + signature). 7600 first, then the others.
+     */
+    private String ttq = "7600";
+    private static final String[] TTQ_CYCLE = {"7600", "4000", "C000", "8000"};
 
     private int variantEntry = -1;
     private byte variantByte = 0x00;
@@ -61,22 +65,16 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             "A0000000250101", "A0000000651010", "A000000333010101"
     };
 
-    /** entries worth testing first */
     private static final String[] SUSPECTS = {
             "9C", "9F35", "9F02", "9F03", "9A", "5F2A", "9F1A", "9F37",
             "9F66", "DF70", "DF71", "DF72"
     };
 
-    /**
-     * Whole-payload overrides, "TAG=HEX;TAG=HEX". These test combinations,
-     * which a one-field-at-a-time sweep can never reach.
-     */
     private static final String[] PRESETS = {
+            "9F66=76000000",
             "9F66=36000000",
             "9F66=00004000",
             "9F66=40003600",
-            "9F66=36004000",
-            "9F66=00000036",
             "9F35=11",
             "9F35=23",
             "9F35=34",
@@ -87,15 +85,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             "9F02=000000000000",
             "DF70=01;DF71=0001;DF72=0001",
             "DF70=01;DF71=0100;DF72=0100",
-            "9F66=36000000;DF70=01;DF71=0001;DF72=0001",
+            "9F66=76000000;DF70=01;DF71=0001;DF72=0001",
     };
 
-    /** raw whole GPO data, used verbatim - bypasses PDOL building entirely */
+    /** raw whole GPO data fields, already in wire form (not wrapped again) */
     private static final String[] RAW = {
             "8300",
-            "830000000000000000000000000000000000",
-            "0000000000000000000000000000000000",
-            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
     };
 
     private SharedPreferences prefs;
@@ -115,7 +110,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
-        ttq = prefs.getString(TTQ_KEY, "4000");
+        ttq = prefs.getString(TTQ_KEY, "7600");
         if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
         cursor = prefs.getInt(CURSOR_KEY, 0);
         buildUi();
@@ -184,9 +179,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private void updateHint() {
         txtHint.setText("Hold the card FLAT and DEAD STILL against the phone.\n"
-                + "If it says 'Tag was lost', lift it and tap again - the sweep\n"
-                + "resumes where it stopped. Keep tapping until a line says >>>.\n"
-                + "TTQ " + ttq + ".");
+                + "GPO data is wrapped in 83 <len> now. If a line says >>>,\n"
+                + "that step worked. TTQ " + ttq + ".");
     }
 
     private void toggleTtq() {
@@ -319,7 +313,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             return;
         }
         log("   PDOL " + bytesToHex(pdol));
-        log("   PDOL tags " + describePdol(pdol));
         log("   PDOL entries " + countEntries(pdol) + ", data length " + pdolDataLen(pdol));
 
         byte[] gpo = null;
@@ -501,31 +494,33 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return true;
     }
 
+    /** EMV PDOL related data object: 83 <len> <pdolData>. */
+    private static byte[] wrap(byte[] pdolData) {
+        byte[] out = new byte[pdolData.length + 2];
+        out[0] = (byte) 0x83;
+        out[1] = (byte) pdolData.length;
+        System.arraycopy(pdolData, 0, out, 2, pdolData.length);
+        return out;
+    }
+
     /**
-     * Flat plan, cursor persisted, 16 steps per tap:
-     *   kind 6 = raw whole payload (bypasses PDOL)
-     *   kind 5 = preset whole payload
-     *   kind 4 = command shape (no Le, CLA 00, P2 01)
-     *   kind 1 = one entry overridden
-     *   kind 0 = mode
-     *   kind 2 = length
-     *   kind 3 = empty
+     * Step 0 is the wrapped canonical payload - the shape the original used.
+     * Everything after is fallback.
      */
     private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
         int n = countEntries(pdolTemplate);
         byte[] canon = buildCdolData(pdolTemplate);
 
         List<int[]> plan = new ArrayList<>();
-        for (int r = 0; r < RAW.length; r++) plan.add(new int[]{6, r, 0});
+        for (int m = 0; m < TTQ_CYCLE.length; m++) plan.add(new int[]{0, m, 0});
         for (int p = 0; p < PRESETS.length; p++) plan.add(new int[]{5, p, 0});
-        for (int c = 0; c < 3; c++) plan.add(new int[]{4, c, 0});
         for (int e : orderedEntries(pdolTemplate, n)) {
             plan.add(new int[]{1, e, 0x00});
             plan.add(new int[]{1, e, 0xFF});
             plan.add(new int[]{1, e, 0x01});
         }
-        for (int m = 0; m < TTQ_CYCLE.length; m++) plan.add(new int[]{0, m, 0});
         for (int d : new int[]{-2, -1, 1, 2}) plan.add(new int[]{2, d, 0});
+        for (int r = 0; r < RAW.length; r++) plan.add(new int[]{6, r, 0});
         plan.add(new int[]{3, 0, 0});
 
         if (cursor < 0 || cursor >= plan.size()) cursor = 0;
@@ -538,66 +533,50 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int[] s = plan.get(cursor);
             String desc;
             byte[] d;
-            byte[] cmd = null;
 
-            if (s[0] == 6) {
-                variantEntry = -1;
-                ttq = "4000";
-                d = hexToBytes(RAW[s[1]]);
-                desc = "raw " + RAW[s[1]];
-            } else if (s[0] == 5) {
-                String spec = PRESETS[s[1]];
-                variantEntry = -1;
-                ttq = "4000";
-                d = buildFromSpec(pdolTemplate, canon, spec);
-                desc = "preset " + spec;
-            } else if (s[0] == 4) {
-                variantEntry = -1;
-                ttq = "4000";
-                d = canon.clone();
-                if (s[1] == 0) {
-                    byte[] full = apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00);
-                    cmd = Arrays.copyOf(full, full.length - 1);      // case 3, no Le
-                    desc = "no Le";
-                } else if (s[1] == 1) {
-                    cmd = apdu(0x00, 0xA8, 0x00, 0x00, d, 0x00);
-                    desc = "CLA 00";
-                } else {
-                    cmd = apdu(0x80, 0xA8, 0x00, 0x01, d, 0x00);
-                    desc = "P2 01";
-                }
-            } else if (s[0] == 1) {
-                variantEntry = s[1];
-                variantByte = (byte) s[2];
-                ttq = "4000";
-                d = buildCdolData(pdolTemplate);
-                desc = "entry " + s[1] + " (" + entryTag(pdolTemplate, s[1])
-                        + ") = " + hx((byte) s[2]);
-            } else if (s[0] == 0) {
+            if (s[0] == 0) {
                 variantEntry = -2;
                 variantByte = 0x00;
                 ttq = TTQ_CYCLE[s[1]];
-                d = buildCdolData(pdolTemplate);
-                desc = "mode " + ttq;
+                d = wrap(buildCdolData(pdolTemplate));
+                desc = "mode " + ttq + " wrapped";
+            } else if (s[0] == 5) {
+                String spec = PRESETS[s[1]];
+                variantEntry = -1;
+                ttq = "7600";
+                d = wrap(buildFromSpec(pdolTemplate, canon, spec));
+                desc = "preset " + spec;
+            } else if (s[0] == 1) {
+                variantEntry = s[1];
+                variantByte = (byte) s[2];
+                ttq = "7600";
+                d = wrap(buildCdolData(pdolTemplate));
+                desc = "entry " + s[1] + " (" + entryTag(pdolTemplate, s[1])
+                        + ") = " + hx((byte) s[2]);
             } else if (s[0] == 2) {
                 variantEntry = -1;
-                ttq = "4000";
+                ttq = "7600";
                 int L = canon.length + s[1];
                 if (L < 1) { cursor++; continue; }
-                d = new byte[L];
-                System.arraycopy(canon, 0, d, 0, Math.min(canon.length, L));
-                desc = "length " + L;
+                byte[] bare = new byte[L];
+                System.arraycopy(canon, 0, bare, 0, Math.min(canon.length, L));
+                d = wrap(bare);
+                desc = "pdol length " + L;
+            } else if (s[0] == 6) {
+                variantEntry = -1;
+                ttq = "7600";
+                d = hexToBytes(RAW[s[1]]);
+                desc = "raw " + RAW[s[1]];
             } else {
                 variantEntry = -1;
-                ttq = "4000";
+                ttq = "7600";
                 d = new byte[0];
                 desc = "empty data";
             }
 
-            log("   [" + cursor + "] " + desc + " len " + d.length);
+            log("   [" + cursor + "] " + desc + " data " + bytesToHex(d));
             try {
-                byte[] rsp = iso.transceive(cmd != null ? cmd
-                        : apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
+                byte[] rsp = iso.transceive(apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
                 int code = sw(rsp);
                 if (code != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", code));
                 byte[] gpo = Arrays.copyOf(rsp, rsp.length - 2);
@@ -629,7 +608,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         throw (last != null ? last : new IOException("not solved"));
     }
 
-    /** canon with the spec's tags replaced. spec is "TAG=HEX;TAG=HEX". */
     private byte[] buildFromSpec(byte[] pdol, byte[] canon, String spec) {
         byte[] d = canon.clone();
         int i = 0, off = 0;
@@ -681,8 +659,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static String hx(byte b) {
         return String.format(Locale.US, "%02X", b);
     }
-
-    // ---- PDOL is tag,len,tag,len... NO VALUES. these must NOT skip a value.
 
     private static int countEntries(byte[] t) {
         int i = 0, n = 0;
@@ -895,10 +871,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 Arrays.fill(v, variantByte);
             } else {
                 v = defaultFor(tag, len);
-                if (!knownTag(tag)) {
-                    log("   PDOL tag " + String.format(Locale.US, "%04X", tag)
-                            + " len " + len + " NOT in table -> " + bytesToHex(v));
-                }
             }
             for (int k = 0; k < len; k++) out.write(k < v.length ? v[k] : 0);
             entry++;
@@ -908,27 +880,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             log("   !! PDOL LENGTH DESYNC: built " + data.length + " card wants " + declared);
         }
         return data;
-    }
-
-    private static String describePdol(byte[] t) {
-        if (t == null) return "(none)";
-        StringBuilder sb = new StringBuilder();
-        int i = 0;
-        while (i < t.length) {
-            int tag = t[i++] & 0xFF;
-            if ((tag & 0x1F) == 0x1F) {
-                if (i >= t.length) { sb.append("TRUNC"); break; }
-                tag = (tag << 8) | (t[i++] & 0xFF);
-            }
-            if (i >= t.length) { sb.append("TRUNC"); break; }
-            int len = t[i++] & 0xFF;
-            if ((len & 0x80) != 0) {
-                int n = len & 0x7F;
-                for (int k = 0; k < n && i < t.length; k++) i++;
-            }
-            sb.append(String.format(Locale.US, "%04X(%d) ", tag, len));
-        }
-        return sb.toString().trim();
     }
 
     private static boolean knownTag(int tag) {
@@ -956,12 +907,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
                         c.get(Calendar.YEAR) % 100, c.get(Calendar.MONTH) + 1,
                         c.get(Calendar.DAY_OF_MONTH)));
-            }
-            case 0x9F21: {
-                Calendar c = Calendar.getInstance();
-                return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
-                        c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE),
-                        c.get(Calendar.SECOND)));
             }
             case 0x9C: return hexToBytes("00");
             case 0x95: return hexToBytes("0000000000");
