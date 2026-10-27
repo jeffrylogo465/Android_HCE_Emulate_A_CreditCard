@@ -23,10 +23,10 @@ import android.widget.Toast;
  * permanently "-". They are now read from the card slot, where collect()
  * actually stores them.
  *
- * FIX: EXTRA_CARD_INDEX is defined here. MainActivity's launch hook passes it,
- * and without the constant the build failed with "cannot find symbol". It is
- * also USED - the slot shown is the card you long-pressed, not whatever happens
- * to be selected.
+ * EXTRA_CARD_INDEX is declared here because MainActivity's launch hook passes
+ * it - without the constant the build failed with "cannot find symbol". It is
+ * also USED, so the screen opens the card you long-pressed rather than whatever
+ * happens to be selected.
  *
  * Bare keys are still tried as a fallback, so opening this mid-read works.
  */
