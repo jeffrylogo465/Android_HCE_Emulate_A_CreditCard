@@ -663,10 +663,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * FIX: the magstripe branch used to wrap the track 2 in a 57 TLV and send no
-     * AFL. Format 1 is a flat payload - 80 <len> <AIP 2> <AFL> <raw track 2> -
-     * so the inner 57 header made the terminal mis-read the split, and the
-     * missing AFL meant it could never reach a record for the cardholder name.
+     * Magstripe branch, back to the author's original shape.
+     *
+     * Format 1 is: 80 <len> <AIP 2> <track 2>, with the 57 tag left around the
+     * track 2 and NO AFL. Sending a bare AFL before a raw track 2 would leave the
+     * terminal no way to find where the AFL ends, so it is left out for now.
+     * Reading a card with the reader's TTQ set to 8000 will produce a real MSD
+     * capture and settle the shape for good - the payload is logged below.
      */
     private byte[] gpo() {
         byte[] raw = rawGpo();
@@ -693,7 +696,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(masked) + " afl=" + bytesToHex(a));
 
         if (msd) {
-            return cat(tlv(0x80, cat(masked, a, track2())), SW_OK);
+            byte[] payload = cat(masked, tlv(0x57, track2()));
+            tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
+            return cat(tlv(0x80, payload), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, masked), tlv(0x94, a))), SW_OK);
     }
