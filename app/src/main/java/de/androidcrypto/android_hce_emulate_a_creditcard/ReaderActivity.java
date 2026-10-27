@@ -60,18 +60,22 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private static final String PREF = "hce_card";
     private static final String PPSE = "325041592E5359532E4444463031";
+    private static final String TTQ_KEY = "readerttq";
 
     /**
      * TTQ sent inside the PDOL. 0x80 = magstripe mode supported, 0x40 = EMV mode
      * supported.
      *
      * 8000 sets ONLY the magstripe bit, so a card that supports MSD answers the
-     * GPO in format 1. Every capture so far has been a 77 because 3600 asked for
-     * EMV - which is why the MSD payload shape has never been settled. Flip this
-     * back to "3600" once the shape is known and you want the EMV read path with
-     * a real GENERATE AC.
+     * GPO in format 1. 3600 asks for EMV, so the card answers format 2 with an
+     * AFL, records and a real GENERATE AC.
+     *
+     * This is now a runtime toggle (the TTQ button) rather than a constant, so
+     * the two reads - 8000 for the MSD payload shape, 3600 for the ARQC
+     * reference - no longer need a rebuild between them. Default is 3600, the
+     * terminal-accurate path the clone actually needs.
      */
-    private static final String TTQ = "8000";
+    private String ttq = "3600";
 
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
@@ -81,8 +85,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private SharedPreferences prefs;
     private NfcAdapter nfc;
 
-    private TextView txtLog;
-    private Button btnUse;
+    private TextView txtLog, txtHint;
+    private Button btnUse, btnTtq;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
@@ -95,6 +99,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
+        ttq = prefs.getString(TTQ_KEY, "3600");
         buildUi();
         nfc = NfcAdapter.getDefaultAdapter(this);
         if (nfc == null) log("No NFC adapter on this device");
@@ -118,14 +123,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title);
 
-        TextView hint = new TextView(this);
-        hint.setText("Hold the physical card flat against the back of the phone.\n"
-                + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
-                + "TTQ " + TTQ + " - magstripe bit only, so an MSD card answers format 1.");
-        hint.setTextColor(0xFF9CA3AF);
-        hint.setTextSize(12);
-        hint.setPadding(0, dp(6), 0, dp(10));
-        root.addView(hint);
+        txtHint = new TextView(this);
+        txtHint.setTextColor(0xFF9CA3AF);
+        txtHint.setTextSize(12);
+        txtHint.setPadding(0, dp(6), 0, dp(10));
+        root.addView(txtHint);
+        updateHint();
 
         txtLog = new TextView(this);
         txtLog.setTextColor(0xFFE5E7EB);
@@ -138,6 +141,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
         scroll.setLayoutParams(lp);
         root.addView(scroll);
+
+        btnTtq = new Button(this);
+        btnTtq.setText("TTQ: " + ttq);
+        btnTtq.setOnClickListener(v -> toggleTtq());
+        root.addView(btnTtq);
 
         btnUse = new Button(this);
         btnUse.setText("USE CARD");
@@ -154,6 +162,24 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         root.addView(btnCancel);
 
         setContentView(root);
+    }
+
+    private void updateHint() {
+        txtHint.setText("Hold the physical card flat against the back of the phone.\n"
+                + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
+                + "TTQ " + ttq + ("8000".equals(ttq)
+                    ? " - magstripe bit only, so an MSD card answers format 1."
+                    : " - EMV mode, so a card that supports it answers format 2"
+                      + " with an AFL and a real GENERATE AC.")
+                + "\nTap the TTQ button to switch.");
+    }
+
+    private void toggleTtq() {
+        ttq = "8000".equals(ttq) ? "3600" : "8000";
+        prefs.edit().putString(TTQ_KEY, ttq).apply();
+        if (btnTtq != null) btnTtq.setText("TTQ: " + ttq);
+        updateHint();
+        Toast.makeText(this, "TTQ = " + ttq, Toast.LENGTH_SHORT).show();
     }
 
     private void log(String s) {
@@ -268,7 +294,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
         }
 
-        log("-- GET PROCESSING OPTIONS (TTQ " + TTQ + ")");
+        log("-- GET PROCESSING OPTIONS (TTQ " + ttq + ")");
         List<byte[]> pdolL = new ArrayList<>();
         collect(fci, 0x9F38, pdolL);
         byte[] pdolData = pdolL.isEmpty() ? new byte[0] : buildCdolData(pdolL.get(0));
@@ -553,12 +579,23 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             code = sw(rsp);
         }
 
+        // FIX: 61xx used to fetch exactly one block, so a response longer than a
+        // single Le window threw "SW 61xx" instead of chaining. Loop it, bounded.
         if ((code & 0xFF00) == 0x6100) {
-            byte[] head = Arrays.copyOf(rsp, rsp.length - 2);
-            byte[] more = iso.transceive(new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, (byte) (code & 0xFF)});
-            int c2 = sw(more);
-            if (c2 != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", c2));
-            return cat(head, Arrays.copyOf(more, more.length - 2));
+            ByteArrayOutputStream acc = new ByteArrayOutputStream();
+            acc.write(rsp, 0, rsp.length - 2);
+            int guard = 0;
+            while ((code & 0xFF00) == 0x6100 && guard++ < 16) {
+                byte[] more = iso.transceive(new byte[]{
+                        0x00, (byte) 0xC0, 0x00, 0x00, (byte) (code & 0xFF)});
+                code = sw(more);
+                if (code == 0x9000 || (code & 0xFF00) == 0x6100) {
+                    acc.write(more, 0, more.length - 2);
+                } else {
+                    throw new IOException(String.format(Locale.US, "SW %04X", code));
+                }
+            }
+            return acc.toByteArray();
         }
 
         if (code != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", code));
@@ -647,7 +684,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F33: return hexToBytes("000000");
             case 0x9F34: return hexToBytes("000000");
             case 0x9F40: return hexToBytes("0000000000");
-            case 0x9F66: return hexToBytes(TTQ);
+            case 0x9F66: return hexToBytes(ttq);
             default: return new byte[len];
         }
     }
