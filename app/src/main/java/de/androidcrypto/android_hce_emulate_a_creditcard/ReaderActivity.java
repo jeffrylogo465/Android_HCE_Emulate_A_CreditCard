@@ -494,13 +494,31 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return true;
     }
 
-    /** EMV PDOL related data object: 83 <len> <pdolData>. */
+    /**
+     * EMV PDOL related data object: 83 <len> <pdolData>.
+     *
+     * FIX: the length was a single byte. At 128 bytes the high bit turns on, and
+     * the card then reads 0x80..0xFF as a long-form indicator and looks for
+     * length bytes that are not there - a malformed container, same class of
+     * failure as the original missing-83 bug. Anything over 127 bytes now gets
+     * 81 <len>, and over 255 gets 82 <hi> <lo>.
+     */
     private static byte[] wrap(byte[] pdolData) {
-        byte[] out = new byte[pdolData.length + 2];
-        out[0] = (byte) 0x83;
-        out[1] = (byte) pdolData.length;
-        System.arraycopy(pdolData, 0, out, 2, pdolData.length);
-        return out;
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        o.write(0x83);
+        int n = pdolData.length;
+        if (n < 0x80) {
+            o.write(n);
+        } else if (n <= 0xFF) {
+            o.write(0x81);
+            o.write(n);
+        } else {
+            o.write(0x82);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        }
+        o.write(pdolData, 0, n);
+        return o.toByteArray();
     }
 
     /**
@@ -751,6 +769,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
     }
 
+    /**
+     * FIX: the extended branch wrote THREE trailing bytes after the data. An
+     * extended APDU is CLA INS P1 P2 00 LcHi LcLo <data> LeHi LeLo - Le is two
+     * bytes. The stray third byte sat where the card expected nothing.
+     *
+     * Also fixed the 6Cxx retry below, which compensated at the wrong offset
+     * (retry[len-3]) for the same reason.
+     */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
             return new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2, (byte) le};
@@ -765,9 +791,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             o.write((data.length >> 8) & 0xFF);
             o.write(data.length & 0xFF);
             o.write(data, 0, data.length);
-            o.write(0x00);
-            o.write(0x00);
-            o.write(0x00);
+            o.write((le >> 8) & 0xFF);
+            o.write(le & 0xFF);
         } else {
             o.write(data.length & 0xFF);
             o.write(data, 0, data.length);
@@ -783,7 +808,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         if ((code & 0xFF00) == 0x6C00 && apdu.length >= 1) {
             byte[] retry = apdu.clone();
             boolean ext = apdu.length > 6 && (apdu[4] & 0xFF) == 0x00;
-            if (ext) retry[retry.length - 3] = 0x00;
+            if (ext) retry[retry.length - 2] = 0x00;
             retry[retry.length - 1] = (byte) (code & 0xFF);
             rsp = iso.transceive(retry);
             code = sw(rsp);
@@ -865,6 +890,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
             declared += len;
 
+            // FIX: knownTag() was dead code. It now names a PDOL entry that has
+            // no table entry, so a card asking for something unusual is visible
+            // in the log instead of silently getting zeroes.
+            if (!knownTag(tag)) {
+                log("   note: PDOL tag " + String.format(Locale.US, "%04X", tag)
+                        + " not in the table - sending " + len + " zero byte(s)");
+            }
+
             byte[] v;
             if (entry == variantEntry) {
                 v = new byte[len];
@@ -907,6 +940,16 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
                         c.get(Calendar.YEAR) % 100, c.get(Calendar.MONTH) + 1,
                         c.get(Calendar.DAY_OF_MONTH)));
+            }
+            // FIX: 9F21 is Transaction Time HHMMSS. It was in knownTag() but had
+            // no case here, so it fell through to zeroes - "000000", valid but
+            // midnight. The old code before that used YEAR/MONTH/DAY, which
+            // produced hour 26.
+            case 0x9F21: {
+                Calendar c = Calendar.getInstance();
+                return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
+                        c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE),
+                        c.get(Calendar.SECOND)));
             }
             case 0x9C: return hexToBytes("00");
             case 0x95: return hexToBytes("0000000000");
