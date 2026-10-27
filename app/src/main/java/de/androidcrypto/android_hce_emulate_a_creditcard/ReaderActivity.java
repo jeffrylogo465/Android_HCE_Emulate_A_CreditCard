@@ -32,20 +32,17 @@ import java.util.Random;
 /**
  * Reads a physical contactless card and hands it to MainActivity.
  *
- * STAGING. Everything is written to tmp_* during a read and promoted to cap_*
- * only once the read has produced something usable. A tap that dies halfway
- * therefore leaves the previous good capture intact instead of replacing it
- * with a partial one.
- *
- * The service reads these back as:
+ * STAGING KEY NAMES MATTER. The service reads them back as:
  *   cap_rec<sfi>_<rec>   -> readRecord()   (NOT a flat cap_rec0, cap_rec1)
  *   cap_rawfci           -> rawFci()       (real FCI replay)
  *   cap_rawgpo           -> rawGpo()       (framing + AIP source)
- *   cap_rawgpo_msd       -> the format 1 probe, for reference
  *   cap_genaccmd         -> MainActivity's key scan
  *   cap_rawgenac         -> MainActivity's key scan
  *   cap_aid              -> "the real AID" for the PPSE and the select log
- *   cap_holder, cap_label -> fallbacks for name and directory label
+ *   cap_label            -> directory label when the editor field is empty
+ *   cap_holder           -> fallback cardholder name
+ * All of these live under the "cap_" prefix, which copyStagingToCard() moves to
+ * "card<N>_cap_...".
  */
 public class ReaderActivity extends AppCompatActivity implements NfcAdapter.ReaderCallback {
 
@@ -65,27 +62,20 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PPSE = "325041592E5359532E4444463031";
 
     /**
-     * TTQ byte 1 is: 0x80 mag-stripe mode supported, 0x20 EMV mode supported,
-     * 0x10 RFU, 0x08 offline PIN, 0x04 online PIN, 0x02 signature, 0x01 RFU.
+     * TTQ sent inside the PDOL. 0x80 = magstripe mode supported, 0x40 = EMV mode
+     * supported.
      *
-     * 3600 sets EMV mode (0x20) but NOT mag-stripe - which is why every capture
-     * so far has come back as a 77. 8000 is mag-stripe only and forces a card
-     * that supports MSD to answer format 1, which is the shape still unsettled.
-     *
-     * So a read probes with 8000 first, then re-selects and probes with 2000.
-     * The format 1 response lands in cap_rawgpo_msd for reference; the EMV one
-     * in cap_rawgpo and is what the emulator replays and what the key scan needs.
+     * 8000 sets ONLY the magstripe bit, so a card that supports MSD answers the
+     * GPO in format 1. Every capture so far has been a 77 because 3600 asked for
+     * EMV - which is why the MSD payload shape has never been settled. Flip this
+     * back to "3600" once the shape is known and you want the EMV read path with
+     * a real GENERATE AC.
      */
-    private static final String TTQ_MSD = "8000";
-    private static final String TTQ_EMV = "2000";
+    private static final String TTQ = "8000";
 
     private static final String[] FALLBACK_AIDS = {
-            "A0000000031010", "A0000000032010",
-            "A0000000041010", "A0000000043060",
-            "A0000001523010",
-            "A00000002501", "A0000000250104", "A0000000250001",
-            "A0000000651010",
-            "A000000333010101"
+            "A0000000031010", "A0000000041010", "A0000001523010",
+            "A00000002501", "A0000000651010", "A000000333010101"
     };
 
     private SharedPreferences prefs;
@@ -130,8 +120,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         TextView hint = new TextView(this);
         hint.setText("Hold the physical card flat against the back of the phone.\n"
-                + "One read per tap. Probes format 1 (TTQ " + TTQ_MSD + ") then re-selects\n"
-                + "and takes the EMV path (TTQ " + TTQ_EMV + ") for records and GENERATE AC.");
+                + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
+                + "TTQ " + TTQ + " - magstripe bit only, so an MSD card answers format 1.");
         hint.setTextColor(0xFF9CA3AF);
         hint.setTextSize(12);
         hint.setPadding(0, dp(6), 0, dp(10));
@@ -228,7 +218,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             txtLog.setText("");
             btnUse.setEnabled(false);
         });
-        clearTmp();
+        clearStaging();
 
         log("-- SELECT PPSE");
         List<byte[]> aids = new ArrayList<>();
@@ -245,11 +235,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         log("-- SELECT AID");
         byte[] fci = null;
-        byte[] aidBytes = null;
         for (byte[] a : aids) {
             try {
                 fci = send(iso, apdu(0x00, 0xA4, 0x04, 0x00, a, 0x00));
-                aidBytes = a;
                 rAid = bytesToHex(a);
                 log("   ok " + rAid);
                 break;
@@ -257,60 +245,39 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 log("   no " + bytesToHex(a));
             }
         }
-        if (fci == null || aidBytes == null) {
+        if (fci == null) {
             log("Nothing would SELECT - is this a payment card?");
             return;
         }
 
-        stage("rawfci", bytesToHex(fci));
-        stage("aid", rAid);
+        // The real FCI, so the service can replay it instead of generating one.
+        stage("cap_rawfci", bytesToHex(fci));
+        stage("cap_aid", rAid);
 
-        // FIX: the FCI carries 50 (label) and 9F12 (preferred name) and the
-        // reader never pulled either out, so every emulated card introduced
-        // itself as the fallback word "CARD".
-        String cardLabel = firstText(fci, 0x50);
-        if (cardLabel.isEmpty()) cardLabel = firstText(fci, 0x9F12);
-        if (!cardLabel.isEmpty()) {
-            stage("label", cardLabel);
-            log("   label on the card: " + cardLabel);
+        // The card's own application label, so the directory does not have to say
+        // "CARD" when the editor's label field is empty.
+        List<byte[]> labL = new ArrayList<>();
+        collect(fci, 0x50, labL);
+        if (!labL.isEmpty()) {
+            String lb = new String(labL.get(0), java.nio.charset.StandardCharsets.US_ASCII)
+                    .toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
+            if (lb.length() > 16) lb = lb.substring(0, 16);
+            if (!lb.isEmpty()) {
+                stage("cap_label", lb);
+                log("   label " + lb);
+            }
         }
 
-        log("-- GET PROCESSING OPTIONS");
+        log("-- GET PROCESSING OPTIONS (TTQ " + TTQ + ")");
         List<byte[]> pdolL = new ArrayList<>();
         collect(fci, 0x9F38, pdolL);
-        byte[] pdol = pdolL.isEmpty() ? new byte[0] : pdolL.get(0);
-
-        byte[] gpoMsd = null;
-        try {
-            gpoMsd = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, buildTemplateData(pdol, TTQ_MSD), 0x00));
-            log("   probe TTQ " + TTQ_MSD + ": " + bytesToHex(gpoMsd));
-        } catch (IOException e) {
-            log("   probe TTQ " + TTQ_MSD + " failed: " + e.getMessage());
-        }
-
-        boolean msdShape = gpoMsd != null && gpoMsd.length > 3 && (gpoMsd[0] & 0xFF) == 0x80;
-        if (msdShape) stage("rawgpo_msd", bytesToHex(gpoMsd));
-
-        byte[] gpo;
-        if (msdShape) {
-            log("   card answered format 1 - re-selecting for the EMV probe");
-            try { send(iso, apdu(0x00, 0xA4, 0x04, 0x00, aidBytes, 0x00)); } catch (IOException ignored) { }
-            try {
-                gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, buildTemplateData(pdol, TTQ_EMV), 0x00));
-                log("   probe TTQ " + TTQ_EMV + ": " + bytesToHex(gpo));
-            } catch (IOException e) {
-                log("   EMV probe failed (" + e.getMessage() + "), keeping the format 1 response");
-                gpo = gpoMsd;
-            }
-        } else if (gpoMsd != null) {
-            gpo = gpoMsd;
-        } else {
-            gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, buildTemplateData(pdol, TTQ_EMV), 0x00));
-        }
-        stage("rawgpo", bytesToHex(gpo));
+        byte[] pdolData = pdolL.isEmpty() ? new byte[0] : buildCdolData(pdolL.get(0));
+        byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, pdolData, 0x00));
+        stage("cap_rawgpo", bytesToHex(gpo));
 
         byte[] aip = null, afl = null;
         if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
+            // Format 1: 80 <len> <AIP 2> <payload>. The length can be long form.
             int l = gpo[1] & 0xFF;
             int off = 2;
             if (l == 0x81 && gpo.length > 2) {
@@ -327,20 +294,22 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
                 log("   format 1 - after the AIP: " + bytesToHex(rest));
 
+                // FIX: this used to assume AIP + AFL unconditionally. If the real
+                // payload is 57 <len> <track 2> then the track 2 was being parsed
+                // as an AFL - nonsense SFIs, 6A83 on every record, no CDOL1 and
+                // so no ARQC. The three shapes are told apart here instead, and
+                // the raw bytes are logged so a wrong guess is visible.
                 if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
                         && (rest[1] & 0xFF) == rest.length - 2) {
                     rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
-                    log("   payload is 57 <len> track 2 - no AFL");
-                } else if (rest.length % 4 == 0 && saneAfl(rest)) {
+                    log("   payload is 57 <len> track 2 - no AFL, MSD never walks records");
+                } else if (rest.length % 4 == 0) {
                     afl = rest;
                     log("   payload looks like a bare AFL");
-                } else if (rest.length > 4 && saneAfl(Arrays.copyOfRange(rest, 0, 4))) {
+                } else {
                     afl = Arrays.copyOfRange(rest, 0, 4);
                     rTrack2 = bcd(Arrays.copyOfRange(rest, 4, rest.length));
                     log("   first 4 bytes taken as an AFL, the rest as the track 2");
-                } else {
-                    rTrack2 = bcd(rest);
-                    log("   no sane AFL - treating the whole payload as the track 2");
                 }
             }
         } else {
@@ -363,12 +332,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
+                // Sanity: a real AFL entry has SFI 1-10 and record numbers 1-31.
                 if (sfi < 1 || sfi > 10 || first < 1 || first > 31) continue;
                 if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
                     try {
                         byte[] rec = send(iso, apdu(0x00, 0xB2, r, (sfi << 3) | 4, null, 0x00));
-                        stage("rec" + sfi + "_" + r, bytesToHex(rec));
+                        // KEY NAME: cap_rec<sfi>_<rec> - the service parses the
+                        // underscore. A flat cap_rec0 is silently dropped by afl().
+                        stage("cap_rec" + sfi + "_" + r, bytesToHex(rec));
                         records.add(rec);
                         recNo++;
                         log("   sfi " + sfi + " rec " + r + " ok");
@@ -425,7 +397,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 if (!l.isEmpty()) cdol1 = l.get(0);
             }
         }
-        if (!rHolder.isEmpty()) stage("holder", rHolder);
+        if (!rHolder.isEmpty()) stage("cap_holder", rHolder);
 
         int dsep = rTrack2.indexOf('D');
         if (dsep > 0 && rTrack2.length() >= dsep + 8) {
@@ -433,6 +405,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             if (rService.isEmpty()) rService = rTrack2.substring(dsep + 5, dsep + 8);
             if (rDisc.isEmpty()) rDisc = rTrack2.substring(dsep + 8);
         }
+
+        // FIX: the PAN used to come only from 5A inside a record, so an MSD read
+        // - which has no records at all - produced no PAN, read stayed false and
+        // the whole capture was discarded. Fall back to the track 2.
         if (rPan.isEmpty() && !rTrack2.isEmpty()) {
             int d = rTrack2.indexOf('D');
             if (d >= 12 && d <= 19) {
@@ -447,12 +423,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         if (cdol1 != null && cdol1.length > 0) {
             log("-- GENERATE AC");
-            byte[] cdolData = buildTemplateData(cdol1, TTQ_EMV);
+            byte[] cdolData = buildCdolData(cdol1);
             byte[] cmd = apdu(0x80, 0xAE, 0x00, 0x00, cdolData, 0x00);
             try {
                 byte[] rsp = send(iso, cmd);
-                stage("genaccmd", bytesToHex(cmd));
-                stage("rawgenac", bytesToHex(rsp));
+                stage("cap_genaccmd", bytesToHex(cmd));
+                stage("cap_rawgenac", bytesToHex(rsp));
 
                 List<byte[]> l = new ArrayList<>();
                 collect(rsp, 0x9F36, l);
@@ -480,9 +456,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         read = !rPan.isEmpty() || !rTrack2.isEmpty();
 
-        // Only now do the partial capture replace the previous one.
-        if (read) promoteStaging();
-
         StringBuilder sb = new StringBuilder();
         sb.append("PAN    : ").append(rPan.isEmpty() ? "(none)" : rPan).append('\n');
         sb.append("expiry : ").append(rExpiry.isEmpty() ? "(none)" : rExpiry).append('\n');
@@ -493,33 +466,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         sb.append("records: ").append(recNo).append('\n');
         sb.append("genac  : ").append(
                 prefs.getString("cap_genaccmd", "").isEmpty() ? "NOT captured" : "captured");
-        sb.append(read ? "staged : promoted to cap_*" : "staged : read failed, cap_* untouched");
         log("\n" + sb);
 
         ui.post(() -> {
             btnUse.setEnabled(read);
             if (!read) Toast.makeText(this, "Nothing usable read", Toast.LENGTH_SHORT).show();
         });
-    }
-
-    /** First AFL entry must look like SFI 1-10 with record numbers 1-31. */
-    private static boolean saneAfl(byte[] a) {
-        if (a == null || a.length < 4) return false;
-        int sfi = (a[0] & 0xFF) >> 3;
-        int first = a[1] & 0xFF;
-        int last = a[2] & 0xFF;
-        return sfi >= 1 && sfi <= 10 && first >= 1 && first <= 31 && last >= first && last <= 31;
-    }
-
-    /** First value of a tag anywhere in the tree, as sanitised ASCII text. */
-    private static String firstText(byte[] d, int tag) {
-        List<byte[]> l = new ArrayList<>();
-        collect(d, tag, l);
-        if (l.isEmpty()) return "";
-        String s = new String(l.get(0), java.nio.charset.StandardCharsets.ISO_8859_1)
-                .toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
-        if (s.length() > 16) s = s.substring(0, 16);
-        return s;
     }
 
     private void returnResult() {
@@ -543,32 +495,16 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         finish();
     }
 
-    // ---------- staging: tmp_ during the read, cap_ only on success ----------
-
-    private void clearTmp() {
-        SharedPreferences.Editor e = prefs.edit();
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("tmp_")) e.remove(k);
-        }
-        e.apply();
-    }
-
-    private void stage(String shortName, String value) {
-        prefs.edit().putString("tmp_" + shortName, value).apply();
-    }
-
-    private void promoteStaging() {
+    private void clearStaging() {
         SharedPreferences.Editor e = prefs.edit();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith("cap_")) e.remove(k);
         }
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("tmp_")) {
-                e.putString("cap_" + k.substring(4), prefs.getString(k, ""));
-            }
-        }
         e.apply();
-        clearTmp();
+    }
+
+    private void stage(String name, String value) {
+        prefs.edit().putString(name, value).apply();
     }
 
     private static int sw(byte[] r) {
@@ -576,6 +512,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return ((r[r.length - 2] & 0xFF) << 8) | (r[r.length - 1] & 0xFF);
     }
 
+    /**
+     * FIX: data.length used to be written straight into one byte, so anything
+     * over 255 silently wrapped. Extended length is now used when it is needed
+     * and short form stays the default, because plenty of cards still reject
+     * extended APDUs.
+     */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
             return new byte[]{(byte) cla, (byte) ins, (byte) p1, (byte) p2, (byte) le};
@@ -600,47 +542,23 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return o.toByteArray();
     }
 
-    /** True when this APDU we just built used extended length. */
-    private static boolean isExtended(byte[] apdu) {
-        return apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00
-                && (((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF)) > 0;
-    }
-
     private byte[] send(IsoDep iso, byte[] apdu) throws IOException {
         byte[] rsp = iso.transceive(apdu);
         int code = sw(rsp);
 
-        // 6Cxx = wrong Le. For an extended APDU the last TWO bytes are Le.
-        if ((code & 0xFF00) == 0x6C00) {
+        if ((code & 0xFF00) == 0x6C00 && apdu.length >= 1) {
             byte[] retry = apdu.clone();
-            if (isExtended(retry)) {
-                retry[retry.length - 2] = 0x00;
-                retry[retry.length - 1] = (byte) (code & 0xFF);
-            } else if (retry.length >= 1) {
-                retry[retry.length - 1] = (byte) (code & 0xFF);
-            }
+            retry[retry.length - 1] = (byte) (code & 0xFF);
             rsp = iso.transceive(retry);
             code = sw(rsp);
         }
 
-        // 61xx = more data. Chain until it stops, not just once.
         if ((code & 0xFF00) == 0x6100) {
-            ByteArrayOutputStream acc = new ByteArrayOutputStream();
-            acc.write(Arrays.copyOf(rsp, rsp.length - 2), 0, rsp.length - 2);
-            int guard = 0;
-            while ((code & 0xFF00) == 0x6100 && guard++ < 10) {
-                byte[] more = iso.transceive(new byte[]{
-                        0x00, (byte) 0xC0, 0x00, 0x00, (byte) (code & 0xFF)});
-                code = sw(more);
-                if ((code & 0xFF00) == 0x6100) {
-                    acc.write(more, 0, more.length - 2);
-                } else if (code == 0x9000) {
-                    acc.write(more, 0, more.length - 2);
-                } else {
-                    throw new IOException(String.format(Locale.US, "SW %04X", code));
-                }
-            }
-            return acc.toByteArray();
+            byte[] head = Arrays.copyOf(rsp, rsp.length - 2);
+            byte[] more = iso.transceive(new byte[]{0x00, (byte) 0xC0, 0x00, 0x00, (byte) (code & 0xFF)});
+            int c2 = sw(more);
+            if (c2 != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", c2));
+            return cat(head, Arrays.copyOf(more, more.length - 2));
         }
 
         if (code != 0x9000) throw new IOException(String.format(Locale.US, "SW %04X", code));
@@ -680,11 +598,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 || t == 0xBF0C || t == 0xBF0D;
     }
 
-    /**
-     * Build the value for a PDOL or CDOL1 template - the same thing, so the name
-     * no longer says CDOL only.
-     */
-    private byte[] buildTemplateData(byte[] template, String ttq) {
+    private byte[] buildCdolData(byte[] template) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = 0;
         while (i < template.length) {
@@ -702,7 +616,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                     len = (len << 8) | (template[i++] & 0xFF);
                 }
             }
-            byte[] v = defaultFor(tag, len, ttq);
+            byte[] v = defaultFor(tag, len);
             for (int k = 0; k < len; k++) {
                 out.write(k < v.length ? v[k] : 0);
             }
@@ -710,7 +624,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return out.toByteArray();
     }
 
-    private byte[] defaultFor(int tag, int len, String ttq) {
+    private byte[] defaultFor(int tag, int len) {
         switch (tag) {
             case 0x9F02: return hexToBytes("000000001000");
             case 0x9F03: return new byte[6];
@@ -733,7 +647,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F33: return hexToBytes("000000");
             case 0x9F34: return hexToBytes("000000");
             case 0x9F40: return hexToBytes("0000000000");
-            case 0x9F66: return hexToBytes(ttq);
+            case 0x9F66: return hexToBytes(TTQ);
             default: return new byte[len];
         }
     }
