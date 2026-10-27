@@ -33,7 +33,8 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQ_CLONE = 4711;
 
     private static final String HINT =
-            "Paste a dump anywhere - it fills itself in. Long-press AID to pick it.";
+            "Paste a dump anywhere - it fills itself in.\n"
+          + "Long-press AID to pick a brand, the card count to see the capture.";
 
     /** Brand -> AID. Stops anyone having to remember one, and stops the
      *  "empty AID silently becomes Visa" trap. */
@@ -195,6 +196,9 @@ public class MainActivity extends AppCompatActivity {
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
         navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
+        // NEW: the stored-capture viewer. Long-press the count so nothing has to
+        // move in the layout.
+        txtCount.setOnLongClickListener(v -> { startCapture(); return true; });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -953,6 +957,14 @@ public class MainActivity extends AppCompatActivity {
         Intent i = new Intent(this, ReaderActivity.class);
         i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
         startActivityForResult(i, REQ_CLONE);
+    }
+
+    // NEW: open the stored-capture viewer for the card on screen.
+    private void startCapture() {
+        collect();
+        Intent i = new Intent(this, CaptureActivity.class);
+        i.putExtra(CaptureActivity.EXTRA_CARD_INDEX, current);
+        startActivity(i);
     }
 
     /** The issuer's IVR is the only liveness check that does not need a till. */
