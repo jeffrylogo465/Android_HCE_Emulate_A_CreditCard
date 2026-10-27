@@ -217,6 +217,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnAdd).setOnClickListener(v -> { onAdd(); showPage(1); });
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
+        findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
             startReader();
             return true;
@@ -389,14 +390,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * FIX: the track 2 is a capture, so if the PAN box differs from it the
-     * difference IS the typo. Returns a message naming the exact position, or
-     * null when there is no track 2 to compare against, or they already match.
-     *
-     * Previously a single bad digit only produced "last digit should be X",
-     * which is true but points at the wrong end of the number - the typo is
-     * usually somewhere in the middle and the check digit is just what
-     * happens to notice.
+     * The track 2 is a capture, so if the PAN box differs from it, the
+     * difference IS the typo. Names the exact position instead of guessing at
+     * the check digit, which points at the wrong end of the number.
      */
     private String diffAgainstTrack2(String pan) {
         String ref = panFromTrack2();
@@ -416,7 +412,7 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * The last digit this PAN should have. Naming it turns "fails Luhn" from a
-     * dead end into "your 12th digit is wrong", which is the whole point.
+     * dead end into an actionable hint.
      */
     private static int expectedCheckDigit(String pan) {
         if (pan.length() < 2) return -1;
@@ -591,7 +587,6 @@ public class MainActivity extends AppCompatActivity {
             sb.append("   check digit : ")
                     .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
                             + expectedCheckDigit(pan)).append('\n');
-            // FIX: if the PAN and the track 2 disagree, say which digit.
             String diff = diffAgainstTrack2(pan);
             if (diff != null) sb.append("   ").append(diff).append('\n');
         }
@@ -988,9 +983,7 @@ public class MainActivity extends AppCompatActivity {
         // FIX: the track 2 is a capture and carries its own check digit, while
         // the PAN box is usually hand-typed and is where typos land. When they
         // disagree, take the track 2 value instead of bouncing the card with a
-        // check-digit error the user has no way to act on. Previously the Luhn
-        // guard ran first, so a single mistyped digit reported as "pass Luhn"
-        // and hid the fact that the correct number was sitting in TRACK 2.
+        // check-digit error the user has no way to act on.
         String trackPan = panFromTrack2();
         if (!trackPan.isEmpty() && !trackPan.equals(digits(t(etPan)))) {
             binding = true;
@@ -1014,10 +1007,8 @@ public class MainActivity extends AppCompatActivity {
                     Toast.LENGTH_LONG).show();
             return;
         }
-        // FIX: name the offending digit. If the PAN and TRACK 2 disagree, the
-        // difference IS the typo, so report the position. If they already agree,
-        // the typo came in with the source line - say so, because "last digit
-        // should be X" alone sends you to the wrong end of the number.
+        // FIX: name the bad digit. A Luhn failure with a track 2 in hand is a
+        // diff, not a check-digit guess - the guess points at the wrong end.
         if (!luhn(pan)) {
             String diff = diffAgainstTrack2(pan);
             if (diff != null) {
@@ -1026,13 +1017,9 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             String want = String.valueOf(expectedCheckDigit(pan));
-            String last = pan.substring(pan.length() - 1);
-            String msg = panFromTrack2().isEmpty()
-                    ? "PAN check digit wrong. Last digit should be " + want + ", not " + last
-                    : "PAN and TRACK 2 both read " + pan + " - the typo came from your source line. "
-                      + "Last digit should be " + want + ".";
-            txtStatus.setText(msg);
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+            txtStatus.setText("PAN check digit wrong - last digit should be " + want);
+            Toast.makeText(this, "PAN check digit wrong. Last digit should be " + want
+                    + ", not " + pan.substring(pan.length() - 1), Toast.LENGTH_LONG).show();
             return;
         }
         if (t(etExpiry).length() != 4) {
@@ -1089,6 +1076,78 @@ public class MainActivity extends AppCompatActivity {
         pager.smoothScrollToPosition(current);
         bindCard(current);
         prefs.edit().putInt("selected", current).apply();
+    }
+
+    // ---------- delete ----------
+
+    private void onDelete() {
+        if (cards.isEmpty()) return;
+        final int victim = current;
+        new AlertDialog.Builder(this)
+                .setTitle("Delete card " + (victim + 1) + "?")
+                .setMessage(cards.size() == 1
+                        ? "This is your only card - it will be emptied, not removed."
+                        : "This cannot be undone.")
+                .setPositiveButton("Delete", (d, w) -> doDelete(victim))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /**
+     * Remove one card and close the gap.
+     *
+     * The keys are card<N>_*, so dropping card 2 of 5 leaves a hole at 2 with
+     * card_count 4 - the pager then shows a blank slot and the last card is
+     * unreachable. Everything above the victim is shifted down one slot.
+     *
+     * key(i, "") is "card<i>_", and the trailing underscore is what stops
+     * card1_ matching card10_ or card11_.
+     */
+    private void doDelete(int index) {
+        SharedPreferences.Editor e = prefs.edit();
+        int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
+        if (n <= 0) return;
+
+        // 1. drop the victim's keys
+        String victim = key(index, "");
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(victim)) e.remove(k);
+        }
+
+        // 2. shift everything above it down one slot. Clear the destination
+        //    first, or a field the source card does not have survives from the
+        //    previous occupant of that slot.
+        for (int i = index; i < n - 1; i++) {
+            String from = key(i + 1, "");
+            String to = key(i, "");
+            for (String k : prefs.getAll().keySet()) {
+                if (k.startsWith(to)) e.remove(k);
+            }
+            for (String k : prefs.getAll().keySet()) {
+                if (k.startsWith(from)) {
+                    e.putString(to + k.substring(from.length()), prefs.getString(k, ""));
+                }
+            }
+        }
+
+        // 3. clear the slot the shift duplicated into the top
+        String last = key(n - 1, "");
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(last)) e.remove(k);
+        }
+
+        e.putInt("card_count", n - 1);
+        e.putInt("selected", Math.max(0, Math.min(index, n - 2)));
+        e.apply();
+
+        cards.clear();
+        loadAll();
+        current = Math.max(0, Math.min(index, cards.size() - 1));
+        bindCard(current);
+        pager.smoothScrollToPosition(current);
+        pager.post(this::applyTransforms);
+        txtStatus.setText("Card deleted - " + cards.size() + " left");
+        showPage(0);
     }
 
     /** Correct as written - the rightmost digit is never doubled, and the
