@@ -117,6 +117,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private int nSelects, nGpos, nRecs, nGens;
     private String lastCid = "";
 
+    // FIX: set when an APDU throws, so baseVerdict() can say so instead of
+    // blaming the terminal's AID list for what is actually our own exception.
+    // A swallowed exception and a genuine "no AID supported" look identical in
+    // the counters, and the wrong one sends you hunting the PPSE.
+    private boolean sawError;
+
     private void tap(String s) {
         tapLog.append(s).append('\n');
         if (tapLog.length() > 32000) tapLog.delete(0, 16000);
@@ -303,6 +309,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         sawPpse = false;
         nSelects = nGpos = nRecs = nGens = 0;
         lastCid = "";
+        sawError = false;
     }
 
     /**
@@ -373,9 +380,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * left over from another card serves every GPO and gpo() never runs.
      *
      * To re-enable for a card, set 'card<N>_usescript' to 1.
+     *
+     * FIX: 'usescript' is written by MainActivity with putInt, but p() reads it
+     * with getString. SharedPreferences does no type coercion, so getString on
+     * an Integer threw ClassCastException on EVERY APDU - useScript() is called
+     * unconditionally in processCommandApdu(), the blanket catch turned that
+     * into 6F00, and the card was dead from the first SELECT. Read the raw
+     * object so either type works, including a String left by an older build.
      */
     private boolean useScript() {
-        String v = p("usescript", "0").trim();
+        Object o = prefs().getAll().get(sel() + "usescript");
+        if (o instanceof Number) return ((Number) o).intValue() != 0;
+        if (o == null) return false;
+        String v = o.toString().trim();
         return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
     }
 
@@ -736,6 +753,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         } catch (Exception e) {
             // FIX: 6A82 means 'file not found' and sent the terminal hunting for
             // a file. 6F00 is 'command failed' and is what an exception is.
+            // Also flag it so the verdict can name the exception instead of
+            // mis-reporting it as a terminal behaviour.
+            sawError = true;
             tap("!! " + e);
             return SW_ERR;
         }
@@ -975,6 +995,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * from the front when it gets long and the PPSE line sits at the very front.
      */
     private String baseVerdict() {
+        // FIX: an exception is not a terminal behaviour. Without this the
+        // counters left behind by a throw read as "the terminal stopped", which
+        // points at the AID list and not at us.
+        if (sawError)     return "TAP: an APDU threw - read the !! line, not the AID list";
         if (tapLog.length() == 0) return "TAP: nothing recorded";
 
         if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
@@ -1017,7 +1041,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     @Override
     public void onDeactivated(int reason) {
         final String t = tapLog.toString();
-        final String v = verdict();
+
+        // FIX: verdict() calls useScript(), so a type bug there used to throw
+        // out of onDeactivated BEFORE the log was saved - no taplog, no
+        // lastverdict, no popup. The card went silent and took the evidence
+        // with it. Never let the verdict destroy the log.
+        String v;
+        try {
+            v = verdict();
+        } catch (Exception e) {
+            v = "TAP: verdict failed - " + e;
+        }
         resetTransaction();
 
         if (!t.isEmpty()) {
