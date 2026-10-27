@@ -52,61 +52,31 @@ public class MainActivity extends AppCompatActivity {
             {"Girocard",               "A0000003591010"},
     };
 
-    /**
-     * Every <aid-filter> in apduservice.xml, mirrored here.
-     *
-     * Android matches AID filters by PREFIX, so startsWith() below reproduces
-     * exactly what the platform will route. An AID the PPSE advertises but this
-     * list does not cover is the nastiest failure in the whole app: the terminal
-     * SELECTs, Android never delivers the APDU to the service, and you get NO log
-     * line at all - indistinguishable from a dead reader.
-     *
-     * Keep in sync with apduservice.xml. Drift is silent.
-     */
+    /** Every <aid-filter> in apduservice.xml, mirrored. Android matches AID
+     *  filters by PREFIX, so startsWith() reproduces exactly what the platform
+     *  will route. An AID advertised in the PPSE but missing here is the
+     *  nastiest failure in the app: the terminal SELECTs, Android never
+     *  delivers it, and you get NO log line - indistinguishable from a dead
+     *  reader. Keep in sync with apduservice.xml. Drift is silent. */
     private static final String[] ROUTABLE = {
             "325041592E5359532E4444463031",
-            // Visa
             "A0000000031010", "A0000000031020", "A0000000032010",
             "A0000000032020", "A0000000038010",
-            // Mastercard / Maestro / Cirrus
             "A0000000041010", "A0000000041000", "A0000000043060",
             "A0000000046000", "A0000000048002", "A0000000050001",
-            // American Express
             "A00000002501", "A0000000250104", "A0000000250001",
-            // Discover / Diners
             "A0000001523010", "A0000001524010", "A0000001521010",
             "A0000001522010", "A0000001522001", "A0000001522300",
             "A0000001522400", "A0000000152001", "A0000000152010",
             "A0000000152020", "A0000000152200", "A0000000152300",
             "A0000000152400", "A0000000010101",
-            // JCB
             "A0000000651010", "A0000000650000",
-            // UnionPay
             "A0000003330101", "A000000333010101", "A000000333010102",
             "A000000333010103",
-            // Interac / Eftpos / Girocard / others
             "A0000002771010", "A0000003845010", "A0000003841010",
             "A00000038410", "F0010203040506",
             "A0000003591010", "A0000003591010028001", "A00000000386980701",
             "A0000000410100", "A0000000422035",
-    };
-
-    /** Lazy defaults and common test keys for the issuer-key hunt. The user's
-     *  own list, typed into the key editor, is added on top of these. */
-    private static final String[] SEED_KEYS = {
-            "0123456789ABCDEF0123456789ABCDEF",
-            "FEDCBA9876543210FEDCBA9876543210",
-            "0123456789ABCDEFFEDCBA9876543210",
-            "00000000000000000000000000000000",
-            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
-            "11111111111111111111111111111111",
-            "22222222222222222222222222222222",
-            "00112233445566778899AABBCCDDEEFF",
-            "00112233445566770011223344556677",
-            "404142434445464748494A4B4C4D4E4F",
-            "ABCDEF0123456789ABCDEF0123456789",
-            "12345678901234561234567890123456",
-            "DEADBEEFDEADBEEFDEADBEEFDEADBEEF",
     };
 
     private SharedPreferences prefs;
@@ -121,7 +91,6 @@ public class MainActivity extends AppCompatActivity {
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
             etMsd, etScript;
 
-    // the two pages and the two nav items
     private View pageWallet, pageEdit;
     private TextView navWallet, navEdit;
 
@@ -144,7 +113,6 @@ public class MainActivity extends AppCompatActivity {
         });
 
         setContentView(R.layout.activity_main);
-
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
@@ -171,7 +139,6 @@ public class MainActivity extends AppCompatActivity {
         etMsd = findViewById(R.id.etMsd);
         etScript = findViewById(R.id.etScript);
 
-        // ---- pages ----
         pageWallet = findViewById(R.id.pageWallet);
         pageEdit   = findViewById(R.id.pageEdit);
         navWallet  = findViewById(R.id.navWallet);
@@ -218,12 +185,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
         findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
-        findViewById(R.id.btnAdd).setOnLongClickListener(v -> {
-            startReader();
-            return true;
-        });
+        findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
-        // long-press helpers - no layout changes needed
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
@@ -244,7 +207,6 @@ public class MainActivity extends AppCompatActivity {
                 etMsd, etScript };
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
-        // paste a dump into either of these and the card fills itself in
         TextWatcher filler = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
@@ -277,18 +239,12 @@ public class MainActivity extends AppCompatActivity {
         v.clearFocus();
     }
 
-    /**
-     * Paste "5287250556251985=310420113264855" into the track 2 field or the PAN
-     * field and the rest of the card is filled in from it. The separator is the
-     * only reliable split point - everything after it is read positionally,
-     * which is how a real card lays it out: 4 expiry, 3 service code, rest
-     * discretionary (that tail holds the CVC, so it is never truncated).
-     */
+    /** Paste "5287250556251985=310420113264855" into the track 2 or PAN field and
+     *  the rest fills itself in. The separator is the only reliable split point;
+     *  everything after it is positional, and the tail (the CVC) is kept whole. */
     private void autoFill() {
         if (binding) return;
 
-        // A track 1 paste carries the name between the two '^' marks. Track 2
-        // has no name at all, which is why pasting one never fills it in.
         if (t(etName).isEmpty()) {
             String n = nameFromTrack1(t(etTrack2));
             if (n.isEmpty()) n = nameFromTrack1(t(etPan));
@@ -310,7 +266,7 @@ public class MainActivity extends AppCompatActivity {
             src = fromPan;
         } else {
             // the PAN field is inputType=number, so a pasted dump arrives with the
-            // separator already stripped. Rebuild it from the BIN length instead.
+            // separator stripped. Rebuild it from the BIN length instead.
             String p = digits(t(etPan));
             if (p.length() > 20) {
                 int panLen = (p.startsWith("34") || p.startsWith("37")) ? 15 : 16;
@@ -322,14 +278,12 @@ public class MainActivity extends AppCompatActivity {
         if (src == null) return;
 
         int sep = src.indexOf('D');
-        if (sep < 12 || sep > 19) return;                 // not a usable PAN length
-
+        if (sep < 12 || sep > 19) return;
         String pan = src.substring(0, sep);
-        if (!pan.matches("[0-9]+")) return;               // still being typed
+        if (!pan.matches("[0-9]+")) return;
 
         String rest = src.substring(sep + 1);
-        if (rest.length() < 7) return;                    // need expiry + service
-
+        if (rest.length() < 7) return;
         String expiry = rest.substring(0, 4);
         String service = rest.substring(4, 7);
         String disc = rest.substring(7);
@@ -374,13 +328,9 @@ public class MainActivity extends AppCompatActivity {
         return s.replaceAll("[^0-9]", "");
     }
 
-    /**
-     * The PAN out of the track 2, or "" when there is not a usable one.
-     *
-     * The track 2 is a capture: it came off a real card or out of a shared list
-     * and it carries its own check digit. The PAN box is usually hand-typed, so
-     * when the two disagree the track 2 is the one to trust.
-     */
+    /** The PAN out of the track 2, or "" when there is not a usable one. The
+     *  track 2 is a capture and carries its own check digit; the PAN box is
+     *  usually hand-typed, so the track 2 is the one to trust. */
     private String panFromTrack2() {
         String track2 = normaliseTrack2(t(etTrack2));
         int d = track2.indexOf('D');
@@ -389,36 +339,25 @@ public class MainActivity extends AppCompatActivity {
         return p.matches("[0-9]+") ? p : "";
     }
 
-    /**
-     * The last digit this PAN should have. Naming it turns "fails Luhn" from a
-     * dead end into "your last digit is wrong", which is the whole point.
-     *
-     * Note it only knows the number you gave it: with a one-digit typo
-     * elsewhere, moving the check digit also fixes Luhn. diffAgainstTrack2()
-     * is the precise test.
-     */
+    /** The last digit this PAN should have. It only knows the number you gave
+     *  it: with a one-digit typo elsewhere, moving the check digit also fixes
+     *  Luhn. diffAgainstTrack2() is the precise test. */
     private static int expectedCheckDigit(String pan) {
         if (pan.length() < 2) return -1;
         String body = pan.substring(0, pan.length() - 1);
         int sum = 0;
-        boolean dbl = true;                 // the body's last digit IS doubled
+        boolean dbl = true;
         for (int i = body.length() - 1; i >= 0; i--) {
             int d = body.charAt(i) - '0';
-            if (dbl) {
-                d *= 2;
-                if (d > 9) d -= 9;
-            }
+            if (dbl) { d *= 2; if (d > 9) d -= 9; }
             sum += d;
             dbl = !dbl;
         }
         return (10 - (sum % 10)) % 10;
     }
 
-    /**
-     * The track 2 is a capture, so if the PAN box differs from it the difference
-     * IS the typo. Names the exact position instead of guessing at the check
-     * digit. Returns null when there is no track 2, or they already agree.
-     */
+    /** The track 2 is a capture, so a difference from the PAN box IS the typo.
+     *  Names the exact position instead of guessing at the check digit. */
     private String diffAgainstTrack2(String pan) {
         String ref = panFromTrack2();
         if (ref.isEmpty() || ref.equals(pan)) return null;
@@ -435,12 +374,6 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    /**
-     * AID routability. Prefix match, mirroring how Android routes, against the
-     * filters in apduservice.xml. An AID outside this list is advertised in the
-     * PPSE but never delivered to the service - the terminal SELECTs into a
-     * void and the tap dies with nothing in the log.
-     */
     private static boolean routable(String aid) {
         if (aid == null || aid.isEmpty()) return false;
         for (String f : ROUTABLE) if (aid.startsWith(f)) return true;
@@ -473,7 +406,6 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "expiry"), t(etExpiry));
         e.putString(key(i, "service"), t(etService));
         e.putString(key(i, "discretionary"), t(etDiscretionary).toUpperCase());
-        // normalise on the way in - '=' is not hex and would be stripped later
         e.putString(key(i, "track2"), normaliseTrack2(t(etTrack2)));
         e.putString(key(i, "aid"), t(etAid).toUpperCase());
         e.putString(key(i, "aip"), t(etAip).toUpperCase());
@@ -483,10 +415,7 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
         e.putString(key(i, "iad"), t(etIad).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
-        // script keeps its own case - '#' comments read better in lower case
         e.putString(key(i, "script"), t(etScript));
-        // was "0".equals(t(etMsd)) ? 0 : 1 - a blank or a typo silently meant
-        // magstripe. Parse it, and default to 0 (EMV) like the service does.
         e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
@@ -514,17 +443,23 @@ public class MainActivity extends AppCompatActivity {
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
         etAip.setText(prefs.getString(key(i, "aip"), "3080"));
-        // default is now EMPTY, not "08010100". The service reads this field,
-        // and an empty value means "derive the AFL from the records we hold".
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
         etIad.setText(prefs.getString(key(i, "iad"), ""));
         etMkac.setText(prefs.getString(key(i, "mkac"), ""));
-        // 0 = EMV. The right default for a hand-typed card, because EMV is the
-        // only mode that can reach a cryptogram. A cloned card overrides this
-        // from the capture, so a real magstripe card still lands on 1.
+
+        // KEYFINDER: a key found for this BIN applies to every card of that BIN.
+        // Fill it in rather than making the user run the scan again per card.
+        if (t(etMkac).isEmpty()) {
+            String b6 = digits(prefs.getString(key(i, "pan"), ""));
+            if (b6.length() >= 6) {
+                String kk = prefs.getString("keyfor_" + b6.substring(0, 6), "");
+                if (kk.length() == 32) etMkac.setText(kk);
+            }
+        }
+
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
         etScript.setText(prefs.getString(key(i, "script"), ""));
         binding = false;
@@ -558,8 +493,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- preview ----------
 
-    /** Everything the terminal will actually receive, plus the traps we keep
-     *  falling into. Long-press TRACK 2 or SAVE to see it. */
     private String previewText() {
         String pan = digits(t(etPan));
         String exp = digits(t(etExpiry));
@@ -574,7 +507,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         StringBuilder sb = new StringBuilder();
-
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
@@ -586,8 +518,6 @@ public class MainActivity extends AppCompatActivity {
         sb.append("5A  PAN    : ")
                 .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
                 .append('\n');
-        // a bad check digit is the single most common save failure, so check it
-        // here too rather than making SAVE be the first thing that tells you
         if (!pan.isEmpty()) {
             sb.append("   check digit : ")
                     .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
@@ -595,7 +525,6 @@ public class MainActivity extends AppCompatActivity {
             String diff = diffAgainstTrack2(pan);
             if (diff != null) sb.append("   !! ").append(diff).append('\n');
         }
-        // the emulator pads YYMM to YYMM01 - show what actually goes on the wire
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
         if (exp.length() == 4) expOut = exp + "01";
         sb.append("5F24 expiry: ").append(expOut).append('\n');
@@ -615,10 +544,8 @@ public class MainActivity extends AppCompatActivity {
         sb.append("script     : ").append(scriptLines == 0
                 ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
 
-        // ---- traps ----
         String trackPan = track2.contains("D")
                 ? track2.substring(0, track2.indexOf('D')) : "";
-
         if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
             sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
             sb.append("   PAN    : ").append(pan).append('\n');
@@ -627,13 +554,11 @@ public class MainActivity extends AppCompatActivity {
         if (aid.isEmpty()) {
             sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
         }
-        // the silent-death trap. Advertised but not routable.
         if (!aid.isEmpty() && !routable(aid)) {
             sb.append('\n').append("!! AID has no <aid-filter> in apduservice.xml\n");
             sb.append("   Android will not route the SELECT - tap dies with NO log line\n");
             sb.append("   add: <aid-filter android:name=\"").append(aid).append("\" />\n");
         }
-        // was !"0".equals(msd) - it fired on magstripe but talked about EMV
         if ("0".equals(msd)) {
             sb.append('\n').append("note: MSD=0 is EMV mode - terminal walks the AFL, ARQC matters\n");
         }
@@ -667,14 +592,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- routing self-check ----------
 
-    /**
-     * Long-press WALLET. Answers the only question that matters before a real
-     * tap: will Android actually deliver the terminal's SELECT to this app?
-     *
-     * Nothing here changes state - it reads the platform's routing table, which
-     * is the thing you cannot see from inside the emulator. A blocked AID
-     * produces no log line, so it is indistinguishable from a dead reader.
-     */
     private void showRoutingCheck() {
         ComponentName me = new ComponentName(this, HceCcEmulationServiceVisa.class);
         StringBuilder sb = new StringBuilder();
@@ -691,7 +608,9 @@ public class MainActivity extends AppCompatActivity {
         sb.append('\n');
 
         CardEmulation ce = null;
-        // FIX: Throwable, not Exception. Nothing here is API 24+, but be uniform.
+        // Throwable, not Exception: supportsAidPrefixRegistration is API 24 and
+        // minSdk is 21, so on API 21-23 it throws NoSuchMethodError, which
+        // extends Error. catch(Exception) never fired and the check died.
         if (nfc != null) {
             try { ce = CardEmulation.getInstance(nfc); } catch (Throwable ignored) { }
         }
@@ -707,18 +626,10 @@ public class MainActivity extends AppCompatActivity {
                 ? "  good - you outrank Google Wallet for the big-brand AIDs\n"
                 : "  NOT default - you only get AIDs no payment app claims\n");
 
-        // FIX: supportsAidPrefixRegistration() is API 24 and minSdk is 21. On
-        // API 21-23 the method is absent from the runtime class, so this throws
-        // NoSuchMethodError - which extends Error, NOT Exception. The old
-        // catch(Exception) never fired, so the whole check died before it
-        // printed a single routing line.
         String prefix = "?";
         try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Throwable ignored) { }
         sb.append("prefix AID matching : ").append(prefix).append("\n\n");
 
-        // The PPSE first - if the terminal cannot read the directory, nothing
-        // else in the sequence ever happens. Then this card's AID, then the two
-        // fallbacks buildPpse() advertises alongside it.
         String aid = t(etAid).toUpperCase();
         List<String> check = new ArrayList<>();
         check.add("325041592E5359532E4444463031");
@@ -735,8 +646,6 @@ public class MainActivity extends AppCompatActivity {
                 continue;
             }
             boolean routed;
-            // FIX: Throwable. This one is inside the loop, so an Error here would
-            // print BLOCKED for every AID with no explanation.
             try {
                 routed = ce.isDefaultServiceForAid(me, a);
             } catch (Throwable ignored) {
@@ -759,7 +668,6 @@ public class MainActivity extends AppCompatActivity {
         dialog("Can the terminal reach us?", sb.toString());
     }
 
-    /** Small dialog helper for the self-check. */
     private void dialog(String title, String body) {
         new AlertDialog.Builder(this)
                 .setTitle(title)
@@ -793,34 +701,26 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /** KEYFINDER: the dictionary now comes from KeyFinder - ~66k candidates from
+     *  test vectors, repeated bytes, counting patterns, ASCII words and
+     *  BIN-derived values. A key already found for this BIN is tried first. */
     private List<String> candidateKeys() {
-        List<String> out = new ArrayList<>();
-        for (String k : SEED_KEYS) out.add(k);
-        for (String k : prefs.getString("keylist", "").split("[^0-9A-Fa-f]+")) {
-            String h = k.toUpperCase();
-            if (h.length() == 32) out.add(h);
-        }
-        String pan = digits(t(etPan));
-        if (pan.length() >= 8) {
-            String b8 = pan.substring(0, 8);
-            String b6 = pan.substring(0, 6);
-            out.add((b8 + b8 + "0000000000000000").substring(0, 32));
-            out.add((b8 + "000000000000000000000000").substring(0, 32));
-            out.add((b6 + "00000000000000000000000000").substring(0, 32));
-            StringBuilder asc = new StringBuilder();
-            for (char c : b8.toCharArray()) asc.append(String.format("%02X", (int) c));
-            out.add((asc + "00000000000000000000").substring(0, 32));
+        List<String> out = new ArrayList<>(
+                KeyFinder.candidates(digits(t(etPan)), prefs.getString("keylist", "")));
+
+        String bin = digits(t(etPan));
+        if (bin.length() >= 6) {
+            String remembered = prefs.getString("keyfor_" + bin.substring(0, 6), "");
+            if (remembered.length() == 32 && !out.contains(remembered)) out.add(0, remembered);
         }
         return out;
     }
 
     private void scanForKey() { scanForKey(true); }
 
-    /**
-     * Try every candidate key against the ARQC the real card produced, sweeping
-     * the MAC input order and the diversification option too - a correct key
-     * tests as wrong if either of those is wrong.
-     */
+    /** Try every candidate key against the ARQC the real card produced, sweeping
+     *  the MAC input order and diversification option too - a correct key tests
+     *  as wrong if either of those is wrong. */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
@@ -881,6 +781,15 @@ public class MainActivity extends AppCompatActivity {
                                 etMkac.setText(fk);
                                 prefs.edit().putString(key(current, "keyvar"),
                                         String.valueOf(fv)).apply();
+
+                                // KEYFINDER: remember it for the whole BIN, so the
+                                // next card of this range fills itself in
+                                String bin6 = digits(t(etPan));
+                                if (bin6.length() >= 6) {
+                                    prefs.edit().putString("keyfor_" + bin6.substring(0, 6),
+                                            fk).apply();
+                                }
+
                                 collect();
                                 txtStatus.setText("KEY FOUND " + fk + "  (variant " + fv + ")");
                                 Toast.makeText(this, "Issuer key found", Toast.LENGTH_LONG).show();
@@ -928,7 +837,6 @@ public class MainActivity extends AppCompatActivity {
         return sb.toString();
     }
 
-    /** Recursive TLV search - first value found for a tag, at any depth. */
     private static byte[] tagOf(byte[] d, int want) {
         int i = 0;
         while (i < d.length) {
@@ -964,21 +872,10 @@ public class MainActivity extends AppCompatActivity {
         startActivityForResult(i, REQ_CLONE);
     }
 
-    /**
-     * Resolve the current card's BIN to its issuer and call them.
-     *
-     * The issuer's IVR is the only liveness check that does not need a till:
-     * a balance readback or "card is active" means the account is open, and
-     * "card was replaced" or "cancelled" means it is dead. An expired row
-     * (2608 is already gone) never even reaches the terminal, so this is
-     * cheaper than spending a tap to find out.
-     */
+    /** The issuer's IVR is the only liveness check that does not need a till. */
     private void callIssuer() {
         String pan = digits(t(etPan));
-        if (pan.length() < 12 || pan.length() > 19) {
-            // the PAN box may be mid-edit; fall back to the track 2
-            pan = panFromTrack2();
-        }
+        if (pan.length() < 12 || pan.length() > 19) pan = panFromTrack2();
         if (pan.isEmpty()) {
             Toast.makeText(this, "Fill the PAN first", Toast.LENGTH_SHORT).show();
             return;
@@ -987,12 +884,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSave() {
-        syncFieldsFromTrack2();                   // SAVE puts everything in its place
+        syncFieldsFromTrack2();
 
         // The track 2 is a capture and carries its own check digit, while the
-        // PAN box is usually hand-typed and is where typos land. When they
-        // disagree, take the track 2 value instead of bouncing the card with a
-        // check-digit error the user has no way to act on.
+        // PAN box is usually hand-typed. When they disagree, take the track 2
+        // value rather than bouncing the card with an error the user cannot act
+        // on - the correct number is sitting right there.
         String trackPan = panFromTrack2();
         if (!trackPan.isEmpty() && !trackPan.equals(digits(t(etPan)))) {
             binding = true;
@@ -1017,17 +914,22 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         if (!luhn(pan)) {
-            // name the exact digit when we can, fall back to the check digit
+            // A differing track 2 is the precise case: the difference IS the typo.
             String diff = diffAgainstTrack2(pan);
             if (diff != null) {
                 txtStatus.setText(diff);
                 Toast.makeText(this, diff, Toast.LENGTH_LONG).show();
                 return;
             }
+            // PAN and track 2 agree, so the paste itself is bad. The check digit
+            // is one candidate but an earlier mistyped digit produces the same
+            // symptom - say both rather than sending them to the wrong end.
             String want = String.valueOf(expectedCheckDigit(pan));
-            txtStatus.setText("PAN check digit wrong - last digit should be " + want);
-            Toast.makeText(this, "PAN check digit wrong. Last digit should be " + want
-                    + ", not " + pan.substring(pan.length() - 1), Toast.LENGTH_LONG).show();
+            String msg = "Pasted line fails its own check digit. Either the last digit "
+                    + "should be " + want + ", or a digit earlier in the PAN is wrong. "
+                    + "Re-copy the line from the source.";
+            txtStatus.setText(msg);
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             return;
         }
         if (t(etExpiry).length() != 4) {
@@ -1056,8 +958,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // the silent-death check. Everything above validates the DATA; this
-        // validates whether the terminal can reach us at all.
         String aidNow = t(etAid).toUpperCase();
         if (!routable(aidNow)) {
             txtStatus.setText("Saved - AID " + aidNow + " is not in apduservice.xml, tap will die silently");
@@ -1068,7 +968,7 @@ public class MainActivity extends AppCompatActivity {
 
         txtStatus.setText("Saved card " + (current + 1) + " of " + cards.size());
         Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
-        showPage(0);                              // back to the wallet where the status lives
+        showPage(0);
     }
 
     private void onAdd() {
@@ -1099,30 +999,22 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /**
-     * Remove one card and close the gap.
+    /** Remove one card and close the gap. Keys are card<N>_*, so dropping card 2
+     *  of 5 would leave a hole at 2 with card_count 4 - a blank slot and an
+     *  unreachable last card. Everything above the victim shifts down.
      *
-     * Keys are card<N>_*, so dropping card 2 of 5 would leave a hole at 2 with
-     * card_count 4 - the pager then shows a blank slot and the last card is
-     * unreachable. Everything above the victim is shifted down one slot.
-     *
-     * key(i, "") is "card<i>_" and is NOT a prefix of "card10_" - the underscore
-     * is what stops card1 and card10 cannibalising each other.
-     */
+     *  key(i, "") is "card<i>_" and is NOT a prefix of "card10_" - the
+     *  underscore stops card1 and card10 cannibalising each other. */
     private void doDelete(int index) {
         SharedPreferences.Editor e = prefs.edit();
         int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
         if (n <= 0) return;
 
-        // 1. drop the victim's keys
         String victim = key(index, "");
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(victim)) e.remove(k);
         }
 
-        // 2. shift everything above it down one slot. Clear the destination
-        //    first, or a field the source card does not have would survive from
-        //    the previous occupant of that slot.
         for (int i = index; i < n - 1; i++) {
             String from = key(i + 1, "");
             String to = key(i, "");
@@ -1136,7 +1028,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // 3. clear the slot the shift duplicated into the top
         String last = key(n - 1, "");
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(last)) e.remove(k);
@@ -1154,14 +1045,8 @@ public class MainActivity extends AppCompatActivity {
         showPage(0);
     }
 
-    /**
-     * FIX: a thin wrapper over Luhn.valid().
-     *
-     * This file and BankDirectory both used to carry their own copy of the
-     * algorithm. Two copies of a check that decides whether a card saves is two
-     * chances to drift apart, and a drifted copy rejects valid cards while the
-     * other accepts them. Kept as a wrapper so no call site has to change.
-     */
+    /** FIX: thin wrapper over Luhn.valid(). This file and BankDirectory both
+     *  used to carry their own copy - two chances to drift apart. */
     private static boolean luhn(String s) {
         return Luhn.valid(s);
     }
@@ -1245,18 +1130,12 @@ public class MainActivity extends AppCompatActivity {
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
-        // leave the AFL empty on a clone so the service derives it from the
-        // records that actually landed. A leftover "08010100" would advertise
-        // SFI 1 record 1 only and silently ignore every captured record.
         etAfl.setText("");
         binding = false;
 
         collect();
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "00" : psn).apply();
 
-        // Move the capture onto the card FIRST, so msdFromCapture can read it off
-        // the card itself rather than depending on the staging area still being
-        // there. Staging is burned by this call.
         copyStagingToCard(current);
 
         binding = true;
@@ -1273,8 +1152,6 @@ public class MainActivity extends AppCompatActivity {
                 ? "Cloned - no records captured, terminal will get a synthetic one"
                 : "Cloned " + recs + " records - check it, then SAVE";
 
-        // The PAN has no name in it - the name only exists on the card, as 5F20
-        // inside a record. Report which way it went, so a miss is never silent.
         if (t(etName).isEmpty()) {
             String h = holderFromCapture(current);
             if (!h.isEmpty()) {
@@ -1293,22 +1170,17 @@ public class MainActivity extends AppCompatActivity {
         txtStatus.setText(st);
 
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
-        showPage(1);                              // straight into the editor to review
+        showPage(1);
 
-        // the reader just captured a real cryptogram - hunt for the issuer key
         if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
                 && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
             scanForKey(false);
         }
     }
 
-    /**
-     * 1 = magstripe framing, 0 = EMV framing. Read off the captured GPO.
-     * Reads the card's own key, so it must be called after copyStagingToCard.
-     */
     private int msdFromCapture(int index) {
         String gpo = prefs.getString(key(index, "cap_rawgpo"), "");
-        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");   // staging fallback
+        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");
         if (gpo.length() < 2) return 1;
         try {
             return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
@@ -1317,7 +1189,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** How many records actually landed on the card we just wrote. */
     private int recordCountOnCard() {
         int n = 0;
         String p = key(current, "cap_rec");
@@ -1327,11 +1198,6 @@ public class MainActivity extends AppCompatActivity {
         return n;
     }
 
-    /**
-     * Lift the cardholder name out of whatever the reader captured. 5F20 sits
-     * inside a record, so scan every captured record for it and take the first
-     * usable one. A card whose records carry no 5F20 returns nothing.
-     */
     private String holderFromCapture(int index) {
         String prefix = key(index, "cap_rec");
         for (String k : prefs.getAll().keySet()) {
@@ -1349,11 +1215,6 @@ public class MainActivity extends AppCompatActivity {
         return "";
     }
 
-    /**
-     * Track 1 carries the name between the two '^' marks:
-     *   B<PAN>^SURNAME/FIRSTNAME^<expiry><service><discretionary>
-     * Track 2 has no name at all, which is why pasting one never fills this in.
-     */
     private static String nameFromTrack1(String raw) {
         if (raw == null) return "";
         int a = raw.indexOf('^');
@@ -1368,7 +1229,6 @@ public class MainActivity extends AppCompatActivity {
         return n.length() > 26 ? n.substring(0, 26) : n;
     }
 
-    /** Start the clone's ATC just above the value the real card last used. */
     private static String nextAtc(String hexAtc) {
         try {
             int v = Integer.parseInt(hexAtc.replaceAll("[^0-9A-Fa-f]", ""), 16);
@@ -1378,36 +1238,22 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * The reader writes its capture into a staging area under "cap_". Move it
-     * onto the wallet card that was just written, so two cloned cards cannot
-     * overwrite each other and the emulator always MACs the right PAN.
-     *
-     * Both ends are cleared. The destination, because cloning into the same slot
-     * twice merges two captures - and since the emulator derives its AFL from
-     * these keys, a leftover rec1_1 gets advertised and served, card A's data
-     * answering for card B. The staging area, because otherwise a record this
-     * read missed survives from the previous card and gets copied across too.
-     */
     private void copyStagingToCard(int index) {
         SharedPreferences.Editor e = prefs.edit();
         String dst = key(index, "cap_");
 
-        // 1. drop whatever the destination already had
         List<String> stale = new ArrayList<>();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(dst)) stale.add(k);
         }
         for (String k : stale) e.remove(k);
 
-        // 2. staging -> destination
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith("cap_")) {
                 e.putString(dst + k.substring(4), prefs.getString(k, ""));
             }
         }
 
-        // 3. burn the staging area so the next clone starts from nothing
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith("cap_")) e.remove(k);
         }
@@ -1426,11 +1272,6 @@ public class MainActivity extends AppCompatActivity {
         return s;
     }
 
-    /**
-     * SAVE syncs the plain fields out of the track 2, so a pasted dump cannot
-     * end up contradicting itself. The separator is the split point; everything
-     * after it is positional, and the tail (which holds the CVC) is kept whole.
-     */
     private void syncFieldsFromTrack2() {
         String track2 = normaliseTrack2(t(etTrack2));
         int d = track2.indexOf('D');
