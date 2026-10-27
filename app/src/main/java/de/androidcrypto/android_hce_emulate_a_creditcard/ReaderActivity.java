@@ -3,6 +3,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
@@ -29,19 +30,18 @@ import java.util.Locale;
 import java.util.Random;
 
 /**
- * Reads a physical contactless card and returns it to MainActivity.
+ * Reads a physical contactless card and hands it to MainActivity.
  *
- * The whole point of this screen is the tail of readCard(): after the AFL walk
- * it sends GENERATE AC (80 AE) and stages the exact command and response under
- * cap_genaccmd / cap_rawgenac. MainActivity's key scan needs those two, and it
- * needs the command as the FULL apdu so it can pull Lc out of index 4.
- *
- * Staging keys written here (all under the "cap_" prefix, which
- * MainActivity.copyStagingToCard() moves to "card<N>_cap_..."):
- *   cap_rec0, cap_rec1 ...   every READ RECORD response
- *   cap_rawgpo               the GPO response (first byte 80 or 77)
- *   cap_genaccmd             full 80AE..00 frame
- *   cap_rawgenac             GENERATE AC response, contains 9F26 + 9F36
+ * STAGING KEY NAMES MATTER. The service reads them back as:
+ *   cap_rec<sfi>_<rec>   -> readRecord()   (NOT a flat cap_rec0, cap_rec1)
+ *   cap_rawfci           -> rawFci()       (real FCI replay)
+ *   cap_rawgpo           -> rawGpo()       (framing + AIP source)
+ *   cap_genaccmd         -> MainActivity's key scan
+ *   cap_rawgenac         -> MainActivity's key scan
+ *   cap_aid              -> "the real AID" for the PPSE and the select log
+ *   cap_holder           -> fallback cardholder name
+ * All of these live under the "cap_" prefix, which copyStagingToCard() moves to
+ * "card<N>_cap_...".
  */
 public class ReaderActivity extends AppCompatActivity implements NfcAdapter.ReaderCallback {
 
@@ -60,7 +60,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PREF = "hce_card";
     private static final String PPSE = "325041592E5359532E4444463031";
 
-    /** Used only if the card will not answer the PPSE SELECT. */
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
             "A00000002501", "A0000000651010", "A000000333010101"
@@ -75,9 +74,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
 
-    // result of the last good read
     private String rPan = "", rExpiry = "", rService = "", rDisc = "", rAid = "",
-            rTrack2 = "", rPsn = "", rIad = "", rAtc = "", rAip = "";
+            rTrack2 = "", rPsn = "", rIad = "", rAtc = "", rAip = "", rHolder = "";
     private boolean read = false;
 
     @Override
@@ -88,8 +86,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         nfc = NfcAdapter.getDefaultAdapter(this);
         if (nfc == null) log("No NFC adapter on this device");
     }
-
-    // ---------------- UI (programmatic, no layout dependency) ----------------
 
     private int dp(int v) {
         return Math.round(getResources().getDisplayMetrics().density * v);
@@ -111,7 +107,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         TextView hint = new TextView(this);
         hint.setText("Hold the physical card flat against the back of the phone.\n"
-                + "One read per tap. It walks PPSE, GPO, the records, then GENERATE AC.");
+                + "One read per tap. PPSE, GPO, records, then GENERATE AC.");
         hint.setTextColor(0xFF9CA3AF);
         hint.setTextSize(12);
         hint.setPadding(0, dp(6), 0, dp(10));
@@ -135,16 +131,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         btnUse.setOnClickListener(v -> returnResult());
         root.addView(btnUse);
 
-        Button btnAgain = new Button(this);
-        btnAgain.setText("READ AGAIN");
-        btnAgain.setOnClickListener(v -> {
-            txtLog.setText("");
-            btnUse.setEnabled(false);
-            read = false;
-            armReader();
-        });
-        root.addView(btnAgain);
-
         Button btnCancel = new Button(this);
         btnCancel.setText("CANCEL");
         btnCancel.setOnClickListener(v -> {
@@ -159,55 +145,38 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private void log(String s) {
         ui.post(() -> {
             txtLog.append(s + "\n");
-            View parent = (View) txtLog.getParent();
-            if (parent instanceof ScrollView) ((ScrollView) parent).fullScroll(View.FOCUS_DOWN);
+            ScrollView sv = (ScrollView) txtLog.getParent();
+            if (sv != null) sv.fullScroll(View.FOCUS_DOWN);
         });
-    }
-
-    // ---------------- reader mode ----------------
-
-    private void armReader() {
-        if (nfc == null) {
-            log("No NFC adapter");
-            return;
-        }
-        if (!nfc.isEnabled()) {
-            log("NFC is off - turn it on and tap READ AGAIN");
-            return;
-        }
-        Bundle opts = new Bundle();
-        opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 500);
-        nfc.enableReaderMode(this, this,
-                NfcAdapter.FLAG_READER_NFC_A
-                        | NfcAdapter.FLAG_READER_NFC_B
-                        | NfcAdapter.FLAG_READER_NFC_F
-                        | NfcAdapter.FLAG_READER_NFC_V
-                        | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
-                opts);
-        log("Ready - tap the card on the back of the phone");
-    }
-
-    private void disarmReader() {
-        if (nfc != null) {
-            try { nfc.disableReaderMode(this); } catch (Exception ignored) { }
-        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (!read) armReader();
+        if (nfc != null && nfc.isEnabled()) {
+            Bundle opts = new Bundle();
+            opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 500);
+            nfc.enableReaderMode(this, this,
+                    NfcAdapter.FLAG_READER_NFC_A
+                            | NfcAdapter.FLAG_READER_NFC_B
+                            | NfcAdapter.FLAG_READER_NFC_F
+                            | NfcAdapter.FLAG_READER_NFC_V
+                            | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                    opts);
+        } else {
+            log("NFC is off - enable it and come back");
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        disarmReader();
+        if (nfc != null) nfc.disableReaderMode(this);
     }
 
     @Override
     public void onTagDiscovered(Tag tag) {
-        if (busy || read) return;
+        if (busy) return;
         busy = true;
         IsoDep iso = IsoDep.get(tag);
         if (iso == null) {
@@ -227,12 +196,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
     }
 
-    // ---------------- the flow ----------------
-
     private void readCard(IsoDep iso) throws IOException {
         read = false;
         rPan = rExpiry = rService = rDisc = rAid = "";
-        rTrack2 = rPsn = rIad = rAtc = rAip = "";
+        rTrack2 = rPsn = rIad = rAtc = rAip = rHolder = "";
         ui.post(() -> {
             txtLog.setText("");
             btnUse.setEnabled(false);
@@ -269,6 +236,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             return;
         }
 
+        // The real FCI, so the service can replay it instead of generating one.
+        stage("cap_rawfci", bytesToHex(fci));
+        stage("cap_aid", rAid);
+
         log("-- GET PROCESSING OPTIONS");
         List<byte[]> pdolL = new ArrayList<>();
         collect(fci, 0x9F38, pdolL);
@@ -278,7 +249,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         byte[] aip = null, afl = null;
         if (gpo.length > 1 && (gpo[0] & 0xFF) == 0x80) {
-            // format 1: 80 <len> AIP(2) AFL(..)
             int len = gpo[1] & 0xFF;
             if (len >= 2 && 2 + len <= gpo.length) {
                 aip = Arrays.copyOfRange(gpo, 2, 4);
@@ -309,7 +279,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 for (int r = first; r <= last; r++) {
                     try {
                         byte[] rec = send(iso, apdu(0x00, 0xB2, r, (sfi << 3) | 4, null, 0x00));
-                        stage("cap_rec" + recNo, bytesToHex(rec));
+                        // KEY NAME: cap_rec<sfi>_<rec> - the service parses the
+                        // underscore. A flat cap_rec0 is silently dropped by afl().
+                        stage("cap_rec" + sfi + "_" + r, bytesToHex(rec));
                         records.add(rec);
                         recNo++;
                         log("   sfi " + sfi + " rec " + r + " ok");
@@ -321,7 +293,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
         log("   " + recNo + " record(s)");
 
-        // pull the card data out of the records
         byte[] cdol1 = null;
         for (byte[] rec : records) {
             if (rPan.isEmpty()) {
@@ -347,6 +318,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 collect(rec, 0x5F34, l);
                 if (!l.isEmpty()) rPsn = bcd(l.get(0));
             }
+            if (rHolder.isEmpty()) {
+                List<byte[]> l = new ArrayList<>();
+                collect(rec, 0x5F20, l);
+                if (!l.isEmpty()) {
+                    rHolder = new String(l.get(0), java.nio.charset.StandardCharsets.ISO_8859_1)
+                            .toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
+                    if (rHolder.length() > 26) rHolder = rHolder.substring(0, 26);
+                }
+            }
             if (rIad.isEmpty()) {
                 List<byte[]> l = new ArrayList<>();
                 collect(rec, 0x9F10, l);
@@ -358,8 +338,8 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 if (!l.isEmpty()) cdol1 = l.get(0);
             }
         }
+        if (!rHolder.isEmpty()) stage("cap_holder", rHolder);
 
-        // derive expiry/service/discretionary from the track 2 when needed
         int dsep = rTrack2.indexOf('D');
         if (dsep > 0 && rTrack2.length() >= dsep + 8) {
             if (rExpiry.isEmpty()) rExpiry = rTrack2.substring(dsep + 1, dsep + 5);
@@ -370,7 +350,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         if (rPsn.length() > 2) rPsn = rPsn.substring(0, 2);
         if (rExpiry.length() > 4) rExpiry = rExpiry.substring(0, 4);
 
-        // ---- GENERATE AC: the whole reason this screen exists ----
         if (cdol1 != null && cdol1.length > 0) {
             log("-- GENERATE AC");
             byte[] cdolData = buildCdolData(cdol1);
@@ -420,16 +399,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         ui.post(() -> {
             btnUse.setEnabled(read);
-            if (read) {
-                disarmReader();
-                log("Done - take the card off. Tap USE CARD, or READ AGAIN.");
-            } else {
-                Toast.makeText(this, "Nothing usable read", Toast.LENGTH_SHORT).show();
-            }
+            if (!read) Toast.makeText(this, "Nothing usable read", Toast.LENGTH_SHORT).show();
         });
     }
-
-    // ---------------- result ----------------
 
     private void returnResult() {
         if (!read) {
@@ -452,8 +424,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         finish();
     }
 
-    // ---------------- staging ----------------
-
     private void clearStaging() {
         SharedPreferences.Editor e = prefs.edit();
         for (String k : prefs.getAll().keySet()) {
@@ -465,8 +435,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private void stage(String name, String value) {
         prefs.edit().putString(name, value).apply();
     }
-
-    // ---------------- APDU plumbing ----------------
 
     private static int sw(byte[] r) {
         if (r == null || r.length < 2) return 0;
@@ -511,8 +479,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return Arrays.copyOf(rsp, rsp.length - 2);
     }
 
-    // ---------------- TLV ----------------
-
     private static void collect(byte[] d, int want, List<byte[]> out) {
         if (d == null) return;
         int i = 0;
@@ -546,11 +512,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 || t == 0xBF0C || t == 0xBF0D;
     }
 
-    // ---------------- CDOL / PDOL builder ----------------
-
-    /** The template is a bare list of tag+length with no values. Emit the right
-     *  number of bytes for each, with sensible defaults where a zero would make
-     *  the card unhappy. */
     private byte[] buildCdolData(byte[] template) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = 0;
@@ -579,7 +540,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private byte[] defaultFor(int tag, int len) {
         switch (tag) {
-            case 0x9F02: return hexToBytes("000000001000");   // 10.00
+            case 0x9F02: return hexToBytes("000000001000");
             case 0x9F03: return new byte[6];
             case 0x9F1A: return hexToBytes("0840");
             case 0x5F2A: return hexToBytes("0840");
@@ -604,8 +565,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             default: return new byte[len];
         }
     }
-
-    // ---------------- small helpers ----------------
 
     private static byte[] cat(byte[]... arrs) {
         int n = 0;
@@ -635,8 +594,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return sb.toString();
     }
 
-    /** BCD to text, trailing F pad removed. 0xD nibbles stay as 'D', which is
-     *  what the track 2 separator normalises to. */
     private static String bcd(byte[] d) {
         String h = bytesToHex(d);
         while (h.endsWith("F")) h = h.substring(0, h.length() - 1);
