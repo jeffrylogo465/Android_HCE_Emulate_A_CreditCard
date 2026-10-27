@@ -975,7 +975,7 @@ public class MainActivity extends AppCompatActivity {
      */
     private void callIssuer() {
         String pan = digits(t(etPan));
-        if (pan.isEmpty() || pan.length() < 12 || pan.length() > 19) {
+        if (pan.length() < 12 || pan.length() > 19) {
             // the PAN box may be mid-edit; fall back to the track 2
             pan = panFromTrack2();
         }
@@ -1154,24 +1154,16 @@ public class MainActivity extends AppCompatActivity {
         showPage(0);
     }
 
-    /** Correct as written - the rightmost digit is never doubled, and the
-     *  toggle flips AFTER the digit is added. The length bound stops a whole
-     *  dump pasted into the PAN box from validating as one 31-digit number. */
+    /**
+     * FIX: a thin wrapper over Luhn.valid().
+     *
+     * This file and BankDirectory both used to carry their own copy of the
+     * algorithm. Two copies of a check that decides whether a card saves is two
+     * chances to drift apart, and a drifted copy rejects valid cards while the
+     * other accepts them. Kept as a wrapper so no call site has to change.
+     */
     private static boolean luhn(String s) {
-        String d = digits(s);
-        if (d.length() < 12 || d.length() > 19) return false;
-        int sum = 0;
-        boolean dbl = false;
-        for (int i = d.length() - 1; i >= 0; i--) {
-            int c = d.charAt(i) - '0';
-            if (dbl) {
-                c *= 2;
-                if (c > 9) c -= 9;
-            }
-            sum += c;
-            dbl = !dbl;
-        }
-        return sum % 10 == 0;
+        return Luhn.valid(s);
     }
 
     @Override
