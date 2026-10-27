@@ -80,9 +80,9 @@
         android:textColor="#B3FFFFFF"
         android:textSize="9sp" />
 
-    <!-- autoSize so a full 16 digits shrinks to fit instead of clipping the
-         tail. The tail is where a typo hides, and this card is the only place
-         you can eyeball the number without opening the editor. -->
+    <!-- autoSize: a full 16 digits shrinks to fit rather than clipping the tail.
+         The tail is where a typo hides, and this card is the only place you can
+         eyeball the number without opening the editor. -->
     <TextView
         android:id="@+id/cardPan"
         android:layout_width="match_parent"
