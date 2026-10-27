@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
+import android.nfc.TagLostException;
 import android.nfc.tech.IsoDep;
 import android.os.Bundle;
 import android.os.Handler;
@@ -45,17 +46,25 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PREF = "hce_card";
     private static final String PPSE = "325041592E5359532E4444463031";
     private static final String TTQ_KEY = "readerttq";
+    private static final String CURSOR_KEY = "sweepcursor";
+    private static final int STEPS_PER_TAP = 12;
 
     private String ttq = "4000";
     private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
 
-    /** entry index to override (-1 = off, -2 = unknown tags only) */
     private int variantEntry = -1;
     private byte variantByte = 0x00;
+    private int cursor = 0;
 
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
             "A0000000250101", "A0000000651010", "A000000333010101"
+    };
+
+    /** entries worth testing first */
+    private static final String[] SUSPECTS = {
+            "9C", "9F35", "9F02", "9F03", "9A", "5F2A", "9F1A", "9F37",
+            "9F66", "DF70", "DF71", "DF72"
     };
 
     private SharedPreferences prefs;
@@ -77,6 +86,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
         ttq = prefs.getString(TTQ_KEY, "4000");
         if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
+        cursor = prefs.getInt(CURSOR_KEY, 0);
         buildUi();
         nfc = NfcAdapter.getDefaultAdapter(this);
         if (nfc == null) log("No NFC adapter on this device");
@@ -142,13 +152,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     }
 
     private void updateHint() {
-        txtHint.setText("Hold the physical card flat against the back of the phone,\n"
-                + "and keep it still until it says USE CARD.\n"
-                + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
-                + "TTQ " + ttq + ("8000".equals(ttq)
-                    ? " - magstripe only: format 1, no records, no cryptogram."
-                    : " - EMV mode: format 2, an AFL, records and a real ARQC.")
-                + "\nTap the TTQ button to switch.");
+        txtHint.setText("Hold the card FLAT and DEAD STILL against the phone.\n"
+                + "If it says 'Tag was lost', lift it and tap again - the sweep\n"
+                + "resumes where it stopped. Keep tapping until a line says >>>.\n"
+                + "TTQ " + ttq + ".");
     }
 
     private void toggleTtq() {
@@ -176,7 +183,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         super.onResume();
         if (nfc != null && nfc.isEnabled()) {
             Bundle opts = new Bundle();
-            opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 500);
+            opts.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 10000);
             nfc.enableReaderMode(this, this,
                     NfcAdapter.FLAG_READER_NFC_A
                             | NfcAdapter.FLAG_READER_NFC_B
@@ -207,7 +214,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         }
         try {
             iso.connect();
-            iso.setTimeout(3000);
+            iso.setTimeout(5000);
             readCard(iso);
         } catch (Exception e) {
             log("Read error: " + e);
@@ -259,7 +266,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
         stage("cap_rawfci", bytesToHex(fci));
         stage("cap_aid", rAid);
-        log("   FCI " + bytesToHex(fci));
 
         List<byte[]> labL = new ArrayList<>();
         collect(fci, 0x50, labL);
@@ -289,7 +295,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         try {
             gpo = gpoWithRetry(iso, pdol);
         } catch (IOException e) {
-            log("   GPO failed on every variant: " + e.getMessage());
+            log("   GPO not solved this tap: " + e.getMessage());
         }
 
         byte[] aip = null, afl = null;
@@ -306,7 +312,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 if (end - off >= 2) {
                     aip = Arrays.copyOfRange(gpo, off, off + 2);
                     byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
-                    log("   format 1 - after the AIP: " + bytesToHex(rest));
                     if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
                             && (rest[1] & 0xFF) == rest.length - 2) {
                         rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
@@ -465,103 +470,123 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         return true;
     }
 
+    /**
+     * Flat list of steps, 12 per tap, cursor persisted. Steps:
+     *   kind 0 = mode (TTQ_CYCLE[m])
+     *   kind 1 = entry e overridden to a byte
+     *   kind 2 = total length delta
+     *   kind 3 = empty
+     * Entries are tried in SUSPECTS order. A tag-lost breaks out and saves
+     * the cursor so the next tap continues instead of starting over.
+     */
     private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
-        final String preferred = ttq;
-        IOException last = null;
         int n = countEntries(pdolTemplate);
 
-        // stage 1 - mode x unknown-tag fill
-        variantEntry = -2;
-        for (byte fill : new byte[]{0x00, (byte) 0xFF}) {
-            variantByte = fill;
-            for (String t : TTQ_CYCLE) {
-                ttq = t;
-                byte[] d = buildCdolData(pdolTemplate);
-                log("   GPO try TTQ " + t + " fill " + hx(fill) + " len " + d.length);
-                try {
-                    byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
-                    finishGpo(t);
-                    log("   >>> GPO ok TTQ " + t + " fill " + hx(fill) + " <<<");
-                    return gpo;
-                } catch (IOException e) {
-                    log("   GPO TTQ " + t + " fill " + hx(fill) + " -> " + e.getMessage());
-                    last = e;
-                }
-            }
+        List<int[]> plan = new ArrayList<>();
+        for (int e : orderedEntries(pdolTemplate, n)) {
+            plan.add(new int[]{1, e, 0x00});
+            plan.add(new int[]{1, e, 0xFF});
+            plan.add(new int[]{1, e, 0x01});
         }
+        for (int m = 0; m < TTQ_CYCLE.length; m++) plan.add(new int[]{0, m, 0});
+        for (int d : new int[]{-2, -1, 1, 2}) plan.add(new int[]{2, d, 0});
+        plan.add(new int[]{3, 0, 0});
 
-        // stage 2 - every entry by index, 00 / FF / 01
-        variantEntry = -1;
-        ttq = preferred;
-        for (int e = 0; e < n; e++) {
-            String et = entryTag(pdolTemplate, e);
-            for (byte b : new byte[]{0x00, (byte) 0xFF, 0x01}) {
-                variantEntry = e;
-                variantByte = b;
-                byte[] d = buildCdolData(pdolTemplate);
-                log("   GPO entry " + e + " (" + et + ") = " + hx(b) + " len " + d.length);
-                try {
-                    byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
-                    log("   >>> GPO ok with entry " + e + " (" + et + ") = " + hx(b) + " <<<");
-                    variantEntry = -1;
-                    finishGpo(preferred);
-                    return gpo;
-                } catch (IOException e2) {
-                    log("   GPO " + et + " = " + hx(b) + " -> " + e2.getMessage());
-                    last = e2;
-                }
+        if (cursor < 0 || cursor >= plan.size()) cursor = 0;
+        log("   sweep step " + cursor + " of " + plan.size()
+                + " (" + STEPS_PER_TAP + " per tap)");
+
+        byte[] canon = null;
+        IOException last = null;
+        int budget = STEPS_PER_TAP;
+
+        while (budget-- > 0 && cursor < plan.size()) {
+            int[] s = plan.get(cursor);
+            String desc;
+            byte[] d;
+
+            if (s[0] == 1) {
+                variantEntry = s[1];
+                variantByte = (byte) s[2];
+                ttq = "4000";
+                desc = "entry " + s[1] + " (" + entryTag(pdolTemplate, s[1])
+                        + ") = " + hx((byte) s[2]);
+                d = buildCdolData(pdolTemplate);
+            } else if (s[0] == 0) {
+                variantEntry = -2;
+                variantByte = 0x00;
+                ttq = TTQ_CYCLE[s[1]];
+                desc = "mode " + ttq;
+                d = buildCdolData(pdolTemplate);
+            } else if (s[0] == 2) {
+                variantEntry = -1;
+                ttq = "4000";
+                if (canon == null) canon = buildCdolData(pdolTemplate);
+                int L = canon.length + s[1];
+                if (L < 1) { cursor++; continue; }
+                d = new byte[L];
+                System.arraycopy(canon, 0, d, 0, Math.min(canon.length, L));
+                desc = "length " + L;
+            } else {
+                variantEntry = -1;
+                ttq = "4000";
+                d = new byte[0];
+                desc = "empty data";
             }
-        }
-        variantEntry = -1;
 
-        // stage 3 - total length fuzz
-        byte[] canon = buildCdolData(pdolTemplate);
-        int want = canon.length;
-        for (int delta : new int[]{-2, -1, 1, 2}) {
-            int L = want + delta;
-            if (L < 1) continue;
-            byte[] d = new byte[L];
-            System.arraycopy(canon, 0, d, 0, Math.min(canon.length, L));
-            log("   GPO length " + L);
+            log("   [" + cursor + "] " + desc + " len " + d.length);
             try {
                 byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, d, 0x00));
-                log("   >>> GPO ok at length " + L + " <<<");
-                finishGpo(preferred);
+                log("   >>> SOLVED at step " + cursor + ": " + desc + " <<<");
+                variantEntry = -1;
+                cursor = 0;
+                prefs.edit().putInt(CURSOR_KEY, cursor).putString(TTQ_KEY, ttq).apply();
+                ui.post(() -> { if (btnTtq != null) btnTtq.setText("TTQ: " + ttq); updateHint(); });
                 return gpo;
             } catch (IOException e) {
-                log("   GPO length " + L + " -> " + e.getMessage());
+                log("   [" + cursor + "] " + desc + " -> " + e.getMessage());
                 last = e;
+                cursor++;
+                boolean lost = (e instanceof TagLostException)
+                        || String.valueOf(e.getMessage()).contains("Tag was lost");
+                if (lost) {
+                    log("   tag lost - lift the card, tap again, resumes at step " + cursor);
+                    break;
+                }
             }
         }
 
-        // stage 4 - empty
-        log("   GPO last resort: empty data");
-        try {
-            byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, new byte[0], 0x00));
-            log("   GPO ok empty");
-            finishGpo(preferred);
-            return gpo;
-        } catch (IOException e) {
-            log("   GPO empty -> " + e.getMessage());
-            last = e;
+        variantEntry = -1;
+        if (cursor >= plan.size()) {
+            log("   sweep exhausted, wrapping to 0");
+            cursor = 0;
         }
-
-        ttq = preferred;
-        finishGpo(preferred);
-        throw last;
+        prefs.edit().putInt(CURSOR_KEY, cursor).apply();
+        throw (last != null ? last : new IOException("not solved"));
     }
 
-    private void finishGpo(String t) {
-        prefs.edit().putString(TTQ_KEY, t).apply();
-        ui.post(() -> {
-            if (btnTtq != null) btnTtq.setText("TTQ: " + t);
-            updateHint();
-        });
+    private int[] orderedEntries(byte[] t, int n) {
+        int[] out = new int[n];
+        boolean[] used = new boolean[n];
+        int k = 0;
+        for (String want : SUSPECTS) {
+            for (int e = 0; e < n; e++) {
+                if (!used[e] && entryTag(t, e).equalsIgnoreCase(want)) {
+                    out[k++] = e;
+                    used[e] = true;
+                    break;
+                }
+            }
+        }
+        for (int e = 0; e < n; e++) if (!used[e]) out[k++] = e;
+        return out;
     }
 
     private static String hx(byte b) {
         return String.format(Locale.US, "%02X", b);
     }
+
+    // ---- PDOL is tag,len,tag,len... NO VALUES. these must NOT skip a value.
 
     private static int countEntries(byte[] t) {
         int i = 0, n = 0;
@@ -572,11 +597,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int len = t[i++] & 0xFF;
             if ((len & 0x80) != 0) {
                 int k = len & 0x7F;
-                len = 0;
-                for (int j = 0; j < k && i < t.length; j++) len = (len << 8) | (t[i++] & 0xFF);
+                for (int j = 0; j < k && i < t.length; j++) i++;
             }
             n++;
-            i += len;
         }
         return n;
     }
@@ -594,7 +617,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 for (int j = 0; j < k && i < t.length; j++) len = (len << 8) | (t[i++] & 0xFF);
             }
             sum += len;
-            i += len;
         }
         return sum;
     }
@@ -611,12 +633,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int len = t[i++] & 0xFF;
             if ((len & 0x80) != 0) {
                 int k = len & 0x7F;
-                len = 0;
-                for (int j = 0; j < k && i < t.length; j++) len = (len << 8) | (t[i++] & 0xFF);
+                for (int j = 0; j < k && i < t.length; j++) i++;
             }
             if (n == want) return String.format(Locale.US, "%04X", tag);
             n++;
-            i += len;
         }
         return "?";
     }
@@ -757,16 +777,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         int i = 0;
         int entry = 0;
         while (i < template.length) {
-            int at = i;
             int tag = template[i++] & 0xFF;
             if ((tag & 0x1F) == 0x1F) {
-                if (i >= template.length) { log("   PDOL truncated at " + at); break; }
+                if (i >= template.length) break;
                 tag = (tag << 8) | (template[i++] & 0xFF);
             }
-            if (i >= template.length) {
-                log("   PDOL truncated after tag " + String.format(Locale.US, "%04X", tag));
-                break;
-            }
+            if (i >= template.length) break;
             int len = template[i++] & 0xFF;
             if ((len & 0x80) != 0) {
                 int n = len & 0x7F;
@@ -812,8 +828,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int len = t[i++] & 0xFF;
             if ((len & 0x80) != 0) {
                 int n = len & 0x7F;
-                len = 0;
-                for (int k = 0; k < n && i < t.length; k++) len = (len << 8) | (t[i++] & 0xFF);
+                for (int k = 0; k < n && i < t.length; k++) i++;
             }
             sb.append(String.format(Locale.US, "%04X(%d) ", tag, len));
         }
