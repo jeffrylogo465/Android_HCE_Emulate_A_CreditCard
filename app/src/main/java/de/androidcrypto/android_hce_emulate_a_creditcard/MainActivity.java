@@ -442,7 +442,10 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "3080"));
+        // 1080 matches the service DEFAULT_AIP (CV only). 3080 claimed DDA the
+        // app cannot do, and because the box is never empty the service default
+        // was dead - every card advertised ODA it would then fail.
+        etAip.setText(prefs.getString(key(i, "aip"), "1080"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), "80"));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -461,7 +464,13 @@ public class MainActivity extends AppCompatActivity {
         }
 
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
-        etScript.setText(prefs.getString(key(i, "script"), ""));
+
+        // Prefer the field's own value; if it is empty, surface any issuer script
+        // that came off the card, so a captured script is not invisible.
+        String sc = prefs.getString(key(i, "script"), "");
+        if (sc.isEmpty()) sc = prefs.getString(key(i, "cap_script"), "");
+        etScript.setText(sc);
+
         binding = false;
         updateCount();
         txtStatus.setText("");
@@ -510,7 +519,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "3080" : t(etAip).toUpperCase()).append('\n');
+                .append(t(etAip).isEmpty() ? "1080" : t(etAip).toUpperCase()).append('\n');
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
         sb.append('\n');
@@ -545,7 +554,7 @@ public class MainActivity extends AppCompatActivity {
                 ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
 
         String trackPan = track2.contains("D")
-                ? track2.substring(0, track2.indexOf('D')) : "";
+                ? track2.substring(0, track2.indexOf("D")) : "";
         if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
             sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
             sb.append("   PAN    : ").append(pan).append('\n');
@@ -725,7 +734,13 @@ public class MainActivity extends AppCompatActivity {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
         String pan = digits(t(etPan));
-        String aipHex = t(etAip).toUpperCase();
+
+        // MAC over the AIP the real card actually sent in its GPO, NOT the editor
+        // box. The editor value (and its default) will not match what was on the
+        // wire, so every candidate key would MAC to the wrong value and a correct
+        // key would report as a miss.
+        String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
+        if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
 
         if (cmdHex.isEmpty() || rspHex.isEmpty()) {
             if (announce) {
@@ -745,9 +760,16 @@ public class MainActivity extends AppCompatActivity {
         byte[] rsp = hexToBytes(rspHex);
         if (cmd.length < 6) return;
         int lc = cmd[4] & 0xFF;
-        if (5 + lc > cmd.length) return;
+        int off = 5;
+        if (lc == 0x00) {
+            // extended length: Lc is the two bytes after the 00 marker (case 4E)
+            if (cmd.length < 7) return;
+            lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
+            off = 7;
+        }
+        if (off + lc > cmd.length) return;
 
-        final byte[] cdol = Arrays.copyOfRange(cmd, 5, 5 + lc);
+        final byte[] cdol = Arrays.copyOfRange(cmd, off, off + lc);
         final byte[] arqcRef = tagOf(rsp, 0x9F26);
         final byte[] atcRef = tagOf(rsp, 0x9F36);
         if (arqcRef == null || atcRef == null) {
@@ -861,6 +883,29 @@ public class MainActivity extends AppCompatActivity {
             i += len;
         }
         return null;
+    }
+
+    /** Pull the AIP out of a captured GPO response. Handles both framings:
+     *  format 1 (tag 80 - AIP is the first two bytes of the value) and
+     *  format 2 (tag 77 - the AIP is tag 82 inside the template). Returns "" on
+     *  anything unusable so the caller can fall back to the editor box. */
+    private String aipFromGpo(String gpo) {
+        byte[] d = hexToBytes(gpo);
+        if (d.length < 4) return "";
+        int i = 0;
+        int tag = d[i++] & 0xFF;
+        int len = d[i++] & 0xFF;
+        if ((len & 0x80) != 0) {
+            int n = len & 0x7F;
+            len = 0;
+            for (int k = 0; k < n && i < d.length; k++) len = (len << 8) | (d[i++] & 0xFF);
+        }
+        if (i + len > d.length) len = d.length - i;
+        if (tag == 0x80) {
+            return len < 2 ? "" : bytesToHex(Arrays.copyOfRange(d, i, i + 2));
+        }
+        byte[] aip = tagOf(Arrays.copyOfRange(d, i, i + len), 0x82);
+        return aip == null ? "" : bytesToHex(aip);
     }
 
     // ---------- actions ----------
@@ -1180,7 +1225,6 @@ public class MainActivity extends AppCompatActivity {
 
     private int msdFromCapture(int index) {
         String gpo = prefs.getString(key(index, "cap_rawgpo"), "");
-        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");
         if (gpo.length() < 2) return 1;
         try {
             return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
