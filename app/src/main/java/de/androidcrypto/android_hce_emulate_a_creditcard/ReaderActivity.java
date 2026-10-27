@@ -44,10 +44,10 @@ import java.util.Random;
  * "card<N>_cap_...".
  *
  * TTQ. There is ONE field, ttq, read by the hint, the log, the button and
- * defaultFor(), and persisted so a good value survives a restart. 0x36 is NOT a
- * valid mode value (0x3600 sets neither the magstripe nor the EMV bit), so the
- * cycle is 4000 / C000 / 8000 and nothing else. A stale pref is normalised on
- * load so an old "3600" is never tried.
+ * defaultFor(), and persisted so a good value survives a restart. 0x36 sets
+ * neither the magstripe (0x80) nor the EMV (0x40) bit, so it is kept only as a
+ * last-resort sweep value; the preferred cycle is 4000 / C000 / 8000. A stale
+ * "3600" pref is normalised to 4000 on load.
  *
  * gpoWithRetry() sweeps the mode values if the first is refused, then tries an
  * empty-data GPO, so a read heals itself instead of dying on a guess. On a total
@@ -93,11 +93,13 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
      *        this is the read the clone and the key scan actually need.
      * C000 = both modes, the card chooses.
      * 8000 = magstripe only. Format 1, no AFL, no records, no cryptogram.
+     * 3600 = neither mode bit set. Sweep value only, and LAST: the build that
+     *        first tried it had no PDOL padding, so it was never fairly tested.
      *
      * First in the cycle is the default. Persisted, and normalised on load.
      */
     private String ttq = "4000";
-    private static final String[] TTQ_CYCLE = {"4000", "C000", "8000"};
+    private static final String[] TTQ_CYCLE = {"4000", "C000", "8000", "3600"};
 
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000041010", "A0000001523010",
@@ -121,9 +123,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
-        // a pref written by an older build can hold "3600", which is not a
-        // valid mode value. Normalise against the cycle so it is never tried.
+        // "3600" is a valid sweep value but never the preferred default, so an
+        // old pref that holds it is normalised back to 4000. Anything not in the
+        // cycle at all also falls back to the first entry.
         ttq = prefs.getString(TTQ_KEY, "4000");
+        if ("3600".equals(ttq)) ttq = "4000";
         if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
         buildUi();
         nfc = NfcAdapter.getDefaultAdapter(this);
@@ -190,12 +194,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     }
 
     private void updateHint() {
+        String mode;
+        if ("8000".equals(ttq))           mode = " - magstripe only: format 1, no records, no cryptogram.";
+        else if ("C000".equals(ttq))      mode = " - both modes: the card chooses.";
+        else if ("3600".equals(ttq))      mode = " - no mode bit: the card may fall back to MSD.";
+        else                              mode = " - EMV mode: format 2, an AFL, records and a real ARQC.";
         txtHint.setText("Hold the physical card flat against the back of the phone,\n"
                 + "and keep it still until it says USE CARD.\n"
                 + "One read per tap. PPSE, GPO, records, then GENERATE AC.\n"
-                + "TTQ " + ttq + ("8000".equals(ttq)
-                    ? " - magstripe only: format 1, no records, no cryptogram."
-                    : " - EMV mode: format 2, an AFL, records and a real ARQC.")
+                + "TTQ " + ttq + mode
                 + "\nTap the TTQ button to switch.");
     }
 
@@ -407,7 +414,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
-                if (sfi < 1 || sfi > 10 || first < 1 || first > 31) continue;
+                // FIX: EMV allows SFI 1..30, not 1..10. Records on SFI 11+ were
+                // silently skipped.
+                if (sfi < 1 || sfi > 30 || first < 1 || first > 31) continue;
                 if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
                     try {
@@ -545,7 +554,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     /**
      * An AFL entry's first byte is SFI<<3, so the low three bits are zero and the
-     * SFI is 1..10. A track 2 starts with two BCD PAN digits, which rarely
+     * SFI is 1..30. A track 2 starts with two BCD PAN digits, which rarely
      * satisfies that. This is what tells an AIP + track 2 payload apart from an
      * AIP + AFL one when there is no 57 tag to go on.
      */
@@ -556,7 +565,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int first = b[i + 1] & 0xFF;
             int last = b[i + 2] & 0xFF;
             if ((b[i] & 0x07) != 0) return false;
-            if (sfi < 1 || sfi > 10) return false;
+            if (sfi < 1 || sfi > 30) return false;
             if (first < 1 || first > 31) return false;
             if (last < first || last > 31) return false;
         }
@@ -759,9 +768,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     /**
      * Builds the data for a tag/length template - the PDOL or the CDOL1, same
      * shape. Every entry emits exactly `len` bytes, so the card's parser can
-     * never desync. Each tag is logged with its length and the value sent, the
-     * built total is checked against the declared total, and a template that
-     * does not parse cleanly is named.
+     * never desync. Each tag is logged with its length and the bytes ACTUALLY
+     * SENT, the built total is checked against the declared total, and a
+     * template that does not parse cleanly is named.
+     *
+     * FIX: the log used to print defaultFor()'s return value, not what was
+     * written. A 2-byte TTQ in a 4-byte slot therefore printed as "len 4 = 4000"
+     * - which reads like a 2-byte field - and sent two readers chasing a desync
+     * that was not there. The padded array is logged now, and a value longer
+     * than its slot is truncated visibly instead of silently.
      */
     private byte[] buildCdolData(byte[] template) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -792,17 +807,19 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             declared += len;
 
             byte[] v = defaultFor(tag, len);
-            String hex = bytesToHex(v);
-            if (!knownTag(tag)) {
-                log("   PDOL tag " + String.format(Locale.US, "%04X", tag)
-                        + " len " + len + " NOT in table -> " + hex);
+            byte[] emit = new byte[len];
+            System.arraycopy(v, 0, emit, 0, Math.min(v.length, len));
+            String hex = bytesToHex(emit);
+            String tn = String.format(Locale.US, "%04X", tag);
+            if (v.length > len) {
+                log("   PDOL tag " + tn + " len " + len + " = " + hex
+                        + "  (value was " + v.length + "B, truncated)");
+            } else if (!knownTag(tag)) {
+                log("   PDOL tag " + tn + " len " + len + " NOT in table -> " + hex);
             } else {
-                log("   PDOL tag " + String.format(Locale.US, "%04X", tag)
-                        + " len " + len + " = " + hex);
+                log("   PDOL tag " + tn + " len " + len + " = " + hex);
             }
-            for (int k = 0; k < len; k++) {
-                out.write(k < v.length ? v[k] : 0);
-            }
+            out.write(emit, 0, emit.length);
         }
         byte[] data = out.toByteArray();
         if (data.length != declared) {
