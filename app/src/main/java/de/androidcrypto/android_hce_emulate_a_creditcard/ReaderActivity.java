@@ -90,6 +90,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             "9F66=36000000;DF70=01;DF71=0001;DF72=0001",
     };
 
+    /** raw whole GPO data, used verbatim - bypasses PDOL building entirely */
+    private static final String[] RAW = {
+            "8300",
+            "830000000000000000000000000000000000",
+            "0000000000000000000000000000000000",
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    };
+
     private SharedPreferences prefs;
     private NfcAdapter nfc;
 
@@ -495,6 +503,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     /**
      * Flat plan, cursor persisted, 16 steps per tap:
+     *   kind 6 = raw whole payload (bypasses PDOL)
      *   kind 5 = preset whole payload
      *   kind 4 = command shape (no Le, CLA 00, P2 01)
      *   kind 1 = one entry overridden
@@ -507,6 +516,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         byte[] canon = buildCdolData(pdolTemplate);
 
         List<int[]> plan = new ArrayList<>();
+        for (int r = 0; r < RAW.length; r++) plan.add(new int[]{6, r, 0});
         for (int p = 0; p < PRESETS.length; p++) plan.add(new int[]{5, p, 0});
         for (int c = 0; c < 3; c++) plan.add(new int[]{4, c, 0});
         for (int e : orderedEntries(pdolTemplate, n)) {
@@ -530,7 +540,12 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             byte[] d;
             byte[] cmd = null;
 
-            if (s[0] == 5) {
+            if (s[0] == 6) {
+                variantEntry = -1;
+                ttq = "4000";
+                d = hexToBytes(RAW[s[1]]);
+                desc = "raw " + RAW[s[1]];
+            } else if (s[0] == 5) {
                 String spec = PRESETS[s[1]];
                 variantEntry = -1;
                 ttq = "4000";
