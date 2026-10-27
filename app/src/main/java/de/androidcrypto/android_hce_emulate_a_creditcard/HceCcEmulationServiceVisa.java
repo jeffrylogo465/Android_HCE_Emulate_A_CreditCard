@@ -174,6 +174,30 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return prefs().getInt(sel() + "msd", 0) == 1;
     }
 
+    // ---------- card fields, normalised once ----------
+
+    /**
+     * FIX: PAN and PSN were being read with two different defaults in two
+     * different places - the record said PSN 01 while the ARQC was MACed over
+     * PSN 00. One helper each, used by every caller, so the record and the
+     * cryptogram can never disagree.
+     *
+     * PSN is zero padded, not F padded: hex("1") gives 1F, which is the wrong
+     * byte for a one-digit sequence number.
+     */
+    private String pan() {
+        String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
+        return s.isEmpty() ? "4111111111111111" : s;
+    }
+
+    private String psn() {
+        String s = p("psn", "01").replaceAll("[^0-9]", "");
+        if (s.isEmpty()) return "01";
+        if (s.length() > 2) s = s.substring(0, 2);
+        if (s.length() == 1) s = "0" + s;
+        return s;
+    }
+
     private String nextAtc() {
         int atc = 0x001B;
         try {
@@ -198,9 +222,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         scriptHits = 0;
     }
 
+    /**
+     * FIX: this used to hand back the raw field when gpo() had not run - which
+     * happens whenever a script line serves the GPO. The ARQC was then MACed
+     * over an AIP that was never sent. The mask is applied here too, so the MAC
+     * input matches the wire either way.
+     */
     private byte[] aipForMac() {
-        if (txnAip != null) return txnAip;
-        return hex(p("aip", DEFAULT_AIP));
+        byte[] a = txnAip;
+        if (a == null) {
+            a = hex(p("aip", DEFAULT_AIP));
+            if (a.length >= 2) a = new byte[]{(byte) (a[0] & AIP_ODA_MASK), a[1]};
+        }
+        if (a.length < 2) a = hex(DEFAULT_AIP);
+        return a;
     }
 
     private boolean haveKey() {
@@ -312,8 +347,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
-        // The directory label and the FCI label both come from the card's label
-        // now, so the terminal shows one name instead of two.
         String lbl = p("label", "CARD");
         if (lbl.length() > 16) lbl = lbl.substring(0, 16);
 
@@ -364,8 +397,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
+    /**
+     * FIX: this used to only rewrite 9F2A when it was already there. A captured
+     * FCI that carried no kernel identifier stayed without one, while the
+     * generated FCI has it - so the two paths disagreed about the same card.
+     * It is now added when missing.
+     */
     private byte[] patchA5(byte[] a5, byte[] aid) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
+        boolean sawKernel = false;
         int i = 0;
         while (i < a5.length) {
             int[] q = new int[]{i};
@@ -376,9 +416,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             i = q[0] + l;
 
             if (t == 0x9F2A && v.length >= 1) {
+                sawKernel = true;
                 v = new byte[]{(byte) kernelFor(bytesToHex(aid))};
             }
             byte[] one = tlv(t, v);
+            out.write(one, 0, one.length);
+        }
+        if (!sawKernel) {
+            byte[] one = tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
             out.write(one, 0, one.length);
         }
         return out.toByteArray();
@@ -386,7 +431,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private byte[] afl() {
         String typed = p("afl", "").replaceAll("[^0-9A-Fa-f]", "");
-        if (typed.length() >= 8 && typed.length() % 8 == 0) return hex(typed);
+        if (typed.length() >= 8 && typed.length() % 8 == 0) {
+            tap("-- afl source: typed");
+            return hex(typed);
+        }
 
         TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
         String prefix = sel() + "cap_rec";
@@ -408,9 +456,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
 
         if (map.isEmpty()) {
+            tap("-- afl source: no records - defaulting to SFI 1 rec 1");
             TreeSet<Integer> one = new TreeSet<>();
             one.add(1);
             map.put(1, one);
+        } else {
+            tap("-- afl source: derived from " + map.size() + " SFI(s)");
         }
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -438,9 +489,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         out.write(0x00);
     }
 
+    /**
+     * FIX: a five digit value used to fall through every branch and land on the
+     * hardcoded 311201. Anything at least four long is now treated as YYMM with
+     * a day appended.
+     */
     private String expiry6() {
         String d = p("expiry", "3112").replaceAll("[^0-9]", "");
-        if (d.length() == 6) return d;
+        if (d.length() >= 6) return d.substring(0, 6);
+        if (d.length() == 5) return d.substring(0, 4) + "01";
         if (d.length() == 4) return d + "01";
         if (d.length() == 2) return "27" + d + "01";
         return "311201";
@@ -454,7 +511,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             String exp = expiry6();
             String svc = p("service", "201").replaceAll("[^0-9]", "");
             while (svc.length() < 3) svc = "0" + svc;
-            t = p("pan", "4111111111111111").replaceAll("[^0-9]", "")
+            t = pan()
                     + "D"
                     + exp.substring(0, 4)
                     + svc.substring(0, 3)
@@ -466,11 +523,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     private byte[] syntheticRecord() {
-        String pan = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
+        String pan = pan();
         String exp = expiry6();
-        String psn = p("psn", "01").replaceAll("[^0-9]", "");
-        if (psn.length() > 2) psn = psn.substring(0, 2);
-        if (psn.isEmpty()) psn = "01";
+        String psn = psn();
         if (pan.length() % 2 != 0) pan += "F";
 
         byte[] h = holder();
@@ -495,7 +550,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int p1  = apdu[2] & 0xFF;
             int p2  = apdu[3] & 0xFF;
 
-            boolean isSelect = (ins == 0xA4 && (p1 == 0x04 || p1 == 0x00));
+            // FIX: any P1 now counts. A SELECT with P1 02 used to fall through
+            // every branch and get 6A82.
+            boolean isSelect = (ins == 0xA4);
 
             if (isSelect && apdu.length >= 5) {
                 int lc0 = apdu[4] & 0xFF;
@@ -514,17 +571,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
             tap(">> " + bytesToHex(apdu));
 
-            // Script first. A line that names this command wins outright and the
-            // handler below never runs - so a scripted GPO bypasses gpo(), and
-            // with it the MSD flag, the AIP field and the derived AFL.
             String hit = scriptMatch(apdu);
             if (hit != null) {
                 byte[] out = hex(hit);
                 scriptHits++;
 
-                // A response whose last two bytes are not a status word gets 9000
-                // appended. Putting 9000 on its own line is the classic way to
-                // lose it, and the terminal then reads payload as the SW.
                 if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
                     tap("-- script response had no status word - appended 9000");
                     out = cat(out, SW_OK);
@@ -599,11 +650,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return cat(patchFci(captured, name), SW_OK);
         }
 
-        // The generated FCI now matches what patchA5() maintains for a captured
-        // one: it carries 9F2A. Telling the terminal "kernel 2" in the directory
-        // and then not repeating it in the FCI left the kernel with nothing to
-        // confirm against. 9F11 and 9F12 come along because every real card's FCI
-        // has them and this one looked bare next to a capture.
         String label = p("label", "CARD");
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
@@ -616,6 +662,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return cat(tlv(0x6F, inner), SW_OK);
     }
 
+    /**
+     * FIX: the magstripe branch used to wrap the track 2 in a 57 TLV and send no
+     * AFL. Format 1 is a flat payload - 80 <len> <AIP 2> <AFL> <raw track 2> -
+     * so the inner 57 header made the terminal mis-read the split, and the
+     * missing AFL meant it could never reach a record for the cardholder name.
+     */
     private byte[] gpo() {
         byte[] raw = rawGpo();
 
@@ -641,7 +693,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(masked) + " afl=" + bytesToHex(a));
 
         if (msd) {
-            return cat(tlv(0x80, cat(masked, tlv(0x57, track2()))), SW_OK);
+            return cat(tlv(0x80, cat(masked, a, track2())), SW_OK);
         }
         return cat(tlv(0x77, cat(tlv(0x82, masked), tlv(0x94, a))), SW_OK);
     }
@@ -745,8 +797,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             byte[] macIn = ((variant & 2) != 0)
                     ? cat(aipForMac(), hex(atc), cdol)
                     : cat(cdol, aipForMac(), hex(atc));
-            return EmvCrypto.arqc(mk, p("pan", "4111111111111111"),
-                    p("psn", "00"), atc, macIn, variant & 1);
+            return EmvCrypto.arqc(mk, pan(), psn(), atc, macIn, variant & 1);
         } catch (Exception e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
@@ -809,12 +860,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return v;
     }
 
+    /**
+     * FIX: verdict() was computed AFTER resetTransaction(), which zeroes
+     * scriptHits - so the "script hit Nx" suffix could never appear. The verdict
+     * is now taken while the tap counters are still live.
+     */
     @Override
     public void onDeactivated(int reason) {
-        resetTransaction();
-
         final String t = tapLog.toString();
         final String v = verdict();
+        resetTransaction();
+
         if (!t.isEmpty()) {
             try {
                 ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
