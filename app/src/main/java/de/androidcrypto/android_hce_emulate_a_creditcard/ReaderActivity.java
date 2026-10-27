@@ -43,20 +43,15 @@ import java.util.Random;
  * All of these live under the "cap_" prefix, which copyStagingToCard() moves to
  * "card<N>_cap_...".
  *
- * TTQ. There is ONE field, ttq, read by the hint, the log, the button and
- * defaultFor(), and persisted so a good value survives a restart. 0x36 sets
- * neither the magstripe (0x80) nor the EMV (0x40) bit, so it is kept only as a
- * last-resort sweep value; the preferred cycle is 4000 / C000 / 8000. A stale
- * "3600" pref is normalised to 4000 on load.
+ * TTQ. One field, ttq, persisted and normalised on load. 0x36 sets neither mode
+ * bit, so it is a sweep value only; the cycle is 4000 / C000 / 8000.
  *
- * A 6A80 from every value means the problem is a PDOL *value*, not the mode -
- * so gpoWithRetry() does not stop at the mode. It sweeps the mode, then the
- * Discover-proprietary trio (DF70/DF71/DF72), then probes all-zero data and a
- * case-3 GPO (no Le). The log names every attempt with its SW, so the accepted
- * combination identifies the field the card wanted.
- *
- * EVERY AID in the PPSE is tried, not just the first: a card whose first app
- * refuses the GPO gets its next app selected instead of being abandoned.
+ * A 6A80 from every value means the problem is a PDOL *value*. Rather than keep
+ * guessing which one, gpoWithRetry() ends with a BRUTE FORCE: it builds the data
+ * once, then walks one byte at a time through 0x00..0xFF for the TTQ and for
+ * each byte of the Discover-proprietary trio, resending the GPO each time. If
+ * the card wants any single byte at a particular value, this finds it and says
+ * which. Every AID in the PPSE is tried, not just the first.
  */
 public class ReaderActivity extends AppCompatActivity implements NfcAdapter.ReaderCallback {
 
@@ -76,36 +71,19 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PPSE = "325041592E5359532E4444463031";
     private static final String TTQ_KEY = "readerttq";
 
-    /**
-     * Used only when the card's FCI carries no 9F38 at all, so a GPO is not sent
-     * with an empty data field the card never agreed to. Standard contactless
-     * PDOL shape.
-     */
     private static final String DEFAULT_PDOL =
             "9F66029F02069F03069F1A025F2A029F37049F35019F45029F4C089F34039F2103";
 
-    /**
-     * TTQ sent inside the PDOL.
-     *   0x80 magstripe mode supported   0x40 EMV mode supported
-     *
-     * 4000 = EMV mode only. Format 2, an AFL, records and a real GENERATE AC -
-     *        this is the read the clone and the key scan actually need.
-     * C000 = both modes, the card chooses.
-     * 8000 = magstripe only. Format 1, no AFL, no records, no cryptogram.
-     * 3600 = neither mode bit set. Sweep value only, and LAST.
-     *
-     * First in the cycle is the default. Persisted, and normalised on load.
-     */
     private String ttq = "4000";
     private static final String[] TTQ_CYCLE = {"4000", "C000", "8000", "3600"};
 
     private static final String[] FALLBACK_AIDS = {
             "A0000000031010", "A0000000032010", "A0000000041010",
-            "A0000000043060", "A0000001523010", "A0000000250101",
-            "A0000000651010", "A000000333010101", "A0000003841010"
+            "A0000000043060", "A0000001523010", "A0000001524010",
+            "A0000000250101", "A0000000651010", "A000000333010101",
+            "A0000003841010"
     };
 
-    // sweep overrides, null when the table's own value is used
     private String ovTtq;
     private String ovTrio;
 
@@ -126,9 +104,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREF, MODE_PRIVATE);
-        // "3600" is a valid sweep value but never the preferred default, so an
-        // old pref that holds it is normalised back to 4000. Anything not in the
-        // cycle at all also falls back to the first entry.
         ttq = prefs.getString(TTQ_KEY, "4000");
         if ("3600".equals(ttq)) ttq = "4000";
         if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
@@ -298,8 +273,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             for (String a : FALLBACK_AIDS) aids.add(hexToBytes(a));
         }
 
-        // Every AID is attempted: a card whose first app refuses the GPO gets
-        // its next app selected rather than the read being abandoned.
         log("-- SELECT AID");
         byte[] fci = null;
         byte[] gpo = null;
@@ -316,7 +289,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
             stage("cap_rawfci", bytesToHex(fci));
             stage("cap_aid", rAid);
-            // the FCI in full: 9F38 in place, plus any 9F42/9F51 it carries.
             log("   FCI " + bytesToHex(fci));
 
             log("-- GET PROCESSING OPTIONS");
@@ -359,7 +331,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         byte[] aip = null, afl = null;
         if (gpo != null) {
             if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
-                // Format 1: 80 <len> <AIP 2> <payload>. The length can be long form.
                 int l = gpo[1] & 0xFF;
                 int off = 2;
                 if (l == 0x81 && gpo.length > 2) {
@@ -376,11 +347,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                     byte[] rest = Arrays.copyOfRange(gpo, off + 2, end);
                     log("   format 1 - after the AIP: " + bytesToHex(rest));
 
-                    // a track 2 of 16 or 20 bytes is a multiple of four, so an
-                    // AIP + raw track 2 payload was read as an AFL and produced
-                    // nonsense SFIs. looksLikeAfl() checks the one bit pattern an
-                    // AFL entry always has and a track 2 almost never does: the
-                    // low three bits of the first byte are zero (it is SFI<<3).
                     if (rest.length >= 2 && (rest[0] & 0xFF) == 0x57
                             && (rest[1] & 0xFF) == rest.length - 2) {
                         rTrack2 = bcd(Arrays.copyOfRange(rest, 2, rest.length));
@@ -419,8 +385,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
-                // FIX: EMV allows SFI 1..30, not 1..10. Records on SFI 11+ were
-                // silently skipped.
                 if (sfi < 1 || sfi > 30 || first < 1 || first > 31) continue;
                 if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
@@ -557,12 +521,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         });
     }
 
-    /**
-     * An AFL entry's first byte is SFI<<3, so the low three bits are zero and the
-     * SFI is 1..30. A track 2 starts with two BCD PAN digits, which rarely
-     * satisfies that. This is what tells an AIP + track 2 payload apart from an
-     * AIP + AFL one when there is no 57 tag to go on.
-     */
     private static boolean looksLikeAfl(byte[] b) {
         if (b.length < 4 || b.length % 4 != 0) return false;
         for (int i = 0; i + 3 < b.length; i += 4) {
@@ -578,19 +536,18 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     }
 
     /**
-     * The card is refusing something. Rather than guess once, work down a list
-     * of attempts and stop at the first that returns 9000:
+     * Work down a list of attempts and stop at the first 9000:
      *
      *   1. the mode the button shows, then the rest of the cycle
-     *   2. a sweep of mode x the Discover-proprietary trio (DF70/DF71/DF72)
+     *   2. a sweep of mode x the Discover-proprietary trio
      *   3. all-zero PDOL data - does the card only care about length?
-     *   4. the same data as a case-3 GPO, with no trailing Le
+     *   4. the same data as a case-3 GPO, no trailing Le
      *   5. an empty-data GPO
+     *   6. BRUTE FORCE - one byte at a time, 0x00..0xFF, for the TTQ and for
+     *      each byte of DF70/DF71/DF72. If the card wants any single byte at a
+     *      particular value this finds it and names it.
      *
-     * The log names each attempt with its status word, so the accepted one says
-     * exactly which field the card wanted. The first error is kept and thrown,
-     * not the last, so the reported SW is a real refusal and not the empty-data
-     * 6700. On total failure the preferred mode is restored.
+     * The first error is kept and thrown, so the reported SW is a real refusal.
      */
     private byte[] gpoWithRetry(IsoDep iso, byte[] pdolTemplate) throws IOException {
         final String preferred = ttq;
@@ -668,10 +625,78 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 log("   GPO empty -> " + e.getMessage());
                 if (first == null) first = e;
             }
+
+            // ---- brute force ----
+            log("   -- brute force, 0x00..0xFF per byte --");
+            ovTtq = "4000";
+            ovTrio = "00";
+            int[][] jobs = {
+                    {0x9F66, 0}, {0xDF70, 0}, {0xDF71, 0}, {0xDF71, 1},
+                    {0xDF72, 0}, {0xDF72, 1}
+            };
+            for (int[] j : jobs) {
+                byte[] gpo = brute(iso, pdolTemplate, j[0], j[1]);
+                if (gpo != null) {
+                    ovTtq = null;
+                    ovTrio = null;
+                    return gpo;
+                }
+            }
+            ovTtq = null;
+            ovTrio = null;
         }
 
         accept(preferred);
         throw first != null ? first : new IOException("GPO failed");
+    }
+
+    /**
+     * Build the GPO data once, then walk one byte through 0x00..0xFF, resending
+     * each time. Stops and reports on the first 9000.
+     */
+    private byte[] brute(IsoDep iso, byte[] pdolTemplate, int tag, int byteIdx) {
+        byte[] data = buildCdolData(pdolTemplate);
+        int off = valueOffset(pdolTemplate, tag);
+        if (off < 0 || off + byteIdx >= data.length) {
+            log("   brute " + String.format(Locale.US, "%04X", tag) + " not in the PDOL");
+            return null;
+        }
+        String label = String.format(Locale.US, "%04X", tag) + "[" + byteIdx + "]";
+        for (int v = 0; v <= 0xFF; v++) {
+            data[off + byteIdx] = (byte) v;
+            try {
+                byte[] gpo = send(iso, apdu(0x80, 0xA8, 0x00, 0x00, data, 0x00));
+                log("   GPO brute " + label + "=0x" + String.format(Locale.US, "%02X", v)
+                        + " -> 9000  <-- THIS");
+                return gpo;
+            } catch (IOException ignored) { }
+        }
+        log("   brute " + label + " -> all refused");
+        return null;
+    }
+
+    /** Offset of a tag's value inside the data built from this template. */
+    private static int valueOffset(byte[] t, int want) {
+        int i = 0, off = 0;
+        while (i < t.length) {
+            int tag = t[i++] & 0xFF;
+            if ((tag & 0x1F) == 0x1F) {
+                if (i >= t.length) return -1;
+                tag = (tag << 8) | (t[i++] & 0xFF);
+            }
+            if (i >= t.length) return -1;
+            int len = t[i++] & 0xFF;
+            if ((len & 0x80) != 0) {
+                int n = len & 0x7F;
+                len = 0;
+                for (int k = 0; k < n && i < t.length; k++) {
+                    len = (len << 8) | (t[i++] & 0xFF);
+                }
+            }
+            if (tag == want) return off;
+            off += len;
+        }
+        return -1;
     }
 
     private byte[] sendGpo(IsoDep iso, byte[] pdolTemplate, String what) throws IOException {
@@ -745,7 +770,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         o.write(p1 & 0xFF);
         o.write(p2 & 0xFF);
         if (data.length > 255) {
-            // extended: 00 LcHi LcLo <data> 00 LeHi LeLo
             o.write(0x00);
             o.write((data.length >> 8) & 0xFF);
             o.write(data.length & 0xFF);
@@ -765,8 +789,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         byte[] rsp = iso.transceive(apdu);
         int code = sw(rsp);
 
-        // on an extended APDU the last byte is LeLo, so LeHi has to be
-        // cleared as well or the retry sends 00 xx where it means 00 00 xx.
         if ((code & 0xFF00) == 0x6C00 && apdu.length >= 1) {
             byte[] retry = apdu.clone();
             boolean ext = apdu.length > 6 && (apdu[4] & 0xFF) == 0x00;
@@ -776,7 +798,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             code = sw(rsp);
         }
 
-        // 61xx: chain the blocks, bounded, instead of fetching exactly one.
         if ((code & 0xFF00) == 0x6100) {
             ByteArrayOutputStream acc = new ByteArrayOutputStream();
             acc.write(rsp, 0, rsp.length - 2);
@@ -831,19 +852,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 || t == 0xBF0C || t == 0xBF0D;
     }
 
-    /**
-     * Builds the data for a tag/length template - the PDOL or the CDOL1, same
-     * shape. Every entry emits exactly `len` bytes, so the card's parser can
-     * never desync. Each tag is logged with its length and the bytes ACTUALLY
-     * SENT, the built total is checked against the declared total, and a
-     * template that does not parse cleanly is named.
-     *
-     * FIX: the log used to print defaultFor()'s return value, not what was
-     * written. A 2-byte TTQ in a 4-byte slot therefore printed as "len 4 = 4000"
-     * - which reads like a 2-byte field - and sent two readers chasing a desync
-     * that was not there. The padded array is logged now, and a value longer
-     * than its slot is truncated visibly instead of silently.
-     */
     private byte[] buildCdolData(byte[] template) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int declared = 0;
@@ -890,12 +898,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         byte[] data = out.toByteArray();
         if (data.length != declared) {
             log("   !! PDOL LENGTH DESYNC: built " + data.length
-                    + " card declared " + declared + "  <-- this alone is 6A80");
+                    + " card declared " + declared);
         }
         return data;
     }
 
-    /** "9F66(2) 9F02(6) ..." - the tag list, readable even when the hex is long. */
     private static String describePdol(byte[] t) {
         if (t == null) return "(none)";
         StringBuilder sb = new StringBuilder();
@@ -928,7 +935,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             case 0x9F6E: case 0x9F45: case 0x9F4C: case 0x9F1C: case 0x9F4E:
             case 0x9F15: case 0x9F39: case 0x9F41: case 0x9F09: case 0x9F08:
             case 0x9F4D: case 0x9F5A:
-            // the Discover-proprietary trio this card's PDOL asks for
             case 0xDF70: case 0xDF71: case 0xDF72:
                 return true;
             default:
@@ -938,10 +944,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private byte[] defaultFor(int tag, int len) {
         switch (tag) {
-            case 0x9F02: return hexToBytes("000000001000");   // amount, 10.00
-            case 0x9F03: return hexToBytes("000000000000");   // amount, other
-            case 0x9F1A: return hexToBytes("0840");           // country, US
-            case 0x5F2A: return hexToBytes("0840");           // currency, USD
+            case 0x9F02: return hexToBytes("000000001000");
+            case 0x9F03: return hexToBytes("000000000000");
+            case 0x9F1A: return hexToBytes("0840");
+            case 0x5F2A: return hexToBytes("0840");
             case 0x9A: {
                 Calendar c = Calendar.getInstance();
                 return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
@@ -949,37 +955,35 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                         c.get(Calendar.MONTH) + 1,
                         c.get(Calendar.DAY_OF_MONTH)));
             }
-            case 0x9C: return hexToBytes("00");               // purchase
-            case 0x95: return hexToBytes("0000000000");       // TVR
-            case 0x9F21: return hexToBytes("120000");         // time
-            case 0x9F37: {                                    // unpredictable number
+            case 0x9C: return hexToBytes("00");
+            case 0x95: return hexToBytes("0000000000");
+            case 0x9F21: return hexToBytes("120000");
+            case 0x9F37: {
                 byte[] r = new byte[4];
                 new Random().nextBytes(r);
                 return r;
             }
-            case 0x9F35: return hexToBytes("22");             // terminal type
-            case 0x9F33: return hexToBytes("E0F8C8");         // terminal capabilities
-            case 0x9F34: return hexToBytes("1F0002");         // CVM results
-            case 0x9F40: return hexToBytes("F0F0F0F0F0");     // additional caps
-            case 0x9F66: return hexToBytes(ovTtq != null ? ovTtq : ttq);   // TTQ
-            case 0x9F6E: return hexToBytes("00000000");       // third party data
-            case 0x9F45: return hexToBytes("0000");           // data auth code
-            case 0x9F4C: return ascii("TERM0001");            // merchant id
-            case 0x9F1C: return ascii("TERM0001");            // terminal id
-            case 0x9F4E: return ascii("SHOP");                // merchant name
-            case 0x9F15: return hexToBytes("5411");           // merchant category
-            case 0x9F39: return hexToBytes("02");             // POS entry mode
-            case 0x9F41: return hexToBytes("0001");           // txn seq counter
-            case 0x9F09: return hexToBytes("0002");           // app version
-            case 0x9F08: return hexToBytes("008C");           // ic version
-            case 0x9F4D: return hexToBytes("0000");           // log entry
-            case 0x9F5A: return hexToBytes("00");             // app program id
-            // Discover-proprietary, unknown semantics. Swept when the GPO is
-            // refused so the card tells us which set it accepts.
+            case 0x9F35: return hexToBytes("22");
+            case 0x9F33: return hexToBytes("E0F8C8");
+            case 0x9F34: return hexToBytes("1F0002");
+            case 0x9F40: return hexToBytes("F0F0F0F0F0");
+            case 0x9F66: return hexToBytes(ovTtq != null ? ovTtq : ttq);
+            case 0x9F6E: return hexToBytes("00000000");
+            case 0x9F45: return hexToBytes("0000");
+            case 0x9F4C: return ascii("TERM0001");
+            case 0x9F1C: return ascii("TERM0001");
+            case 0x9F4E: return ascii("SHOP");
+            case 0x9F15: return hexToBytes("5411");
+            case 0x9F39: return hexToBytes("02");
+            case 0x9F41: return hexToBytes("0001");
+            case 0x9F09: return hexToBytes("0002");
+            case 0x9F08: return hexToBytes("008C");
+            case 0x9F4D: return hexToBytes("0000");
+            case 0x9F5A: return hexToBytes("00");
             case 0xDF70: return hexToBytes(ovTrio != null ? ovTrio : "01");
             case 0xDF71: return hexToBytes(ovTrio != null ? ovTrio + ovTrio : "0001");
             case 0xDF72: return hexToBytes(ovTrio != null ? ovTrio + ovTrio : "0001");
-            default: return new byte[len];                    // zeros, right length
+            default: return new byte[len];
         }
     }
 
