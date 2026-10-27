@@ -28,11 +28,19 @@ import android.widget.Toast;
  * also USED, so the screen opens the card you long-pressed rather than whatever
  * happens to be selected.
  *
+ * NEW: this screen now also prints the TAIL OF THE TERMINAL TAP LOG. The phone
+ * is its own reader when a real till is in front of it, and the service writes
+ * every APDU the terminal sends to term_log.txt. So one phone is enough: tap the
+ * terminal, long-press the card count, read it here, hit COPY.
+ *
  * Bare keys are still tried as a fallback, so opening this mid-read works.
  */
 public class CaptureActivity extends Activity {
 
     public static final String EXTRA_CARD_INDEX = "card_index";
+
+    /** Must match HceCcEmulationServiceVisa.TERM_LOG. */
+    private static final String TERM_LOG = "term_log.txt";
 
     private SharedPreferences prefs;
     private TextView txtInfo;
@@ -63,7 +71,7 @@ public class CaptureActivity extends Activity {
         findViewById(R.id.btnCapClear).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 clear();
-                Toast.makeText(CaptureActivity.this, "Cleared", Toast.LENGTH_SHORT).show();
+                Toast.makeText(CaptureActivity.this, "Cleared capture and tap log", Toast.LENGTH_SHORT).show();
                 txtInfo.setText(build());
             }
         });
@@ -101,13 +109,23 @@ public class CaptureActivity extends Activity {
             if (k.startsWith(slot + "cap_") || k.startsWith("cap_")) e.remove(k);
         }
         e.apply();
+        // NEW: also drop the terminal log, so the next tap starts clean.
+        try {
+            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
+            if (f.exists()) f.delete();
+        } catch (Exception ignored) { }
     }
 
     private static String dash(String s) {
         return (s == null || s.isEmpty()) ? "-" : s;
     }
 
+    /** Everything: the capture, then the terminal tap log. */
     private String build() {
+        return buildCapture() + termLogSection();
+    }
+
+    private String buildCapture() {
         resolveSlot();
 
         String fci   = get("cap_rawfci");
@@ -158,6 +176,45 @@ public class CaptureActivity extends Activity {
         sb.append("FCI (").append(fci.length() / 2).append(" bytes):\n").append(fci).append("\n\n");
         sb.append("GPO (").append(gpo.length() / 2).append(" bytes):\n").append(gpo).append("\n\n");
         sb.append("GENERATE AC (").append(genac.length() / 2).append(" bytes):\n").append(genac).append('\n');
+        return sb.toString();
+    }
+
+    /**
+     * NEW. The tail of the terminal tap log - what a real till actually sent us
+     * and what we answered. This is the whole point of the screen when there is
+     * no second phone to run the reader app on.
+     *
+     * Capped at the last 8 KB so the TextView stays usable.
+     */
+    private String termLogSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n\n========================================\n");
+        sb.append("TERMINAL TAP LOG  (last 8 KB)\n");
+        sb.append("What a real terminal sent, and our reply.\n");
+        sb.append(">> 80A8 = GPO    >> 00B2 = READ RECORD    >> 80AE = GENERATE AC\n");
+        sb.append("If it stops after 80A8 there is no READ RECORD.\n");
+        sb.append("The !! verdict line names where it quit.\n");
+        sb.append("========================================\n\n");
+
+        java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
+        if (!f.exists() || f.length() == 0) {
+            sb.append("(empty - tap a real terminal, then come back here)\n");
+            return sb.toString();
+        }
+
+        try {
+            long keep = Math.min(f.length(), 8192);
+            byte[] buf = new byte[(int) keep];
+            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+            raf.seek(f.length() - keep);
+            raf.readFully(buf);
+            raf.close();
+
+            if (f.length() > keep) sb.append("...(").append(f.length() - keep).append(" bytes trimmed)\n");
+            sb.append(new String(buf, "UTF-8"));
+        } catch (Exception e) {
+            sb.append("could not read the log: ").append(e).append('\n');
+        }
         return sb.toString();
     }
 }
