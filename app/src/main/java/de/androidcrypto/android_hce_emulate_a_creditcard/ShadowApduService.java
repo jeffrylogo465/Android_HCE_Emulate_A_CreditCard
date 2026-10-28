@@ -149,7 +149,7 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    private static final String CVMLIST = "00000000000000001F00";
+    private static final String CVMLIST = "00000000000000001E031F00";
 
     /**
      * Used when the selected card has no script of its own. One per line:
