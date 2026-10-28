@@ -21,11 +21,17 @@ jobs:
           java-version: 17
 
       - uses: android-actions/setup-android@v3
-        with:
-          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
 
-      - name: Show installed platforms
-        run: ls "$ANDROID_HOME/platforms"
+      - name: Install Android SDK platform 34
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - name: Verify the platform jar carries the HCE classes
+        run: |
+          ls -1 "$ANDROID_HOME/platforms"
+          echo "--- cardEmulation entries in android-34/android.jar:"
+          unzip -l "$ANDROID_HOME/platforms/android-34/android.jar" | grep -c 'cardEmulation' || true
 
       - name: Build debug APK
         run: |
@@ -33,6 +39,7 @@ jobs:
           ./gradlew assembleDebug
 
       - uses: actions/upload-artifact@v5
+        if: always()
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
