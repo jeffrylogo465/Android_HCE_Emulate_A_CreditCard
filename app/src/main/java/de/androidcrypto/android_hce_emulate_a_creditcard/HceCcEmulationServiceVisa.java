@@ -36,18 +36,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final String AC_FILLER = "FFFFFFFFFFFFFFFF";
 
     /**
-     * Keep the CDA bit and put a hash in 9F4B rather than claiming nothing.
+     * CDA with a fake SDAD.
      *
-     * A real CDA signature needs the ICC private key, which a clone has not got.
-     * The bit only tells the terminal to LOOK, and most kernels do not verify -
-     * they check the length and carry on. The value is SHA-256 over the AIP, ATC,
-     * PDOL data and PAN, cut to 8 bytes: right shape, not verifiable, and every
-     * log line says sdad=fake so it is never mistaken for real.
+     * TURNED OFF. A tap got all the way to GENERATE AC, we answered TC, and the
+     * terminal beeped and died with no message. A beep with no DECLINED is a
+     * kernel abort, not a decline - and the only thing in the response that a
+     * kernel can fail on silently is the SDAD it just tried to verify.
      *
-     * Skipped on format 1 (no TLV structure to append into) and on a FOREIGN AID
-     * (the AIP bits belong to another kernel).
+     * With this false the GPO carries no CDA bit and no 9F4B, so there is
+     * nothing to verify. Flip it back once the tap completes.
      */
-    private static final boolean CDA_FAKE_SDAD = true;
+    private static final boolean CDA_FAKE_SDAD = false;
 
     private static final String DEFAULT_AIP = "1080";
 
@@ -75,6 +74,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
     private static final boolean FORCE_ONLINE_ARQC = true;
     private static final boolean FORCE_OFFLINE_TC = true;
+
+    /**
+     * NEW. CVM Results for the GENERATE AC response.
+     *
+     * The seeded record offers signature (8E = ...1F00), and a terminal that
+     * performs that CVM expects the card to report it in 9F34. We never sent
+     * one, so a kernel that wanted it had nothing to read.
+     *
+     * 1F = signature, 00 = condition "always", 02 = successful. Matches the
+     * record, so no reseed is needed.
+     */
+    private static final String CVM_RESULTS = "1F0002";
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -114,10 +125,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private int aflEntries;
     private int reqGenP1 = -1;
 
-    /** NEW. The terminal picked an AID on a completely different scheme. */
     private boolean aidForeign;
-
-    /** NEW. The terminal picked a sibling applet on the card's own scheme. */
     private boolean aidSubst;
 
     private static final String TERM_LOG = "term_log.txt";
@@ -284,8 +292,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return a;
     }
 
-    /** The AID actually in play - the picked one if we substituted or went
-     *  foreign, else the card's. The CDA bit must follow this, not the card. */
     private String activeAid() {
         return lastSelAid.isEmpty() ? cardAid() : lastSelAid;
     }
@@ -296,7 +302,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return AIP_CDA_K23;
     }
 
-    /** First five bytes of the AID - the scheme's registered identifier. */
     private static String ridOf(String aid) {
         String a = aid == null ? "" : aid.toUpperCase();
         return a.length() >= 10 ? a.substring(0, 10) : a;
@@ -389,8 +394,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (h.length() > 26) h = h.substring(0, 26);
         return h.getBytes(StandardCharsets.ISO_8859_1);
     }
-
-    // ---------- script overrides ----------
 
     private String scriptRaw() {
         return p("script", DEFAULT_SCRIPT);
@@ -828,21 +831,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
-    /**
-     * CHANGED. Three cases instead of two.
-     *
-     * exact  - the card's own AID, captured FCI.
-     * SIBLING - a different applet on the same RID. Same scheme means the same
-     *           record layout and kernel family, so the captured FCI is served
-     *           under the PICKED AID with 9F2A rewritten to that kernel. Logged
-     *           as AID SUBSTITUTED.
-     * FOREIGN - a different RID entirely. Generated FCI, and gpo() will not
-     *           claim CDA because the AIP belongs to another kernel.
-     *
-     * Before this, a sibling selection dead-ended at a generated FCI with a
-     * generic A5 - no PDOL from the plastic, no record match - and the verdict
-     * called it "not the card".
-     */
     private byte[] select(byte[] apdu) {
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
@@ -919,14 +907,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return cat(tlv(0x6F, inner), SW_OK);
     }
 
-    /**
-     * Replay the captured GPO with the CID rewritten to TC.
-     *
-     * CHANGED. The CDA bit follows the ACTIVE AID, not the card's - on a
-     * substituted sibling the terminal's kernel reads a different bit position.
-     * CDA is claimed only when we are not foreign, because a foreign kernel
-     * interprets the card's AIP bits differently.
-     */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
         boolean msd = isMsd();
@@ -1032,8 +1012,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return new byte[0];
     }
 
-    /** Eight bytes of SHA-256 over the AIP, ATC, PDOL data and PAN. Right shape,
-     *  deterministic, NOT a signature - nothing can verify it. */
     private byte[] fakeSdad(byte[] aip, byte[] pdolData) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
@@ -1284,11 +1262,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac)
                 + (acComputed ? "" : " FILLER"));
 
+        // NEW: 9F34 CVM Results. A kernel that performed a CVM wants a report
+        // here; without one it has performed something the card never
+        // acknowledged.
         byte[] tpl = cat(
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
                 tlv(0x9F26, ac),
-                tlv(0x9F10, hex(iad)));
+                tlv(0x9F10, hex(iad)),
+                tlv(0x9F34, hex(CVM_RESULTS)));
 
         if (cdaClaimed) {
             tpl = cat(tpl, tlv(0x9F4B, fakeSdad(aipForMac(), cdol)));
