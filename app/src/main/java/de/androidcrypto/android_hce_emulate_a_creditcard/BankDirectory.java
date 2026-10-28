@@ -33,6 +33,12 @@ import java.util.ArrayList;
  * Issuer numbers verified October 2026. Matching is longest-prefix-first, so
  * if a BIN turns out to belong to a different issuer, add a longer entry for
  * it and it wins automatically.
+ *
+ * INVARIANT: every row in BINS and NETWORKS has FOUR columns. refresh() reads
+ * the note at index 3, and a short row used to throw
+ * ArrayIndexOutOfBoundsException before the dialog could open - which the
+ * uncaught handler in MainActivity turns into an instant process kill, so the
+ * symptom was "press CALL ISSUER, app dies" with nothing on screen.
  */
 public final class BankDirectory {
 
@@ -54,18 +60,38 @@ public final class BankDirectory {
                     "Mastercard Prepaid, Workplace B2B. Program line is on the card back."},
             {"552433", "Bank of America", "18007329194",
                     "World Mastercard credit."},
+            // NEW. The Discover-BIN Capital One debit. Without this the PAN falls
+            // through to the NETWORKS table and lands on Discover's switchboard,
+            // which cannot read a Capital One balance.
+            {"6011", "Capital One", "18002270507",
+                    "Debit Discover. Ask for the balance option - that is your readback."},
     };
 
-    /** Fallback by network when the BIN is not in the table above. */
+    /**
+     * Fallback by network when the BIN is not in the table above.
+     *
+     * FIX: these rows carried only three columns. refresh() reads hit[3] for
+     * the note, so ANY card whose BIN missed BINS threw
+     * ArrayIndexOutOfBoundsException and killed the app. Four columns on every
+     * row now, and refresh() still guards in case one is added short later.
+     */
     private static final String[][] NETWORKS = {
-            {"34", "American Express", "18005284800"},
-            {"37", "American Express", "18005284800"},
-            {"4", "Visa", "18008472911"},
-            {"5", "Mastercard", "18006278372"},
-            {"2", "Mastercard", "18006278372"},
-            {"6011", "Discover", "18003472683"},
-            {"65", "Discover", "18003472683"},
-            {"62", "Discover", "18003472683"},
+            {"34", "American Express", "18005284800",
+                    "Network line - Amex is its own issuer, so this reaches them."},
+            {"37", "American Express", "18005284800",
+                    "Network line - Amex is its own issuer, so this reaches them."},
+            {"4", "Visa", "18008472911",
+                    "Visa switchboard - usually no balance, only a general line."},
+            {"5", "Mastercard", "18006278372",
+                    "Mastercard switchboard - usually no balance, only a general line."},
+            {"2", "Mastercard", "18006278372",
+                    "Mastercard switchboard - usually no balance, only a general line."},
+            {"6011", "Discover", "18003472683",
+                    "Discover switchboard - no balance for a co-branded debit."},
+            {"65", "Discover", "18003472683",
+                    "Discover switchboard - no balance for a co-branded debit."},
+            {"62", "Discover", "18003472683",
+                    "Discover switchboard - no balance for a co-branded debit."},
     };
 
     // ------------------------------------------------------------------ resolve
@@ -187,7 +213,10 @@ public final class BankDirectory {
                 }
                 verdict.setText(hit[1] + (luhn(pan) ? "" : "   (Luhn fails)"));
                 number.setText(pretty(hit[2]));
-                hint.setText(hit[3] + "\n\n"
+                // FIX: hit[3] is guarded. A row without a note used to throw here.
+                String note = hit.length > 3 ? hit[3]
+                        : "Network switchboard - this line will not read your balance.";
+                hint.setText(note + "\n\n"
                         + "The IVR will ask for the card number, then usually the last 4 of SSN, "
                         + "the billing ZIP, or the card PIN. A balance readback or \"card is active\" "
                         + "means the account is open. \"Card was replaced\" or \"cancelled\" means dead.");
@@ -201,12 +230,14 @@ public final class BankDirectory {
         });
 
         call.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
+            @Override
+            public void onClick(View v) {
                 dial(host, resolve(panBox.getText().toString()), digits(panBox.getText().toString()));
             }
         });
         copy.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
+            @Override
+            public void onClick(View v) {
                 String pan = digits(panBox.getText().toString());
                 if (pan.isEmpty()) return;
                 ClipboardManager cm = (ClipboardManager) host.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -215,7 +246,8 @@ public final class BankDirectory {
             }
         });
         online.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
+            @Override
+            public void onClick(View v) {
                 String pan = digits(panBox.getText().toString());
                 if (pan.length() < 6) return;
                 try {
