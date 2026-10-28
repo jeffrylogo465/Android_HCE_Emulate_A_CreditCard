@@ -227,7 +227,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * NEW. Rebuild a TLV with every length recomputed, recursively.
+     * Rebuild a TLV with every length recomputed, recursively.
      *
      * The seeded directory came out with two outer lengths one byte too large
      * (A5 26 and 6F 38, each declaring one more byte than followed). A tolerant
@@ -236,12 +236,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      *
      * Rebuilding on the way out repairs any capture, seeded or real, and it
      * covers records as well as the directory.
+     *
+     * A format 1 (0x80) template is NOT TLV inside - it is AIP bytes followed by
+     * track 2 - so it is copied through with only its own length recomputed.
+     * Parsing it as TLV reads the second AIP byte as a length and empties it.
      */
     private static byte[] relength(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         int olen = readLen(tpl, pos);
         int end = Math.min(tpl.length, pos[0] + olen);
+
+        if (outer == 0x80) {
+            return tlv(0x80, Arrays.copyOfRange(tpl, pos[0], end));
+        }
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = pos[0];
