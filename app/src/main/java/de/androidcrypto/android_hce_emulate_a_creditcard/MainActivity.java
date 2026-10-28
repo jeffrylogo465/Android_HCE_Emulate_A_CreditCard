@@ -46,13 +46,8 @@ public class MainActivity extends AppCompatActivity {
             "Paste a dump anywhere - it fills itself in.\n"
           + "Long-press AID to pick a brand, the card count to see the capture.";
 
-    /**
-     * MAC input variants. Bit 1 swaps the field order, bit 0 picks the
-     * diversification option - the same four combinations KeyFinder sweeps.
-     *
-     * Wrong variant = a correct key tests as a miss, so this is worth being
-     * settable by hand rather than guessed from a decimal/hex heuristic.
-     */
+    /** MAC input variants. Bit 1 swaps field order, bit 0 picks the
+     *  diversification option - the four combinations KeyFinder sweeps. */
     private static final String[][] VARIANTS = {
             {"0", "CDOL, AIP, ATC  -  option 0"},
             {"1", "CDOL, AIP, ATC  -  option 1"},
@@ -256,7 +251,6 @@ public class MainActivity extends AppCompatActivity {
         status("Verdict cleared - tap a till to make a new one");
     }
 
-    /** Shows the last verdict WITH its age, colour-coded by how much to trust it. */
     private void showLastVerdict() {
         String v = prefs.getString("lastverdict", "");
         if (v.isEmpty()) {
@@ -308,6 +302,36 @@ public class MainActivity extends AppCompatActivity {
                 (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
         v.clearFocus();
+    }
+
+    // ---------- BIN hints ----------
+
+    /**
+     * NEW. Fills AID, label and service code from the PAN's BIN.
+     *
+     * Only EMPTY fields are touched, so a value set on purpose is never
+     * overwritten. BankDirectory already knew every BIN on the list; the AID was
+     * the one field still typed by hand, and an AID typo produces a card that
+     * silently never routes - no log line, indistinguishable from a dead reader.
+     */
+    private void applyHints(String pan) {
+        if (pan == null || pan.length() < 6) return;
+        String[] h = BankDirectory.hintsFor(pan);
+        if (h == null) return;
+
+        boolean changed = false;
+        binding = true;
+        if (t(etAid).isEmpty()) { etAid.setText(h[0]); changed = true; }
+        if (t(etLabel).isEmpty()) { etLabel.setText(h[1]); changed = true; }
+        if (t(etService).length() != 3) { etService.setText(h[2]); changed = true; }
+        binding = false;
+
+        if (changed) {
+            collect();
+            adapter.notifyItemChanged(current);
+            status((BankDirectory.knownBin(pan) ? h[4] : h[4] + " (network only)")
+                    + " - AID " + h[0] + " filled from the BIN");
+        }
     }
 
     private void autoFill() {
@@ -366,6 +390,7 @@ public class MainActivity extends AppCompatActivity {
 
         collect();
         adapter.notifyItemChanged(current);
+        applyHints(pan);
     }
 
     private void applyTransforms() {
@@ -602,6 +627,16 @@ public class MainActivity extends AppCompatActivity {
                             + expectedCheckDigit(pan)).append('\n');
             String diff = boxDiff(pan);
             if (diff != null) sb.append("   !! ").append(diff).append('\n');
+
+            String[] h = BankDirectory.hintsFor(pan);
+            if (h != null) {
+                sb.append("   issuer : ").append(h[4]).append("  (").append(h[3]).append(')').append('\n');
+                if (!BankDirectory.knownBin(pan)) {
+                    sb.append("   note   : BIN not in the table - network range only\n");
+                }
+            } else {
+                sb.append("   issuer : unknown range, AID is a guess\n");
+            }
         }
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
         if (exp.length() == 4) expOut = exp + "01";
@@ -645,14 +680,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /**
-     * Drop everything that was read off a plastic, so a re-read starts clean.
-     *
-     * A capture left in place under a changed PAN is worse than no capture: the
-     * AID, FCI, GPO and records all describe the old card, and select() will
-     * happily serve them because cap_aid still matches itself. MSD goes back to
-     * 0 because its old value described the old framing.
-     */
     private void clearCapture() {
         final int i = current;
         new AlertDialog.Builder(this)
@@ -793,7 +820,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /** NEW. Four explicit variants instead of a decimal-vs-hex guess. */
     private void pickKeyVariant() {
         String[] labels = new String[VARIANTS.length];
         for (int i = 0; i < VARIANTS.length; i++) labels[i] = VARIANTS[i][0] + " - " + VARIANTS[i][1];
@@ -1044,6 +1070,15 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        // CHANGED: the BIN table supplies the AID, label and service code. Only
+        // empty fields are filled; the two prefix guesses stay as a fallback for
+        // ranges outside the table.
+        String[] hints = BankDirectory.hintsFor(digits(t(etPan)));
+        if (hints != null) {
+            if (t(etLabel).isEmpty()) etLabel.setText(hints[1]);
+            if (t(etAid).isEmpty()) etAid.setText(hints[0]);
+            if (t(etService).length() != 3) etService.setText(hints[2]);
+        }
         if (t(etLabel).isEmpty()) {
             String b = brandFromPan(digits(t(etPan)));
             if (!b.isEmpty()) etLabel.setText(b);
