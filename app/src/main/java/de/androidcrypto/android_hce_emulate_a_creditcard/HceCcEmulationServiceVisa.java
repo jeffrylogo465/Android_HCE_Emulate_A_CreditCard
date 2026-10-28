@@ -112,15 +112,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      */
     private static final boolean STRIP_AC = false;
 
-    /**
-     * The CID written into the GPO response when STRIP_AC is false.
-     *
-     * 40 = TC   approve offline, the terminal never asks the host  <- this
-     * 80 = ARQC go online, the host judges the cryptogram
-     * 00 = AAC  decline offline
-     */
-    private static final byte GPO_CID = CID_TC_PLACEHOLDER;
-
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
     /**
@@ -137,6 +128,18 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
+
+    /**
+     * The CID written into the GPO response when STRIP_AC is false.
+     *
+     * 40 = TC   approve offline, the terminal never asks the host  <- this
+     * 80 = ARQC go online, the host judges the cryptogram
+     * 00 = AAC  decline offline
+     *
+     * Declared after CID_TC on purpose: a static initialiser that refers to a
+     * later simple name is an illegal forward reference in Java.
+     */
+    private static final byte GPO_CID = CID_TC;
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
     private static final boolean FORCE_ONLINE_ARQC = true;
