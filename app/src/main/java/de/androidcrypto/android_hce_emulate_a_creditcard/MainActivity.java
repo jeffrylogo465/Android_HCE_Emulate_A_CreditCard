@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -1131,11 +1132,7 @@ public class MainActivity extends AppCompatActivity {
             for (String k : prefs.getAll().keySet()) {
                 if (k.startsWith(to)) e.remove(k);
             }
-            for (String k : prefs.getAll().keySet()) {
-                if (k.startsWith(from)) {
-                    e.putString(to + k.substring(from.length()), prefs.getString(k, ""));
-                }
-            }
+            copyBlock(e, from, to);
         }
 
         String last = key(n - 1, "");
@@ -1153,6 +1150,31 @@ public class MainActivity extends AppCompatActivity {
         bindCard(current);
         txtStatus.setText("Card deleted - " + cards.size() + " left");
         showPage(0);
+    }
+
+    /** FIX: copy every key under one prefix to another, keeping the stored TYPE.
+     *
+     *  doDelete() used prefs.getString(k, "") here. 'msd' and 'usescript' are
+     *  written with putInt, SharedPreferences does no coercion, and getAll()
+     *  hands them back as Integer - so the String cast threw
+     *  ClassCastException. Deleting any card below the last one killed the
+     *  activity, which is exactly the fault documented in useScript() and then
+     *  reintroduced here.
+     *
+     *  Reading from getAll() also gives a stable snapshot, so the removes queued
+     *  on the editor cannot pull keys out from under the copy. */
+    private void copyBlock(SharedPreferences.Editor e, String from, String to) {
+        for (Map.Entry<String, ?> en : prefs.getAll().entrySet()) {
+            String k = en.getKey();
+            if (!k.startsWith(from)) continue;
+            String nk = to + k.substring(from.length());
+            Object v = en.getValue();
+            if (v instanceof Integer)      e.putInt(nk, (Integer) v);
+            else if (v instanceof Boolean) e.putBoolean(nk, (Boolean) v);
+            else if (v instanceof Long)    e.putLong(nk, (Long) v);
+            else if (v instanceof Float)   e.putFloat(nk, (Float) v);
+            else if (v != null)            e.putString(nk, v.toString());
+        }
     }
 
     /** FIX: thin wrapper over Luhn.valid(). This file and BankDirectory both
