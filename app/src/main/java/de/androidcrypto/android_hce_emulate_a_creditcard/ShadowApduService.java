@@ -151,6 +151,9 @@ public class ShadowApduService extends HostApduService {
 
     private static final String CVMLIST = "00000000000000001E031F00";
 
+    /** 9F34 CVM Results - no CVM required, if supported, successful. */
+    private static final String CVM_RESULTS = "1E0302";
+
     /**
      * Used when the selected card has no script of its own. One per line:
      *   <match>=<response>
@@ -1242,10 +1245,11 @@ public class ShadowApduService extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         return cat(tlv(0x77, cat(
-                tlv(0x9F27, new byte[]{cid}),
-                tlv(0x9F36, hex(atc)),
+                tlv(0x9F10, hex(iad)),
                 tlv(0x9F26, ac),
-                tlv(0x9F10, hex(iad)))), SW_OK);
+                tlv(0x9F27, new byte[]{cid}),
+                tlv(0x9F34, hex(CVM_RESULTS)),
+                tlv(0x9F36, hex(atc)))), SW_OK);
     }
 
     private byte[] computeAc(String atc, byte[] cdol) {
