@@ -4,7 +4,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.nfc.cardEmulation.HostApduService;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.Toast;
@@ -20,7 +19,7 @@ import java.util.Random;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-public class HceCcEmulationServiceVisa extends HostApduService {
+public class HceCcEmulationServiceVisa extends android.nfc.cardEmulation.HostApduService {
 
     private static final String TAG = "HCE";
 
