@@ -263,6 +263,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         List<byte[]> aids = new ArrayList<>();
         try {
             byte[] fci = send(iso, apdu(0x00, 0xA4, 0x04, 0x00, hexToBytes(PPSE), 0x00));
+            // NEW: keep the card's own directory. The service replays it, so the
+            // clone advertises the applets and labels the plastic does instead of
+            // the ones buildPpse() invents.
+            stage("cap_rawppse", bytesToHex(fci));
             collect(fci, 0x4F, aids);
         } catch (IOException e) {
             log("   PPSE failed: " + e.getMessage());
@@ -309,8 +313,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         collect(fci, 0x9F38, pdolL);
         byte[] pdol = pdolL.isEmpty() ? null : pdolL.get(0);
         if (pdol == null) {
-            log("   no 9F38 on the FCI");
-            return;
+            // FIX: a card with no PDOL is legal and gpoWithRetry already knows
+            // how to send 8300 - it is sitting in RAW. Returning here threw the
+            // whole read away: no GPO, no records, no PAN.
+            log("   no 9F38 on the FCI - sending an empty PDOL");
+            pdol = new byte[0];
         }
         log("   PDOL " + bytesToHex(pdol));
         log("   PDOL entries " + countEntries(pdol) + ", data length " + pdolDataLen(pdol));
@@ -451,7 +458,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         if (cdol1 != null && cdol1.length > 0) {
             log("-- GENERATE AC");
             byte[] cdolData = buildCdolData(cdol1);
-            byte[] cmd = apdu(0x80, 0xAE, 0x00, 0x00, cdolData, 0x00);
+            // FIX: P1 was 0x00, which asks the real card for an AAC - a decline
+            // cryptogram. 0x80 asks for ARQC with no CDA, which is what the card
+            // would produce at a real terminal. The MAC is identical either way,
+            // so the key scan still works, but an ARQC is the honest reference.
+            byte[] cmd = apdu(0x80, 0xAE, 0x80, 0x00, cdolData, 0x00);
             try {
                 byte[] rsp = send(iso, cmd);
                 stage("cap_genaccmd", bytesToHex(cmd));
@@ -773,9 +784,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
      * FIX: the extended branch wrote THREE trailing bytes after the data. An
      * extended APDU is CLA INS P1 P2 00 LcHi LcLo <data> LeHi LeLo - Le is two
      * bytes. The stray third byte sat where the card expected nothing.
-     *
-     * Also fixed the 6Cxx retry below, which compensated at the wrong offset
-     * (retry[len-3]) for the same reason.
      */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
@@ -890,9 +898,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
             declared += len;
 
-            // FIX: knownTag() was dead code. It now names a PDOL entry that has
-            // no table entry, so a card asking for something unusual is visible
-            // in the log instead of silently getting zeroes.
             if (!knownTag(tag)) {
                 log("   note: PDOL tag " + String.format(Locale.US, "%04X", tag)
                         + " not in the table - sending " + len + " zero byte(s)");
@@ -941,10 +946,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                         c.get(Calendar.YEAR) % 100, c.get(Calendar.MONTH) + 1,
                         c.get(Calendar.DAY_OF_MONTH)));
             }
-            // FIX: 9F21 is Transaction Time HHMMSS. It was in knownTag() but had
-            // no case here, so it fell through to zeroes - "000000", valid but
-            // midnight. The old code before that used YEAR/MONTH/DAY, which
-            // produced hour 26.
             case 0x9F21: {
                 Calendar c = Calendar.getInstance();
                 return hexToBytes(String.format(Locale.US, "%02d%02d%02d",
