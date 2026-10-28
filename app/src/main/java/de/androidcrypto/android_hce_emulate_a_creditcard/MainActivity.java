@@ -42,12 +42,16 @@ public class MainActivity extends AppCompatActivity {
     private static final int COL_WARM    = 0xFFF6C177;
     private static final int COL_STALE   = 0xFF6B7280;
 
+    /** Must match the service, or a seeded record and the ARQC MAC disagree. */
+    private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
+    private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
+    private static final String CVMLIST = "00000000000000001F00";
+    private static final String PPSE    = "325041592E5359532E4444463031";
+
     private static final String HINT =
             "Paste a dump anywhere - it fills itself in.\n"
           + "Long-press AID to pick a brand, the card count to see the capture.";
 
-    /** MAC input variants. Bit 1 swaps field order, bit 0 picks the
-     *  diversification option - the four combinations KeyFinder sweeps. */
     private static final String[][] VARIANTS = {
             {"0", "CDOL, AIP, ATC  -  option 0"},
             {"1", "CDOL, AIP, ATC  -  option 1"},
@@ -70,8 +74,6 @@ public class MainActivity extends AppCompatActivity {
             {"Girocard",               "A0000003591010"},
     };
 
-    /** Every <aid-filter> in apduservice.xml, mirrored. Android matches by
-     *  PREFIX, so startsWith() reproduces exactly what the platform routes. */
     private static final String[] ROUTABLE = {
             "325041592E5359532E4444463031",
             "A0000000031010", "A0000000031020", "A0000000032010",
@@ -306,14 +308,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- BIN hints ----------
 
-    /**
-     * NEW. Fills AID, label and service code from the PAN's BIN.
-     *
-     * Only EMPTY fields are touched, so a value set on purpose is never
-     * overwritten. BankDirectory already knew every BIN on the list; the AID was
-     * the one field still typed by hand, and an AID typo produces a card that
-     * silently never routes - no log line, indistinguishable from a dead reader.
-     */
     private void applyHints(String pan) {
         if (pan == null || pan.length() < 6) return;
         String[] h = BankDirectory.hintsFor(pan);
@@ -462,6 +456,17 @@ public class MainActivity extends AppCompatActivity {
         if (aid == null || aid.isEmpty()) return false;
         for (String f : ROUTABLE) if (aid.startsWith(f)) return true;
         return false;
+    }
+
+    private static int kernelOf(String aid) {
+        String a = aid == null ? "" : aid.toUpperCase();
+        if (a.startsWith("A000000152")) return 6;
+        if (a.startsWith("A000000015")) return 6;
+        if (a.startsWith("A000000004")) return 2;
+        if (a.startsWith("A000000065")) return 5;
+        if (a.startsWith("A000000025")) return 4;
+        if (a.startsWith("A000000333")) return 7;
+        return 3;
     }
 
     private void loadAll() {
@@ -675,10 +680,13 @@ public class MainActivity extends AppCompatActivity {
         new AlertDialog.Builder(this)
                 .setTitle("What the terminal will see")
                 .setMessage(previewText())
-                .setPositiveButton("Close", null)
+                .setPositiveButton("SEED RECORDS", (d, w) -> seedRecords())
                 .setNeutralButton("CLEAR CAPTURE", (d, w) -> clearCapture())
+                .setNegativeButton("Close", null)
                 .show();
     }
+
+    // ---------- capture: clear and seed ----------
 
     private void clearCapture() {
         final int i = current;
@@ -688,24 +696,141 @@ public class MainActivity extends AppCompatActivity {
                         + "captured AID and label, and resets MSD to 0.\n\n"
                         + "The PAN, expiry, name and AID fields stay.")
                 .setPositiveButton("Clear", (d, w) -> {
-                    SharedPreferences.Editor e = prefs.edit();
-                    String p = key(i, "cap_");
-                    for (String k : prefs.getAll().keySet()) {
-                        if (k.startsWith(p)) e.remove(k);
+                    wipeCapture(i);
+                    binding = true;
+                    etMsd.setText("0");
+                    binding = false;
+                    collect();
+                    status("Capture cleared - MSD reset to 0, re-read or seed before tapping");
+                    Toast.makeText(this, "Capture cleared", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void wipeCapture(int i) {
+        SharedPreferences.Editor e = prefs.edit();
+        String p = key(i, "cap_");
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(p)) e.remove(k);
+        }
+        e.putInt(key(i, "msd"), 0);
+        e.apply();
+    }
+
+    /**
+     * NEW. Build a usable capture out of the typed fields, with no plastic and
+     * no reader.
+     *
+     * A card that only works after a successful read is a card that dies with
+     * the reader. This writes the two things select() and gpo() actually need -
+     * a one-entry directory advertising the card's own AID, and an SFI 1 record
+     * carrying the PAN, track 2 and the CDOLs - and clears any stale FCI and GPO
+     * so the built GPO path is the one that runs.
+     *
+     * MSD is forced to 0 because the built path frames a 77 template; a leftover
+     * 1 would make gpo() look for an 80 framing that no longer exists.
+     *
+     * The seeded record is not the plastic's. The CVM list is the generic one and
+     * 8C/8D are the service's own CDOLs, so the cryptogram the terminal computes
+     * over is ours - which is the whole point: it is at least consistent.
+     */
+    private void seedRecords() {
+        final int i = current;
+        final String pan = digits(t(etPan));
+        final String aid = t(etAid).toUpperCase();
+
+        if (pan.length() < 12 || pan.length() > 19) {
+            Toast.makeText(this, "Fill a valid PAN first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (aid.isEmpty() || !routable(aid)) {
+            Toast.makeText(this, "Fill a routable AID first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Seed records for card " + (i + 1) + "?")
+                .setMessage("Builds a directory and one SFI 1 record from the fields on "
+                        + "screen, so this card can be tapped without reading a plastic.\n\n"
+                        + "Any existing capture on this card is replaced. The record is "
+                        + "synthetic - the real card's CVM list and discretionary data are "
+                        + "not in it.")
+                .setPositiveButton("Seed", (d, w) -> {
+                    String exp = digits(t(etExpiry));
+                    if (exp.length() != 4) exp = "3112";
+                    String svc = digits(t(etService));
+                    if (svc.length() != 3) svc = "201";
+                    String disc = digits(t(etDiscretionary));
+                    String name = t(etName).toUpperCase()
+                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
+                    if (name.length() > 26) name = name.substring(0, 26);
+
+                    String track2 = pan + "D" + exp + svc + disc;
+
+                    StringBuilder rec = new StringBuilder();
+                    rec.append(tlvHex(0x5A, pan));
+                    rec.append(tlvHex(0x5F34, "01"));
+                    rec.append(tlvHex(0x5F24, exp + "01"));
+                    if (name.length() >= 2) {
+                        rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
                     }
+                    rec.append(tlvHex(0x57, track2));
+                    rec.append(tlvHex(0x8C, CDOL1));
+                    rec.append(tlvHex(0x8D, CDOL2));
+                    rec.append(tlvHex(0x8E, CVMLIST));
+                    String record = tlvHex(0x70, rec.toString());
+
+                    String label = t(etLabel).toUpperCase()
+                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
+                    if (label.length() < 2) label = "CARD";
+                    if (label.length() > 16) label = label.substring(0, 16);
+
+                    String entry = tlvHex(0x4F, aid)
+                            + tlvHex(0x50, bytesToHex(label.getBytes(StandardCharsets.US_ASCII)))
+                            + tlvHex(0x87, "01")
+                            + tlvHex(0x9F2A, String.format("%02X", kernelOf(aid)));
+                    String dir = tlvHex(0x61, entry);
+                    String ppse = tlvHex(0x6F,
+                            tlvHex(0x84, PPSE) + tlvHex(0xA5, tlvHex(0xBF0C, dir)));
+
+                    wipeCapture(i);
+
+                    SharedPreferences.Editor e = prefs.edit();
+                    e.putString(key(i, "cap_rawppse"), ppse);
+                    e.putString(key(i, "cap_rec1_1"), record);
+                    e.putString(key(i, "cap_aid"), aid);
+                    e.putString(key(i, "cap_label"), label);
+                    if (name.length() >= 2) e.putString(key(i, "cap_holder"), name);
                     e.putInt(key(i, "msd"), 0);
                     e.apply();
 
                     binding = true;
                     etMsd.setText("0");
+                    etAfl.setText("");
+                    etCid.setText("");
                     binding = false;
                     collect();
 
-                    status("Capture cleared - MSD reset to 0, re-read before tapping");
-                    Toast.makeText(this, "Capture cleared", Toast.LENGTH_SHORT).show();
+                    status("Seeded 1 record + directory for " + aid + " - MSD 0, tap it");
+                    Toast.makeText(this, "Seeded - long-press the card count to inspect",
+                            Toast.LENGTH_LONG).show();
+                    showPage(0);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** TLV as hex, with proper long-form lengths. */
+    private static String tlvHex(int tag, String hexValue) {
+        byte[] v = hexToBytes(hexValue);
+        String tagH = tag > 0xFF ? String.format("%04X", tag) : String.format("%02X", tag);
+        int n = v.length;
+        String len;
+        if (n < 0x80) len = String.format("%02X", n);
+        else if (n <= 0xFF) len = "81" + String.format("%02X", n);
+        else len = "82" + String.format("%04X", n);
+        return tagH + len + bytesToHex(v);
     }
 
     private static String hexOf(String s) {
@@ -1070,9 +1195,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // CHANGED: the BIN table supplies the AID, label and service code. Only
-        // empty fields are filled; the two prefix guesses stay as a fallback for
-        // ranges outside the table.
         String[] hints = BankDirectory.hintsFor(digits(t(etPan)));
         if (hints != null) {
             if (t(etLabel).isEmpty()) etLabel.setText(hints[1]);
