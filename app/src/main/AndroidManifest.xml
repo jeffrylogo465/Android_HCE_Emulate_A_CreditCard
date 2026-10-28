@@ -10,12 +10,25 @@
     <uses-feature
         android:name="android.hardware.nfc"
         android:required="true" />
+
     <uses-feature
         android:name="android.hardware.nfc.hce"
         android:required="true" />
 
+    <!--
+        allowBackup = FALSE.
+
+        hce_card.xml holds every PAN, every track 2 and any MK-AC found, all in
+        plaintext, in the app-private directory. With backup on, the whole card
+        wallet leaves the device into Google's cloud and returns on any restore
+        or device transfer - on a phone you are cloning cards with, that is the
+        one dataset worth keeping local.
+
+        The two @xml references are kept because they document intent if backup
+        is ever turned back on; with allowBackup false neither is consulted.
+    -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
@@ -34,9 +47,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <activity
             android:name=".ReaderActivity"
             android:exported="false" />
+
         <activity
             android:name=".CaptureActivity"
             android:exported="false" />
