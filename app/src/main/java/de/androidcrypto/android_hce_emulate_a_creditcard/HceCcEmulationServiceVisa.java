@@ -4,7 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.nfc.cardemulation.HostApduService;
+import android.nfc.cardEmulation.HostApduService;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.Toast;
@@ -35,25 +35,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private static final String AC_FILLER = "FFFFFFFFFFFFFFFF";
 
-    /**
-     * CDA with a fake SDAD.
-     *
-     * TURNED OFF. A tap got all the way to GENERATE AC, we answered TC, and the
-     * terminal beeped and died with no message. A beep with no DECLINED is a
-     * kernel abort, not a decline - and the only thing in the response that a
-     * kernel can fail on silently is the SDAD it just tried to verify.
-     *
-     * With this false the GPO carries no CDA bit and no 9F4B, so there is
-     * nothing to verify. Flip it back once the tap completes.
-     */
+    /** CDA with a fake SDAD. Off - the kernel aborted silently on it. */
     private static final boolean CDA_FAKE_SDAD = false;
 
     private static final String DEFAULT_AIP = "1080";
 
     private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
-    /** CDA bit. 0x01 is the Discover/kernel-6 position, 0x02 the Visa/MC/Amex/JCB
-     *  one - a single constant here was wrong for every Mastercard. */
     private static final byte AIP_CDA_K6  = (byte) 0x01;
     private static final byte AIP_CDA_K23 = (byte) 0x02;
 
@@ -75,16 +63,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final boolean FORCE_ONLINE_ARQC = true;
     private static final boolean FORCE_OFFLINE_TC = true;
 
-    /**
-     * NEW. CVM Results for the GENERATE AC response.
-     *
-     * The seeded record offers signature (8E = ...1F00), and a terminal that
-     * performs that CVM expects the card to report it in 9F34. We never sent
-     * one, so a kernel that wanted it had nothing to read.
-     *
-     * 1F = signature, 00 = condition "always", 02 = successful. Matches the
-     * record, so no reseed is needed.
-     */
+    /** 9F34 CVM Results - signature, always, successful. Matches the record. */
     private static final String CVM_RESULTS = "1F0002";
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -245,6 +224,45 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private static byte[] hexOrNull(String s) {
         return (s == null || s.isEmpty()) ? null : hex(s);
+    }
+
+    /**
+     * NEW. Rebuild a TLV with every length recomputed, recursively.
+     *
+     * The seeded directory came out with two outer lengths one byte too large
+     * (A5 26 and 6F 38, each declaring one more byte than followed). A tolerant
+     * parser walks past it; a strict one stops at the outer tag and reports zero
+     * entries - which is exactly "picked NOTHING, 1 applet offered".
+     *
+     * Rebuilding on the way out repairs any capture, seeded or real, and it
+     * covers records as well as the directory.
+     */
+    private static byte[] relength(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen = readLen(tpl, pos);
+        int end = Math.min(tpl.length, pos[0] + olen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            int vs = q[0], ve = q[0] + l;
+            i = ve;
+
+            byte[] v = Arrays.copyOfRange(tpl, vs, ve);
+            if ((t & 0x20) != 0 && v.length > 0) {
+                byte[] child = relength(cat(tlv(t, v)));
+                out.write(child, 0, child.length);
+            } else {
+                byte[] one = tlv(t, v);
+                out.write(one, 0, one.length);
+            }
+        }
+        return tlv(outer, out.toByteArray());
     }
 
     private SharedPreferences prefs() {
@@ -495,6 +513,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(0x6F, inner);
     }
 
+    /**
+     * Replay a captured directory, correcting the 84 and RE-LENGTHING the whole
+     * template. A capture with wrong outer lengths used to be served verbatim
+     * and a strict kernel rejected the entire directory.
+     */
     private byte[] patchPpse(byte[] ppse) {
         int[] pos = new int[1];
         int outer = readTag(ppse, pos);
@@ -518,7 +541,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         byte[] inner = out.toByteArray();
         if (!saw84) inner = cat(tlv(0x84, PPSE), inner);
-        return tlv(outer == 0 ? 0x6F : outer, inner);
+
+        byte[] rebuilt = tlv(outer == 0 ? 0x6F : outer, inner);
+        return relength(rebuilt);
     }
 
     private static int countApps(byte[] fci) {
@@ -586,7 +611,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             byte[] one = tlv(t, v);
             out.write(one, 0, one.length);
         }
-        return tlv(outer, out.toByteArray());
+        return relength(tlv(outer, out.toByteArray()));
     }
 
     private byte[] patchA5(byte[] a5, byte[] aid) {
@@ -844,6 +869,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if (capPpse != null && capPpse.length > 8) {
                 tap("-- ppse source: captured " + capPpse.length + "B");
                 fci = patchPpse(capPpse);
+                tap("-- ppse relengthed to " + fci.length + "B");
             } else {
                 tap("-- ppse source: generated");
                 fci = buildPpse();
@@ -970,7 +996,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 } else {
                     tap("-- gpo replay verbatim len=" + raw.length);
                 }
-                return cat(raw, SW_OK);
+                return cat(relength(raw), SW_OK);
             }
             tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
         }
@@ -1189,7 +1215,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] captured = rawRec(sfi, rec);
         if (captured != null) {
             tap("-- rec sfi=" + sfi + " rec=" + rec + " (captured)");
-            return cat(captured, SW_OK);
+            return cat(relength(captured), SW_OK);
         }
 
         if (sfi == 1) {
@@ -1262,9 +1288,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac)
                 + (acComputed ? "" : " FILLER"));
 
-        // NEW: 9F34 CVM Results. A kernel that performed a CVM wants a report
-        // here; without one it has performed something the card never
-        // acknowledged.
         byte[] tpl = cat(
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
