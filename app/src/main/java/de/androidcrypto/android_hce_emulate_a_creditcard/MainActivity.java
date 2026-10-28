@@ -24,13 +24,15 @@ import androidx.recyclerview.widget.RecyclerView;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final String PREF = "hce_card";
-    private static final int MAX_CARDS = 12;
+    // CHANGED 12 -> 20: the dump list is thirteen cards, one slot short.
+    private static final int MAX_CARDS = 20;
     private static final int REQ_CLONE = 4711;
 
     private static final String HINT =
@@ -146,9 +148,9 @@ public class MainActivity extends AppCompatActivity {
         etScript = findViewById(R.id.etScript);
 
         pageWallet = findViewById(R.id.pageWallet);
-        pageEdit   = findViewById(R.id.pageEdit);
-        navWallet  = findViewById(R.id.navWallet);
-        navEdit    = findViewById(R.id.navEdit);
+        pageEdit = findViewById(R.id.pageEdit);
+        navWallet = findViewById(R.id.navWallet);
+        navEdit = findViewById(R.id.navEdit);
 
         navWallet.setOnClickListener(v -> showPage(0));
         navEdit.setOnClickListener(v -> showPage(1));
@@ -1042,6 +1044,20 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Expiry must be YYMM, e.g. 2803", Toast.LENGTH_LONG).show();
             return;
         }
+        // FIX: four digits is parsed as YYMM, but everyone reads MM/YY off the
+        // card. "0728" became 072801 - 28 July 2007, silently. Reject a year
+        // outside a sane window so the confusion surfaces at save time.
+        try {
+            int expYy = Integer.parseInt(t(etExpiry).substring(0, 2));
+            int thisYy = Calendar.getInstance().get(Calendar.YEAR) % 100;
+            if (expYy < thisYy - 20 || expYy > thisYy + 30) {
+                String m = "Year " + expYy + " looks wrong - field is YYMM, not MMYY";
+                txtStatus.setText(m);
+                Toast.makeText(this, m, Toast.LENGTH_LONG).show();
+                showPage(0);
+                return;
+            }
+        } catch (NumberFormatException ignored) { }
         if (t(etService).length() != 3) {
             Toast.makeText(this, "Service code must be 3 digits", Toast.LENGTH_LONG).show();
             return;
@@ -1169,11 +1185,11 @@ public class MainActivity extends AppCompatActivity {
             if (!k.startsWith(from)) continue;
             String nk = to + k.substring(from.length());
             Object v = en.getValue();
-            if (v instanceof Integer)      e.putInt(nk, (Integer) v);
+            if (v instanceof Integer) e.putInt(nk, (Integer) v);
             else if (v instanceof Boolean) e.putBoolean(nk, (Boolean) v);
-            else if (v instanceof Long)    e.putLong(nk, (Long) v);
-            else if (v instanceof Float)   e.putFloat(nk, (Float) v);
-            else if (v != null)            e.putString(nk, v.toString());
+            else if (v instanceof Long) e.putLong(nk, (Long) v);
+            else if (v instanceof Float) e.putFloat(nk, (Float) v);
+            else if (v != null) e.putString(nk, v.toString());
         }
     }
 
@@ -1183,8 +1199,44 @@ public class MainActivity extends AppCompatActivity {
         return Luhn.valid(s);
     }
 
+    // ---------- payment role ----------
+
+    /**
+     * NEW. Claim the payment role while this screen is in front.
+     *
+     * apduservice.xml uses category="payment" because "other" can never outrank
+     * Google Wallet for the Visa/Mastercard AIDs. The other half of that
+     * combination is being the selected default payment app, and nothing ever
+     * claimed it - so Wallet takes A0000000041010 and the service never sees the
+     * tap at all. No log line, nothing to debug.
+     *
+     * setPreferredService ties the claim to the activity being foreground, so it
+     * cannot outlive the screen that needs it. Throwable, not Exception: the
+     * service plumbing around this has bitten the file before.
+     */
+    private void claimPaymentRole() {
+        try {
+            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
+            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
+            if (nfc == null) return;
+            CardEmulation ce = CardEmulation.getInstance(nfc);
+            ce.setPreferredService(this, new ComponentName(this, HceCcEmulationServiceVisa.class));
+        } catch (Throwable ignored) { }
+    }
+
+    private void releasePaymentRole() {
+        try {
+            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
+            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
+            if (nfc == null) return;
+            CardEmulation ce = CardEmulation.getInstance(nfc);
+            ce.unsetPreferredService(this);
+        } catch (Throwable ignored) { }
+    }
+
     @Override
     protected void onPause() {
+        releasePaymentRole();
         super.onPause();
         collect();
     }
@@ -1192,6 +1244,9 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        // Before the early return - the role must be claimed on every resume,
+        // including the one that comes straight back from the reader.
+        claimPaymentRole();
         if (suppressResumeStatus) {
             suppressResumeStatus = false;
             return;
