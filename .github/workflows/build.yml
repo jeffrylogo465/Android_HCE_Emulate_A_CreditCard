@@ -20,16 +20,17 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install Android SDK platform 34
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$(command -v sdkmanager)"; fi
+          echo "using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
       - name: Verify the platform jar carries the HCE classes
         run: |
-          ls -1 "$ANDROID_HOME/platforms"
+          ls -1 "$ANDROID_HOME/platforms" || true
           echo "--- cardEmulation entries in android-34/android.jar:"
           unzip -l "$ANDROID_HOME/platforms/android-34/android.jar" | grep -c 'cardEmulation' || true
 
