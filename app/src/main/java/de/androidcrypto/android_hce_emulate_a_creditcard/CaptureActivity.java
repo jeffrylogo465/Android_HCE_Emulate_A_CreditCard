@@ -14,26 +14,22 @@ import android.widget.Toast;
 /**
  * Debug view of the stored capture for one card slot.
  *
- * CHANGED. This used to read BARE cap_* keys. But MainActivity.copyStagingToCard()
- * moves bare cap_* into card<N>_cap_* and then DELETES the bare ones - so after
- * any successful clone this screen said "No capture stored" forever.
+ * Reads card<N>_cap_* - MainActivity.copyStagingToCard() moves bare cap_* into
+ * the slot and deletes the bare ones, so bare keys are only a mid-read fallback.
  *
- * It also asked for six keys the reader never writes: cap_rawppse, cap_pan,
- * cap_expiry, cap_service, cap_track2, cap_discretionary. Those lines were
- * permanently "-". They are now read from the card slot, where collect()
- * actually stores them.
+ * NEW in this revision: a READINESS block at the top. The screen used to list
+ * the capture and leave you to work out whether it was usable. Every one of the
+ * following silently costs you a tap, and none of them were visible:
  *
- * EXTRA_CARD_INDEX is declared here because MainActivity's launch hook passes
- * it - without the constant the build failed with "cannot find symbol". It is
- * also USED, so the screen opens the card you long-pressed rather than whatever
- * happens to be selected.
+ *   - no captured PPSE (service generates a one-entry directory instead)
+ *   - cap_aid not matching the card's own AID (terminal picks an applet we
+ *     cannot serve, FCI falls to the generated branch)
+ *   - GPO framing disagreeing with the MSD flag (the capture is thrown away and
+ *     the built path runs)
+ *   - no records at all (terminal gets one synthetic and 6A83 after it)
  *
- * NEW: this screen now also prints the TAIL OF THE TERMINAL TAP LOG. The phone
- * is its own reader when a real till is in front of it, and the service writes
- * every APDU the terminal sends to term_log.txt. So one phone is enough: tap the
- * terminal, long-press the card count, read it here, hit COPY.
- *
- * Bare keys are still tried as a fallback, so opening this mid-read works.
+ * The MSD line also used to throw: 'msd' is written with putInt and this screen
+ * read it with getString, which SharedPreferences does not coerce.
  */
 public class CaptureActivity extends Activity {
 
@@ -103,13 +99,21 @@ public class CaptureActivity extends Activity {
         return v == null ? "" : v;
     }
 
+    /** Typed read. 'msd' is an int and getString on it throws. */
+    private int getInt(String k, int def) {
+        try {
+            return prefs.getInt(slot + k, def);
+        } catch (ClassCastException e) {
+            return def;
+        }
+    }
+
     private void clear() {
         SharedPreferences.Editor e = prefs.edit();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(slot + "cap_") || k.startsWith("cap_")) e.remove(k);
         }
         e.apply();
-        // NEW: also drop the terminal log, so the next tap starts clean.
         try {
             java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
             if (f.exists()) f.delete();
@@ -120,9 +124,125 @@ public class CaptureActivity extends Activity {
         return (s == null || s.isEmpty()) ? "-" : s;
     }
 
-    /** Everything: the capture, then the terminal tap log. */
+    private static String hexOnly(String s) {
+        return s == null ? "" : s.toUpperCase().replaceAll("[^0-9A-F]", "");
+    }
+
+    private int countRecords() {
+        int n = 0;
+        String p = slot + "cap_rec";
+        for (String k : prefs.getAll().keySet()) {
+            if (k.startsWith(p)) n++;
+        }
+        return n;
+    }
+
+    /** 61 entries in a directory FCI, i.e. how many applets it advertises. */
+    private static int countApps(String ppse) {
+        String h = hexOnly(ppse);
+        if (h.length() < 8) return 0;
+        byte[] d = new byte[h.length() / 2];
+        for (int i = 0; i < d.length; i++) {
+            d[i] = (byte) Integer.parseInt(h.substring(i * 2, i * 2 + 2), 16);
+        }
+        // crude but adequate: count 61 tags that are followed by a plausible length
+        int n = 0;
+        for (int i = 0; i + 1 < d.length; i++) {
+            if ((d[i] & 0xFF) == 0x61) {
+                int l = d[i + 1] & 0xFF;
+                if (l > 0 && l < 0x7F && i + 2 + l <= d.length) n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * NEW. Every dependency the tap needs, with the missing ones counted.
+     * Nothing here is guessed: it is read straight out of the slot.
+     */
+    private String readiness() {
+        String ppse = hexOnly(get("cap_rawppse"));
+        String gpo = hexOnly(get("cap_rawgpo"));
+        String fci = hexOnly(get("cap_rawfci"));
+        String capAid = get("cap_aid").toUpperCase();
+        String cardAid = get("aid").toUpperCase();
+        int msd = getInt("msd", 0);
+        int recs = countRecords();
+
+        StringBuilder sb = new StringBuilder();
+        int bad = 0;
+
+        if (ppse.isEmpty()) {
+            sb.append("PPSE      : NONE - a one-entry directory will be GENERATED\n");
+            bad++;
+        } else {
+            int n = countApps(ppse);
+            sb.append("PPSE      : captured ").append(ppse.length() / 2)
+              .append("B advertising ").append(n).append(" applet(s)\n");
+            if (n == 0) bad++;
+        }
+
+        if (capAid.isEmpty()) {
+            sb.append("CAP AID   : NONE - no captured applet, FCI will be generated\n");
+            bad++;
+        } else if (!cardAid.isEmpty() && !capAid.equalsIgnoreCase(cardAid)) {
+            sb.append("CAP AID   : ").append(capAid).append("  but card AID is ")
+              .append(cardAid).append("  <- MISMATCH\n");
+            bad++;
+        } else {
+            sb.append("CAP AID   : ").append(capAid).append("  (matches the card)\n");
+        }
+
+        if (fci.isEmpty()) {
+            sb.append("FCI       : NONE - generated fallback\n");
+            bad++;
+        } else {
+            sb.append("FCI       : captured ").append(fci.length() / 2).append("B\n");
+        }
+
+        if (gpo.isEmpty()) {
+            sb.append("GPO       : NONE - built path, so records are mandatory\n");
+            bad++;
+        } else {
+            boolean capMsd = gpo.startsWith("80");
+            sb.append("GPO       : captured ").append(gpo.length() / 2).append("B, framing ")
+              .append(capMsd ? "80 (format 1 / MSD)" : gpo.startsWith("77")
+                      ? "77 (format 2 / EMV)" : "?").append('\n');
+            if (capMsd != (msd == 1)) {
+                sb.append("MSD FIELD : ").append(msd)
+                  .append("  <- MISMATCH, the capture will be THROWN AWAY and rebuilt\n");
+                bad++;
+            } else {
+                sb.append("MSD FIELD : ").append(msd).append("  (agrees with the framing)\n");
+            }
+        }
+
+        if (recs == 0) {
+            sb.append("RECORDS   : NONE - terminal gets one synthetic and 6A83 after it\n");
+            bad++;
+        } else {
+            sb.append("RECORDS   : ").append(recs).append(" captured\n");
+        }
+
+        String cid = get("cid").toUpperCase();
+        if (cid.isEmpty()) {
+            sb.append("CID       : empty - logic decides (")
+              .append(get("mkac").isEmpty() ? "no key, so TC offline" : "key set, so ARQC online")
+              .append(")\n");
+        } else {
+            sb.append("CID       : ").append(cid).append("  FORCED - overrides the logic\n");
+        }
+
+        sb.append('\n');
+        sb.append(bad == 0
+                ? "READY: nothing obvious missing.\n"
+                : "NOT READY: " + bad + " problem(s) above.\n");
+        return sb.toString();
+    }
+
+    /** Everything: readiness, the capture, then the terminal tap log. */
     private String build() {
-        return buildCapture() + termLogSection();
+        return readiness() + "\n---- raw capture ----\n" + buildCapture() + termLogSection();
     }
 
     private String buildCapture() {
@@ -131,12 +251,11 @@ public class CaptureActivity extends Activity {
         String fci   = get("cap_rawfci");
         String gpo   = get("cap_rawgpo");
         String genac = get("cap_rawgenac");
+        String ppse  = get("cap_rawppse");
 
-        int records = 0;
         StringBuilder recKeys = new StringBuilder();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(slot + "cap_rec")) {
-                records++;
                 recKeys.append(k.substring((slot + "cap_").length())).append(' ');
             }
         }
@@ -144,53 +263,59 @@ public class CaptureActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append("SLOT: ").append(slot)
                 .append("   (card ").append(cardIndex + 1)
-                .append(" of ").append(prefs.getInt("card_count", 0)).append(")").append('\n');
+                .append(" of ").append(prefs.getInt("card_count", 0)).append(')').append('\n');
         sb.append('\n');
 
         sb.append("LABEL: ").append(dash(get("label"))).append('\n');
         sb.append("PAN: ").append(dash(get("pan"))).append('\n');
         sb.append("EXPIRY: ").append(dash(get("expiry"))).append('\n');
         sb.append("SERVICE CODE: ").append(dash(get("service"))).append('\n');
-        sb.append("AID: ").append(dash(get("cap_aid"))).append('\n');
+        sb.append("NAME: ").append(dash(get("name"))).append('\n');
+        sb.append("AID (editor): ").append(dash(get("aid"))).append('\n');
         sb.append("AIP (editor): ").append(dash(get("aip"))).append('\n');
-        sb.append("MSD: ").append(dash(get("msd"))).append('\n');
-        sb.append("CID: ").append(get("cid").isEmpty()
-                ? "(empty - logic decides)" : get("cid") + "  FORCED").append('\n');
+        sb.append("MSD: ").append(getInt("msd", 0)).append('\n');
+        sb.append("AFL: ").append(get("afl").isEmpty()
+                ? "(empty - derived from the records)" : get("afl")).append('\n');
         sb.append("MK-AC set: ").append(get("mkac").isEmpty() ? "no" : "yes").append('\n');
         sb.append('\n');
 
-        sb.append("CAPTURED RECORDS: ").append(records).append('\n');
         if (recKeys.length() > 0) sb.append("RECORD KEYS: ").append(recKeys).append('\n');
+        sb.append("PPSE CAPTURED: ").append(ppse.isEmpty() ? "NO" : "yes (" + ppse.length() / 2 + "B)").append('\n');
         sb.append("GPO CAPTURED: ").append(gpo.isEmpty() ? "NO" : "yes (" + gpo.length() / 2 + "B)").append('\n');
         sb.append("FCI CAPTURED: ").append(fci.isEmpty() ? "NO" : "yes (" + fci.length() / 2 + "B)").append('\n');
         sb.append("GEN AC CAPTURED: ").append(genac.isEmpty() ? "NO" : "yes").append('\n');
         sb.append('\n');
 
-        if (fci.isEmpty() && gpo.isEmpty()) {
+        if (fci.isEmpty() && gpo.isEmpty() && ppse.isEmpty()) {
             sb.append("No capture in this slot.\n\n");
             sb.append("Open READ CARD and read a card - the capture lands in the slot\n");
             sb.append("that is selected in the wallet.\n");
             return sb.toString();
         }
 
-        sb.append("FCI (").append(fci.length() / 2).append(" bytes):\n").append(fci).append("\n\n");
-        sb.append("GPO (").append(gpo.length() / 2).append(" bytes):\n").append(gpo).append("\n\n");
-        sb.append("GENERATE AC (").append(genac.length() / 2).append(" bytes):\n").append(genac).append('\n');
+        if (!ppse.isEmpty()) {
+            sb.append("PPSE (").append(ppse.length() / 2).append(" bytes):\n").append(ppse).append("\n\n");
+        }
+        if (!fci.isEmpty()) {
+            sb.append("FCI (").append(fci.length() / 2).append(" bytes):\n").append(fci).append("\n\n");
+        }
+        if (!gpo.isEmpty()) {
+            sb.append("GPO (").append(gpo.length() / 2).append(" bytes):\n").append(gpo).append("\n\n");
+        }
+        if (!genac.isEmpty()) {
+            sb.append("GENERATE AC (").append(genac.length() / 2).append(" bytes):\n").append(genac).append('\n');
+        }
         return sb.toString();
     }
 
     /**
-     * NEW. The tail of the terminal tap log - what a real till actually sent us
-     * and what we answered. This is the whole point of the screen when there is
-     * no second phone to run the reader app on.
-     *
-     * Capped at the last 8 KB so the TextView stays usable.
+     * The tail of the terminal tap log - what a real till sent us and what we
+     * answered. Capped at the last 8 KB so the TextView stays usable.
      */
     private String termLogSection() {
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n========================================\n");
         sb.append("TERMINAL TAP LOG  (last 8 KB)\n");
-        sb.append("What a real terminal sent, and our reply.\n");
         sb.append(">> 80A8 = GPO    >> 00B2 = READ RECORD    >> 80AE = GENERATE AC\n");
         sb.append("If it stops after 80A8 there is no READ RECORD.\n");
         sb.append("The !! verdict line names where it quit.\n");
