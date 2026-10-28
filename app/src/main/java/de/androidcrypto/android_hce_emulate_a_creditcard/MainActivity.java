@@ -847,7 +847,7 @@ public class MainActivity extends AppCompatActivity {
     // ---------- routing self-check ----------
 
     private void showRoutingCheck() {
-        ComponentName me = new ComponentName(this, HceCcEmulationServiceVisa.class);
+        ComponentName me = new ComponentName(this, ShadowApduService.class);
         StringBuilder sb = new StringBuilder();
 
         NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
@@ -1378,7 +1378,7 @@ public class MainActivity extends AppCompatActivity {
             NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
             if (nfc == null) return;
             CardEmulation ce = CardEmulation.getInstance(nfc);
-            ce.setPreferredService(this, new ComponentName(this, HceCcEmulationServiceVisa.class));
+            ce.setPreferredService(this, new ComponentName(this, ShadowApduService.class));
         } catch (Throwable ignored) { }
     }
 
