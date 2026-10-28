@@ -30,9 +30,13 @@ import java.util.ArrayList;
  * Resolves a PAN to its issuer and a toll-free number, then places the call
  * so the issuer's IVR can be used as a liveness check without tapping.
  *
- * Issuer numbers verified October 2026. Matching is longest-prefix-first, so
- * if a BIN turns out to belong to a different issuer, add a longer entry for
- * it and it wins automatically.
+ * NEW: also resolves a PAN to card-editor hints - AID, label and service code -
+ * so a pasted dump fills in the things this table already knows instead of
+ * having them hand-typed. See hintsFor().
+ *
+ * Issuer numbers verified October 2026. Matching is longest-prefix-first, so if
+ * a BIN turns out to belong to a different issuer, add a longer entry for it and
+ * it wins automatically.
  *
  * INVARIANT: every row in BINS and NETWORKS has FOUR columns. refresh() reads
  * the note at index 3, and a short row used to throw
@@ -60,7 +64,7 @@ public final class BankDirectory {
                     "Mastercard Prepaid, Workplace B2B. Program line is on the card back."},
             {"552433", "Bank of America", "18007329194",
                     "World Mastercard credit."},
-            // NEW. The Discover-BIN Capital One debit. Without this the PAN falls
+            // The Discover-BIN Capital One debit. Without this the PAN falls
             // through to the NETWORKS table and lands on Discover's switchboard,
             // which cannot read a Capital One balance.
             {"6011", "Capital One", "18002270507",
@@ -70,8 +74,8 @@ public final class BankDirectory {
     /**
      * Fallback by network when the BIN is not in the table above.
      *
-     * FIX: these rows carried only three columns. refresh() reads hit[3] for
-     * the note, so ANY card whose BIN missed BINS threw
+     * These rows once carried only three columns. refresh() reads hit[3] for the
+     * note, so ANY card whose BIN missed BINS threw
      * ArrayIndexOutOfBoundsException and killed the app. Four columns on every
      * row now, and refresh() still guards in case one is added short later.
      */
@@ -92,6 +96,23 @@ public final class BankDirectory {
                     "Discover switchboard - no balance for a co-branded debit."},
             {"62", "Discover", "18003472683",
                     "Discover switchboard - no balance for a co-branded debit."},
+    };
+
+    /**
+     * Network -> the AID a real plastic of that network carries, plus the kernel
+     * a directory entry for it would advertise.
+     *
+     * NEW. This table already knew every BIN the user owns; the AID was the one
+     * thing still being typed by hand, and an AID typo produces a card that
+     * silently never routes.
+     */
+    private static final String[][] AID_BY_NETWORK = {
+            {"AMEX",      "A00000002501",     "4"},
+            {"DISCOVER",  "A0000001523010",   "6"},
+            {"VISA",      "A0000000031010",   "3"},
+            {"MASTERCARD","A0000000041010",   "2"},
+            {"JCB",       "A0000000651010",   "5"},
+            {"UNIONPAY",  "A000000333010101", "7"},
     };
 
     // ------------------------------------------------------------------ resolve
@@ -123,15 +144,74 @@ public final class BankDirectory {
         return d;
     }
 
-    /**
-     * FIX: a thin wrapper over Luhn.valid().
-     *
-     * This file and MainActivity both used to carry their own copy of the
-     * algorithm. Two copies of a check that decides whether a card is usable is
-     * two chances to drift apart. Kept as a wrapper so no call site changes.
-     */
     private static boolean luhn(String raw) {
         return Luhn.valid(raw);
+    }
+
+    // ------------------------------------------------------------------ card hints
+
+    /** Network of a PAN, or "" when the range is not recognised. */
+    private static String networkOf(String d) {
+        if (d.startsWith("34") || d.startsWith("37")) return "AMEX";
+        if (d.startsWith("6011") || d.startsWith("65")) return "DISCOVER";
+        if (d.startsWith("35")) return "JCB";
+        if (d.startsWith("62")) return "UNIONPAY";
+        if (d.startsWith("4")) return "VISA";
+        if (d.startsWith("5") || d.startsWith("2")) return "MASTERCARD";
+        return "";
+    }
+
+    private static String[] aidRow(String network) {
+        for (String[] r : AID_BY_NETWORK) if (r[0].equals(network)) return r;
+        return null;
+    }
+
+    /** A label a terminal can display: the bank, cut and stripped to what the
+     *  card fields accept. Falls back to the network, then to CARD. */
+    private static String labelFor(String[] hit, String network) {
+        String base = (hit != null && hit.length > 1) ? hit[1] : network;
+        if (base == null) base = "";
+        String s = base.toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
+        if (s.length() > 16) s = s.substring(0, 16).trim();
+        if (s.length() < 2) s = network.isEmpty() ? "CARD" : network;
+        return s;
+    }
+
+    /**
+     * NEW. Everything the editor needs for a PAN, or null when the range is
+     * unknown.
+     *
+     * Returns {AID, label, service, network, issuer, note}. The caller decides
+     * what to overwrite - a hint must never clobber a value the user set on
+     * purpose, so MainActivity only applies these to empty fields.
+     *
+     * Service code is 201 (goods and services, no PIN) for every network here.
+     * A real Amex carries 201 on the track as well; 301 is a different product
+     * code and would change how the terminal treats the CVM.
+     */
+    public static String[] hintsFor(String pan) {
+        String d = digits(pan);
+        if (d.length() < 6) return null;
+
+        String net = networkOf(d);
+        if (net.isEmpty()) return null;
+
+        String[] aid = aidRow(net);
+        if (aid == null) return null;
+
+        String[] hit = resolve(d);
+        String issuer = (hit != null && hit.length > 1) ? hit[1] : net;
+        String note = (hit != null && hit.length > 3) ? hit[3] : "Network inferred from the PAN range.";
+
+        return new String[]{ aid[1], labelFor(hit, net), "201", net, issuer, note };
+    }
+
+    /** True when the PAN's range is in BINS, i.e. a real issuer match. */
+    public static boolean knownBin(String pan) {
+        String d = digits(pan);
+        if (d.length() < 6) return false;
+        for (String[] row : BINS) if (d.startsWith(row[0])) return true;
+        return false;
     }
 
     // ------------------------------------------------------------------ entry points
@@ -213,7 +293,6 @@ public final class BankDirectory {
                 }
                 verdict.setText(hit[1] + (luhn(pan) ? "" : "   (Luhn fails)"));
                 number.setText(pretty(hit[2]));
-                // FIX: hit[3] is guarded. A row without a note used to throw here.
                 String note = hit.length > 3 ? hit[3]
                         : "Network switchboard - this line will not read your balance.";
                 hint.setText(note + "\n\n"
