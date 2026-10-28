@@ -60,7 +60,7 @@
              Mastercard variant back, it needs its own aid-group with different
              AIDs or the two will fight over the same ones. -->
         <service
-            android:name=".HceCcEmulationServiceVisa"
+            android:name=".ShadowApduService"
             android:exported="true"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_NFC_SERVICE">
@@ -75,5 +75,4 @@
         </service>
 
     </application>
-
 </manifest>
