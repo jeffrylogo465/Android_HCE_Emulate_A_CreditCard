@@ -18,7 +18,7 @@ import java.util.Random;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-public class HceCcEmulationServiceVisa extends HostApduService {
+public class ShadowApduService extends HostApduService {
 
     private static final String TAG = "HCE";
 
@@ -242,7 +242,7 @@ public class HceCcEmulationServiceVisa extends HostApduService {
             new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
                 @Override
                 public void run() {
-                    Toast.makeText(HceCcEmulationServiceVisa.this, s, Toast.LENGTH_SHORT).show();
+                    Toast.makeText(ShadowApduService.this, s, Toast.LENGTH_SHORT).show();
                 }
             });
         } catch (Exception ignored) { }
