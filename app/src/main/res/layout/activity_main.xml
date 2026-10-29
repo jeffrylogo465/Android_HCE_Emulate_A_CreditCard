@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -46,7 +47,6 @@
                         android:text="1 card"
                         android:textColor="#6B7280"
                         android:textSize="11sp" />
-
                 </LinearLayout>
 
                 <TextView
@@ -102,7 +102,6 @@
                         android:text="READ CARD"
                         android:textColor="#FFFFFF"
                         android:textSize="10sp" />
-
                 </LinearLayout>
 
                 <Button
@@ -125,9 +124,7 @@
                     android:text=""
                     android:textColor="#6B7280"
                     android:textSize="11sp" />
-
             </LinearLayout>
-
         </ScrollView>
 
         <!-- ================= PAGE 2 · EDIT ================= -->
@@ -136,8 +133,8 @@
             android:id="@+id/pageEdit"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:visibility="gone"
-            android:fillViewport="true">
+            android:fillViewport="true"
+            android:visibility="gone">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -260,7 +257,6 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
 
                     <LinearLayout
@@ -292,9 +288,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
-
                 </LinearLayout>
 
                 <TextView
@@ -403,7 +397,6 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
 
                     <LinearLayout
@@ -435,9 +428,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
-
                 </LinearLayout>
 
                 <LinearLayout
@@ -474,7 +465,6 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
 
                     <LinearLayout
@@ -506,9 +496,7 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="13sp" />
-
                     </LinearLayout>
-
                 </LinearLayout>
 
                 <LinearLayout
@@ -545,7 +533,6 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="12sp" />
-
                     </LinearLayout>
 
                     <LinearLayout
@@ -577,10 +564,18 @@
                             android:textColor="#E5E7EB"
                             android:textColorHint="#4B5563"
                             android:textSize="12sp" />
-
                     </LinearLayout>
-
                 </LinearLayout>
+
+                <EditText android:id="@+id/etCvmlist" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="10dp" android:background="@drawable/field_bg" android:fontFamily="monospace" android:hint="CVM LIST 8E (empty = default)" android:inputType="textNoSuggestions|textCapCharacters" android:paddingStart="12dp" android:paddingEnd="12dp" android:textColor="#E5E7EB" android:textColorHint="#4B5563" android:textSize="12sp"/>
+
+                <EditText android:id="@+id/etCvmres" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="6dp" android:background="@drawable/field_bg" android:fontFamily="monospace" android:hint="CVM RESULT 9F34" android:inputType="textNoSuggestions|textCapCharacters" android:paddingStart="12dp" android:paddingEnd="12dp" android:textColor="#E5E7EB" android:textColorHint="#4B5563" android:textSize="12sp"/>
+
+                <EditText android:id="@+id/etPdol" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="6dp" android:background="@drawable/field_bg" android:fontFamily="monospace" android:hint="PDOL" android:inputType="textNoSuggestions|textCapCharacters" android:paddingStart="12dp" android:paddingEnd="12dp" android:textColor="#E5E7EB" android:textColorHint="#4B5563" android:textSize="11sp"/>
+
+                <EditText android:id="@+id/etCdol1" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="6dp" android:background="@drawable/field_bg" android:fontFamily="monospace" android:hint="CDOL1" android:inputType="textNoSuggestions|textCapCharacters" android:paddingStart="12dp" android:paddingEnd="12dp" android:textColor="#E5E7EB" android:textColorHint="#4B5563" android:textSize="11sp"/>
+
+                <EditText android:id="@+id/etCdol2" android:layout_width="match_parent" android:layout_height="44dp" android:layout_marginTop="6dp" android:background="@drawable/field_bg" android:fontFamily="monospace" android:hint="CDOL2 (must end 9F3403)" android:inputType="textNoSuggestions|textCapCharacters" android:paddingStart="12dp" android:paddingEnd="12dp" android:textColor="#E5E7EB" android:textColorHint="#4B5563" android:textSize="11sp"/>
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -650,11 +645,11 @@
                     android:hint="80A80000=770E8202180094080801010010010300 9000"
                     android:imeOptions="flagNoEnterAction"
                     android:inputType="textMultiLine|textNoSuggestions|textCapCharacters"
-                    android:minLines="3"
                     android:maxLines="12"
+                    android:minLines="3"
                     android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
                     android:paddingTop="10dp"
+                    android:paddingEnd="12dp"
                     android:paddingBottom="10dp"
                     android:scrollbars="vertical"
                     android:textColor="#E5E7EB"
@@ -690,13 +685,9 @@
                         android:textColor="#FCA5A5"
                         android:textSize="11sp"
                         android:textStyle="bold" />
-
                 </LinearLayout>
-
             </LinearLayout>
-
         </ScrollView>
-
     </FrameLayout>
 
     <!-- ================= NAV ================= -->
@@ -727,7 +718,5 @@
             android:text="EDIT"
             android:textColor="#4B5563"
             android:textSize="10sp" />
-
     </LinearLayout>
-
 </LinearLayout>
