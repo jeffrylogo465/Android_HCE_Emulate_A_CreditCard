@@ -45,7 +45,19 @@ public class MainActivity extends AppCompatActivity {
     /** Must match the service, or a seeded record and the ARQC MAC disagree. */
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
-    private static final String CVMLIST = "00000000000000001E031F00";
+
+    /**
+     * No CVM required - 1F 03. Must match the service.
+     *
+     * The card decides TC offline, so no online session exists and an online-PIN
+     * rule (1E 03) asks the kernel for a PIN block nothing can produce. The
+     * kernel then aborts with "error, insert card".
+     *
+     * This constant only applies when the CVM box is EMPTY. A card already
+     * carrying 1E031F00 keeps it - blank the box and seed again.
+     */
+    private static final String CVMLIST = "00000000000000001F03";
+
     private static final String PPSE    = "325041592E5359532E4444463031";
 
     private static final String HINT =
@@ -668,11 +680,19 @@ public class MainActivity extends AppCompatActivity {
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
         sb.append("CVM list   : ")
-                .append(t(etCvmlist).isEmpty() ? "service constant" : t(etCvmlist).toUpperCase())
+                .append(t(etCvmlist).isEmpty() ? "service constant (" + CVMLIST + ")"
+                        : t(etCvmlist).toUpperCase())
                 .append('\n');
         sb.append("CVM result : ")
-                .append(t(etCvmres).isEmpty() ? "1E0302" : t(etCvmres).toUpperCase())
+                .append(t(etCvmres).isEmpty() ? "1F0300" : t(etCvmres).toUpperCase())
                 .append('\n');
+        sb.append("9F07/9F08  : FF00 / 0002  (written by SEED RECORDS)\n");
+
+        if (t(etCvmlist).toUpperCase().startsWith("1E")) {
+            sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
+                    + " so nothing can collect a PIN\n");
+            sb.append("   blank the CVM box and seed again\n");
+        }
 
         String script = t(etScript);
         int scriptLines = armedLines(script);
@@ -755,6 +775,10 @@ public class MainActivity extends AppCompatActivity {
      *
      * The record takes the CDOLs and CVM list from the boxes on screen when they
      * are filled, so a seeded card and the service cannot drift apart.
+     *
+     * 9F07 (AUC) and 9F08 (application version) go in unconditionally: a
+     * kernel-2 EMV record without a version number is a data-validation fault,
+     * and a validation fault is an "error, insert card" fallback.
      */
     private void seedRecords() {
         final int i = current;
@@ -794,8 +818,8 @@ public class MainActivity extends AppCompatActivity {
 
                     StringBuilder rec = new StringBuilder();
                     rec.append(tlvHex(0x5A, pan));
-                    rec.append(tlvHex(0x5F34, "01"));
                     rec.append(tlvHex(0x5F24, exp + "01"));
+                    rec.append(tlvHex(0x5F34, "01"));
                     if (name.length() >= 2) {
                         rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
                     }
@@ -803,6 +827,8 @@ public class MainActivity extends AppCompatActivity {
                     rec.append(tlvHex(0x8C, cdol1));
                     rec.append(tlvHex(0x8D, cdol2));
                     rec.append(tlvHex(0x8E, cvm));
+                    rec.append(tlvHex(0x9F07, "FF00"));
+                    rec.append(tlvHex(0x9F08, "0002"));
                     String record = tlvHex(0x70, rec.toString());
 
                     String label = t(etLabel).toUpperCase()
@@ -836,7 +862,13 @@ public class MainActivity extends AppCompatActivity {
                     binding = false;
                     collect();
 
-                    status("Seeded 1 record + directory for " + aid + " - MSD 0, tap it");
+                    if (cvm.startsWith("1E")) {
+                        status("Seeded - but the CVM list is still ONLINE PIN (" + cvm
+                                + "). Blank the CVM box and seed again.");
+                    } else {
+                        status("Seeded 1 record + directory for " + aid
+                                + " - cvm " + cvm + ", MSD 0, tap it");
+                    }
                     Toast.makeText(this, "Seeded - long-press the card count to inspect",
                             Toast.LENGTH_LONG).show();
                     showPage(0);
