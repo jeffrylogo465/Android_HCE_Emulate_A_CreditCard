@@ -101,14 +101,11 @@ public class ShadowApduService extends HostApduService {
      *
      * true  - strip them, forcing the terminal to send GENERATE AC.
      *         Tried and it does not work here: with AIP 0800 the terminal bailed
-     *         at the GPO, and with AIP 1800 it still never asked. This is a
-     *         Discover/kernel-6 terminal and Discover's contactless profile puts
-     *         the cryptogram in the GPO response by design - there is nothing to
-     *         ask for.
+     *         at the GPO, and with AIP 1800 it still never asked. Discover's
+     *         contactless profile puts the cryptogram in the GPO by design, so
+     *         there is nothing to ask for.
      * false - keep the card's own AC tags. This is the shape the terminal
-     *         expects: it reads all seven records and completes the transaction.
-     *         The CID byte inside is rewritten to TC instead, so it approves
-     *         offline rather than going online with a stale ARQC.
+     *         expects. The CID byte inside is rewritten to TC instead.
      */
     private static final boolean STRIP_AC = false;
 
@@ -116,14 +113,24 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * Whether buildPpse() advertises Visa and Mastercard alongside the card's
-     * own AID.
-     *
-     * false - the directory lists ONLY the AID the card actually is. ReaderActivity
-     *         never captures the real PPSE, so the honest thing is to advertise
-     *         only what we can serve.
-     * true  - the old behaviour, three applets with one profile behind them.
+     * own AID. Unused while PPSE_MINIMAL is true, kept for the bisect.
      */
     private static final boolean EXTRA_AIDS = false;
+
+    /**
+     * BISECT SWITCH - the PPSE entry carries 4F and 87 only.
+     *
+     * Every terminal tried said "INSERT CARD" straight after the directory
+     * response, at several stores and on a $2 amount, so they read the PPSE and
+     * refused the app before they ever sent SELECT AID. The AID and the encoding
+     * are valid, so the objection is to one of the optional fields: the 15-byte
+     * label or 9F2A = 02.
+     *
+     * With both gone the terminal has to decide on the AID alone. If one then
+     * selects, put the fields back ONE AT A TIME to find which it refused - the
+     * label first, then 9F2A.
+     */
+    private static final boolean PPSE_MINIMAL = true;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
@@ -163,14 +170,10 @@ public class ShadowApduService extends HostApduService {
      *
      * INCLUDE THE 9000 ON THE SAME LINE. It is part of the response.
      *
-     * GATED. The editor pre-fills this field and it cannot be cleared, so a
-     * stale line from another card was silently serving the GPO of a card that
-     * had nothing to do with it. The script is OFF unless the card's 'usescript'
-     * pref says otherwise.
+     * GATED. The script is OFF unless the card's 'usescript' pref says otherwise.
      *
      * NOTE: a script that serves a GPO also bypasses everything gpo() does -
-     * the CDA clear and the CID rewrite. Paste the '<<' line as-is and you get
-     * whatever it contains.
+     * the CDA clear and the CID rewrite.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
@@ -556,6 +559,7 @@ public class ShadowApduService extends HostApduService {
         return 3;
     }
 
+    /** Full directory entry: AID, label, priority, kernel. Unused while PPSE_MINIMAL. */
     private byte[] appEntry(String aidHex, String label, int priority) {
         return cat(
                 tlv(0x4F, hex(aidHex)),
@@ -565,19 +569,24 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * FIX: this used to append Visa at priority 2 and Mastercard at priority 3
-     * unconditionally, so the directory advertised three applets while the card
-     * had one FCI and one record set.
+     * PPSE directory.
+     *
+     * BISECT BUILD - see PPSE_MINIMAL. The entry is 4F and 87 only: no label,
+     * no 9F2A kernel identifier. Terminals were reading this response and
+     * refusing the app without ever sending SELECT AID, so the optional fields
+     * are the suspects. With them gone the terminal must decide on the AID
+     * alone.
      */
     private byte[] buildPpse() {
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
-        String lbl = labelText();
+        byte[] entry = PPSE_MINIMAL
+                ? cat(tlv(0x4F, hex(realAid)), tlv(0x87, new byte[]{0x01}))
+                : appEntry(realAid, labelText(), 1);
 
         ByteArrayOutputStream dir = new ByteArrayOutputStream();
-
-        byte[] e0 = tlv(0x61, appEntry(realAid, lbl, 1));
+        byte[] e0 = tlv(0x61, entry);
         dir.write(e0, 0, e0.length);
 
         if (EXTRA_AIDS) {
@@ -909,20 +918,14 @@ public class ShadowApduService extends HostApduService {
      * of the AIP is cleared, and the CID is rewritten to TC.
      *
      * WHY THE CID IS REWRITTEN:
-     *   This terminal takes the application cryptogram out of the GPO response
-     *   and never sends GENERATE AC. That was proven twice: with the AC tags
-     *   stripped and AIP 0800 the terminal bailed at the GPO, and with them
-     *   stripped and AIP 1800 it still never asked. Discover's contactless
-     *   profile puts the AC in the GPO by design, so there is nothing to ask
-     *   for and genac() is unreachable on this hardware.
-     *
-     *   The captured CID is 80 (ARQC), so the terminal goes online - and the
-     *   ARQC is the real card's, computed over a different unpredictable number,
-     *   so the host cannot match it and answers 005 do not honour.
+     *   Some terminals take the application cryptogram out of the GPO response
+     *   and never send GENERATE AC. The captured CID is 80 (ARQC), so such a
+     *   terminal goes online - and the ARQC is the real card's, computed over a
+     *   different unpredictable number, so the host cannot match it and answers
+     *   005 do not honour.
      *
      *   Rewriting that one byte to 40 (TC) makes the card say "approved, do not
-     *   call the host". The terminal approves offline and prints. Nothing
-     *   verifies the cryptogram because nothing is asked to.
+     *   call the host". The terminal approves offline and prints.
      *
      *   Set GPO_CID back to CID_ARQC once a real MK-AC is in place and the ARQC
      *   is computed rather than replayed.
@@ -1187,10 +1190,6 @@ public class ShadowApduService extends HostApduService {
      * The CID box in the editor wins on the FIRST GENERATE AC when it holds a
      * two-digit value, except that an AAC request can never be improved on.
      *
-     * Unreachable on this terminal, which never sends GENERATE AC - see gpo().
-     * Kept because it is the path back to a genuine online approval once an
-     * MK-AC is available.
-     *
      * FIX: the flags were tested BEFORE the request, so a terminal asking for
      * AAC (P1 0x00) was handed TC. CID severity runs AAC < ARQC < TC and a card
      * may only answer equal or lower - never better than it was asked.
@@ -1297,13 +1296,19 @@ public class ShadowApduService extends HostApduService {
      * count, so a terminal that bailed at the GPO and one that read every record
      * then went online produced the identical verdict. They are different
      * faults. The record count is now tested first.
+     *
+     * FIX: "found no AID it supports" was a lie whenever a terminal had already
+     * selected that exact AID a moment earlier. One SELECT means it read the
+     * directory and quit - a field drop or an unready terminal, not an AID
+     * mismatch. Two SELECTs and no GPO is the real AID/ FCI rejection.
      */
     private String baseVerdict() {
         if (sawError)     return "TAP: an APDU threw - read the !! line, not the AID list";
         if (tapLog.length() == 0) return "TAP: nothing recorded";
 
         if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
-        if (nSelects <= 1) return "TAP: terminal read the directory then stopped - it found no AID it supports";
+        if (nSelects <= 1) return "TAP: terminal read the directory and quit after one SELECT"
+                + " - field drop, or it was not ready";
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
