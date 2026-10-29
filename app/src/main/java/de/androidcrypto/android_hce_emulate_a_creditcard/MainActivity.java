@@ -45,7 +45,7 @@ public class MainActivity extends AppCompatActivity {
     /** Must match the service, or a seeded record and the ARQC MAC disagree. */
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
-    private static final String CVMLIST = "00000000000000001F00";
+    private static final String CVMLIST = "00000000000000001E031F00";
     private static final String PPSE    = "325041592E5359532E4444463031";
 
     private static final String HINT =
@@ -105,7 +105,7 @@ public class MainActivity extends AppCompatActivity {
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-            etMsd, etScript;
+            etMsd, etScript, etCvmlist, etCvmres, etPdol, etCdol1, etCdol2;
 
     private View pageWallet, pageEdit;
     private TextView navWallet, navEdit;
@@ -155,6 +155,11 @@ public class MainActivity extends AppCompatActivity {
         etMkac = findViewById(R.id.etMkac);
         etMsd = findViewById(R.id.etMsd);
         etScript = findViewById(R.id.etScript);
+        etCvmlist = findViewById(R.id.etCvmlist);
+        etCvmres = findViewById(R.id.etCvmres);
+        etPdol = findViewById(R.id.etPdol);
+        etCdol1 = findViewById(R.id.etCdol1);
+        etCdol2 = findViewById(R.id.etCdol2);
 
         pageWallet = findViewById(R.id.pageWallet);
         pageEdit = findViewById(R.id.pageEdit);
@@ -223,7 +228,7 @@ public class MainActivity extends AppCompatActivity {
         };
         EditText[] fields = { etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
                 etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-                etMsd, etScript };
+                etMsd, etScript, etCvmlist, etCvmres, etPdol, etCdol1, etCdol2 };
         for (EditText f : fields) f.addTextChangedListener(watcher);
 
         TextWatcher filler = new TextWatcher() {
@@ -508,6 +513,11 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "atc"), t(etAtc).toUpperCase());
         e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
         e.putString(key(i, "iad"), t(etIad).toUpperCase());
+        e.putString(key(i, "cvmlist"), t(etCvmlist).toUpperCase());
+        e.putString(key(i, "cvmres"), t(etCvmres).toUpperCase());
+        e.putString(key(i, "pdol"), t(etPdol).toUpperCase());
+        e.putString(key(i, "cdol1"), t(etCdol1).toUpperCase());
+        e.putString(key(i, "cdol2"), t(etCdol2).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         e.putString(key(i, "script"), t(etScript));
         e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
@@ -543,6 +553,11 @@ public class MainActivity extends AppCompatActivity {
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
         etIad.setText(prefs.getString(key(i, "iad"), ""));
+        etCvmlist.setText(prefs.getString(key(i, "cvmlist"), ""));
+        etCvmres.setText(prefs.getString(key(i, "cvmres"), ""));
+        etPdol.setText(prefs.getString(key(i, "pdol"), ""));
+        etCdol1.setText(prefs.getString(key(i, "cdol1"), ""));
+        etCdol2.setText(prefs.getString(key(i, "cdol2"), ""));
         etMkac.setText(prefs.getString(key(i, "mkac"), ""));
 
         if (t(etMkac).isEmpty()) {
@@ -652,6 +667,13 @@ public class MainActivity extends AppCompatActivity {
         sb.append("57  track2 : ")
                 .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
 
+        sb.append("CVM list   : ")
+                .append(t(etCvmlist).isEmpty() ? "service constant" : t(etCvmlist).toUpperCase())
+                .append('\n');
+        sb.append("CVM result : ")
+                .append(t(etCvmres).isEmpty() ? "1E0302" : t(etCvmres).toUpperCase())
+                .append('\n');
+
         String script = t(etScript);
         int scriptLines = armedLines(script);
         sb.append("script     : ").append(scriptLines == 0
@@ -719,8 +741,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * NEW. Build a usable capture out of the typed fields, with no plastic and
-     * no reader.
+     * Build a usable capture out of the typed fields, with no plastic and no
+     * reader.
      *
      * A card that only works after a successful read is a card that dies with
      * the reader. This writes the two things select() and gpo() actually need -
@@ -731,9 +753,8 @@ public class MainActivity extends AppCompatActivity {
      * MSD is forced to 0 because the built path frames a 77 template; a leftover
      * 1 would make gpo() look for an 80 framing that no longer exists.
      *
-     * The seeded record is not the plastic's. The CVM list is the generic one and
-     * 8C/8D are the service's own CDOLs, so the cryptogram the terminal computes
-     * over is ours - which is the whole point: it is at least consistent.
+     * The record takes the CDOLs and CVM list from the boxes on screen when they
+     * are filled, so a seeded card and the service cannot drift apart.
      */
     private void seedRecords() {
         final int i = current;
@@ -754,8 +775,7 @@ public class MainActivity extends AppCompatActivity {
                 .setMessage("Builds a directory and one SFI 1 record from the fields on "
                         + "screen, so this card can be tapped without reading a plastic.\n\n"
                         + "Any existing capture on this card is replaced. The record is "
-                        + "synthetic - the real card's CVM list and discretionary data are "
-                        + "not in it.")
+                        + "synthetic - the real card's discretionary data is not in it.")
                 .setPositiveButton("Seed", (d, w) -> {
                     String exp = digits(t(etExpiry));
                     if (exp.length() != 4) exp = "3112";
@@ -768,6 +788,10 @@ public class MainActivity extends AppCompatActivity {
 
                     String track2 = pan + "D" + exp + svc + disc;
 
+                    String cdol1 = t(etCdol1).isEmpty() ? CDOL1 : t(etCdol1).toUpperCase();
+                    String cdol2 = t(etCdol2).isEmpty() ? CDOL2 : t(etCdol2).toUpperCase();
+                    String cvm = t(etCvmlist).isEmpty() ? CVMLIST : t(etCvmlist).toUpperCase();
+
                     StringBuilder rec = new StringBuilder();
                     rec.append(tlvHex(0x5A, pan));
                     rec.append(tlvHex(0x5F34, "01"));
@@ -776,9 +800,9 @@ public class MainActivity extends AppCompatActivity {
                         rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
                     }
                     rec.append(tlvHex(0x57, track2));
-                    rec.append(tlvHex(0x8C, CDOL1));
-                    rec.append(tlvHex(0x8D, CDOL2));
-                    rec.append(tlvHex(0x8E, CVMLIST));
+                    rec.append(tlvHex(0x8C, cdol1));
+                    rec.append(tlvHex(0x8D, cdol2));
+                    rec.append(tlvHex(0x8E, cvm));
                     String record = tlvHex(0x70, rec.toString());
 
                     String label = t(etLabel).toUpperCase()
