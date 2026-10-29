@@ -13,6 +13,9 @@ import org.junit.Test;
  *
  * These run on the JVM in milliseconds. Before this file, the only way to find
  * out whether stripAcTags corrupted a record was to drive to a terminal.
+ *
+ * FIXTURE RULE: every outer length byte must equal the actual content length.
+ * Several of these were wrong on first writing and the parser cut early.
  */
 public class EmvTest {
 
@@ -23,6 +26,7 @@ public class EmvTest {
 
     @Test
     public void stripKeepsFormat1AipVerbatim() {
+        // 80 12 = 18 content: AIP 2 + 57 0A + 10 + 9F27 01 80
         byte[] tpl = h("8012" + "1900" + "570A" + "6011410636372356D280" + "9F270180");
         assertEquals("800E" + "1900" + "570A" + "6011410636372356D280",
                 x(Emv.stripAcTags(tpl)));
@@ -30,6 +34,7 @@ public class EmvTest {
 
     @Test
     public void stripDropsAcTagsFromFormat2() {
+        // 77 1A = 26 content: 82 02 + 2 + 94 10 + 16 + 9F27 01 80
         byte[] tpl = h("771A" + "8202" + "1900" + "9410"
                 + "08010100100103002002030228040400" + "9F270180");
         assertEquals("7716" + "8202" + "1900" + "9410"
@@ -39,9 +44,12 @@ public class EmvTest {
 
     @Test
     public void stripRewritesLengthAcrossLongFormBoundary() {
-        StringBuilder aip = new StringBuilder("82" + "02" + "1900");
-        for (int i = 0; i < 20; i++) aip.append("9F10").append("0A").append("00112233445566778899");
-        byte[] tpl = h("77" + String.format("%02X", aip.length() / 2) + aip);
+        // 4 + 10 * 13 = 134 content -> long form 81 86
+        StringBuilder aip = new StringBuilder("8202" + "1900");
+        for (int i = 0; i < 10; i++) {
+            aip.append("9F10").append("0A").append("00112233445566778899");
+        }
+        byte[] tpl = h("778186" + aip);
         assertEquals("7704" + "8202" + "1900", x(Emv.stripAcTags(tpl)));
     }
 
@@ -65,14 +73,16 @@ public class EmvTest {
 
     @Test
     public void forceCidOverwrites() {
-        byte[] tpl = h("770A" + "8202" + "1900" + "9F270180" + "9404" + "08010100");
-        assertEquals("40", x(new byte[]{Emv.forceCid(tpl, (byte) 0x40)[7]}));
+        // 77 0E = 14 content: 82 02 + 2 + 9F27 01 80 + 94 04 + 4
+        byte[] tpl = h("770E" + "8202" + "1900" + "9F270180" + "9404" + "08010100");
+        // layout: 77 0E | 82 02 19 00 | 9F 27 01 80 ... -> CID at byte 9
+        assertEquals("40", x(new byte[]{Emv.forceCid(tpl, (byte) 0x40)[9]}));
     }
 
     @Test
     public void forceCidAppendsWhenAbsent() {
-        byte[] tpl = h("7706" + "8202" + "1900" + "9404" + "08010100");
-        assertEquals("770A" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
+        byte[] tpl = h("770A" + "8202" + "1900" + "9404" + "08010100");
+        assertEquals("770E" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
                 x(Emv.forceCid(tpl, (byte) 0x40)));
     }
 
@@ -85,7 +95,9 @@ public class EmvTest {
 
     @Test
     public void findTagReadsValue() {
-        byte[] tpl = h("7710" + "8202" + "1900" + "9F100A" + "011520100300FF01B000" + "9404" + "08010100");
+        // 77 17 = 23 content: 82 02 + 2 + 9F10 0A + 10 + 94 04 + 4
+        byte[] tpl = h("7717" + "8202" + "1900" + "9F100A" + "011520100300FF01B000"
+                + "9404" + "08010100");
         assertEquals("011520100300FF01B000", x(Emv.findTag(tpl, 0x9F10)));
     }
 
@@ -111,7 +123,7 @@ public class EmvTest {
         r.add(new int[]{1, 1});
         r.add(new int[]{1, 2});
         r.add(new int[]{1, 3});
-        assertEquals("0801010300".substring(0, 8), x(Emv.afl(r)));
+        assertEquals("08010300", x(Emv.afl(r)));
     }
 
     @Test
