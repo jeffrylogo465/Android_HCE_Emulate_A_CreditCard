@@ -40,24 +40,25 @@ public class ShadowApduService extends HostApduService {
      *   0x20 DDA   0x01 CDA   0x04 issuer authentication
      *
      * NOTE: 0x80 in byte 2 is Visa's mag-stripe marker and is meaningless on a
-     * Mastercard. A Mastercard that wants EMV mode sets byte 1 0x40; a
-     * Mastercard that wants mag-stripe sets byte 1 0x80. `1080` - byte 2 0x80 -
-     * says neither, which is what got UNSUPPORTED CARD out of one terminal.
+     * Mastercard. A Mastercard that wants EMV mode sets byte 1 0x40; one that
+     * wants mag-stripe sets byte 1 0x80. `1080` - byte 2 0x80 - says neither,
+     * which is what got UNSUPPORTED CARD out of one terminal.
      *
-     * This fallback is only reached with no capture and no typed AIP. For MSD the
-     * card field should read 9000; for EMV mode 1040.
+     * This fallback is only reached with no capture and no typed AIP. For EMV
+     * mode the card field should read 1040.
      */
     private static final String DEFAULT_AIP = "1040";
 
     /**
      * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the ODA
      * bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a clone
-     * can never satisfy, and keeps CV (0x10), TRM (0x08) and mag-stripe (0x80).
+     * can never satisfy, and keeps mag-stripe (0x80), CV (0x10) and TRM (0x08).
      *
-     * NOTE: 0x40 is both "SDA" and "qVSDC supported" depending on mode, so the
-     * mask clears it either way - a clone satisfies neither.
+     * FIX: this used to be 0x18, which also cleared 0x40 - and 0x40 is the
+     * Mastercard qVSDC bit, so a typed 1040 was MACed over as 1000. Mode bits are
+     * not ODA bits; they stay.
      */
-    private static final byte AIP_KEEP_MASK = (byte) 0x98;
+    private static final byte AIP_KEEP_MASK = (byte) 0xD8;
 
     /**
      * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
