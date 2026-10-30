@@ -32,51 +32,37 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
     /**
-     * Fallback AIP when the card has no captured GPO.
+     * Fallback AIP when the card has no captured GPO and no typed value.
      *
-     * The EMV Contactless AIP byte 1 is:
-     *   0x40 SDA supported        0x10 cardholder verification supported
-     *   0x20 DDA supported        0x08 terminal risk management to be performed
-     *   0x01 CDA supported        0x04 issuer authentication supported
-     * 0x80 and 0x02 are RFU.
+     * EMV Contactless AIP byte 1:
+     *   0x80 mag-stripe mode (Mastercard)   0x10 cardholder verification
+     *   0x40 qVSDC supported (Mastercard)   0x08 terminal risk management
+     *   0x20 DDA   0x01 CDA   0x04 issuer authentication
      *
-     * Byte 2 bit 8 (0x80) is the PayPass "EMV mode supported" marker - without
-     * it the kernel expects mag-stripe framing and will not read a 77 template.
+     * NOTE: 0x80 in byte 2 is Visa's mag-stripe marker and is meaningless on a
+     * Mastercard. A Mastercard that wants EMV mode sets byte 1 0x40; a
+     * Mastercard that wants mag-stripe sets byte 1 0x80. `1080` - byte 2 0x80 -
+     * says neither, which is what got UNSUPPORTED CARD out of one terminal.
      *
-     * 0x10 = CV only. No ODA of any kind, no TRM, no issuer auth - nothing for
-     * the terminal to check and fail.
+     * This fallback is only reached with no capture and no typed AIP. For MSD the
+     * card field should read 9000; for EMV mode 1040.
      */
-    private static final String DEFAULT_AIP = "1080";
+    private static final String DEFAULT_AIP = "1040";
 
     /**
-     * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the three
-     * ODA bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a
-     * clone can never satisfy, and keeps CV (0x10) and TRM (0x08) so the editor
-     * can still choose them. A field of 3080 becomes 1080; a field of 1800 stays
-     * 1800.
+     * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the ODA
+     * bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a clone
+     * can never satisfy, and keeps CV (0x10), TRM (0x08) and mag-stripe (0x80).
      *
-     * Named KEEP, not MASK - it is an AND that keeps bits, and the old name read
-     * like it cleared them.
-     *
-     * NOTE: gpo() no longer applies this when a capture is present - see gpo().
-     * It survives only for aipForMac()'s no-GPO fallback.
+     * NOTE: 0x40 is both "SDA" and "qVSDC supported" depending on mode, so the
+     * mask clears it either way - a clone satisfies neither.
      */
-    private static final byte AIP_KEEP_MASK = (byte) 0x18;
-
-    /**
-     * AIP byte 2 bit 8, the app's own marker that byte 2 agrees with the framing
-     * we send. Real cards hand back byte 2 = 0x00 here, so it is a convention and
-     * not a spec bit. Only ever set with EMV framing.
-     *
-     * NOTE: gpo() no longer sets this either. Kept for reference.
-     */
-    private static final byte AIP_EMV_MODE = (byte) 0x80;
+    private static final byte AIP_KEEP_MASK = (byte) 0x98;
 
     /**
      * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
      * SDAD in 9F4B, signed with the ICC private key we do not have. gpo() clears
-     * this bit off whatever AIP it sends so a CDA-capable terminal does not ask
-     * for something we cannot deliver.
+     * this bit off whatever AIP it sends.
      */
     private static final byte AIP_CDA = (byte) 0x01;
 
@@ -84,12 +70,9 @@ public class ShadowApduService extends HostApduService {
      * AIP byte 1 bit 5 - cardholder verification supported.
      *
      * STAYS SET. Clearing it produced AIP 0800 and the terminal bailed on the
-     * GPO response without sending a single READ RECORD; with the bit set the
-     * same terminal reads records. So the bit is kept even though the card now
-     * performs no CVM at all - the CV bit means "this card has a CVM list", not
-     * "a CVM must run".
+     * GPO without sending a single READ RECORD.
      *
-     * The list itself is what decides. See CVMLIST.
+     * The list itself is what decides, and it is now no-CVM. See CVMLIST.
      */
     private static final byte AIP_CVM = (byte) 0x10;
 
@@ -98,13 +81,7 @@ public class ShadowApduService extends HostApduService {
      * normally must NOT, because they describe a cryptogram the card already
      * produced.
      *
-     * true  - strip them, forcing the terminal to send GENERATE AC.
-     *         Tried and it does not work here: with AIP 0800 the terminal bailed
-     *         at the GPO, and with AIP 1800 it still never asked. Discover's
-     *         contactless profile puts the cryptogram in the GPO by design, so
-     *         there is nothing to ask for.
-     * false - keep the card's own AC tags. This is the shape the terminal
-     *         expects. The CID byte inside is rewritten to TC instead.
+     * false - keep the card's own AC tags and rewrite the CID to TC instead.
      */
     private static final boolean STRIP_AC = false;
 
@@ -119,14 +96,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * BISECT SWITCH - the PPSE entry carries 4F and 87 only.
      *
-     * Every terminal tried said "INSERT CARD" straight after the directory
-     * response, at several stores and on a $2 amount, so they read the PPSE and
-     * refused the app before they ever sent SELECT AID.
-     *
-     * RESULT: with the label and 9F2A gone a terminal DID select the AID, ran
-     * the GPO, read a record and asked for a cryptogram. So one or both of those
-     * optional fields is what the directory readers choked on. Leave this true
-     * while other faults are being chased; restoring them is a separate bisect.
+     * Terminals were answering INSERT CARD straight after the directory, so they
+     * read the PPSE and refused the app before sending SELECT AID. With the label
+     * and 9F2A gone a terminal DID select the AID. Leave true.
      */
     private static final boolean PPSE_MINIMAL = true;
 
@@ -141,8 +113,8 @@ public class ShadowApduService extends HostApduService {
      * 80 = ARQC go online, the host judges the cryptogram
      * 00 = AAC  decline offline
      *
-     * Declared after CID_TC on purpose: a static initialiser that refers to a
-     * later simple name is an illegal forward reference in Java.
+     * Declared after CID_TC on purpose: a static initialiser referring to a later
+     * simple name is an illegal forward reference in Java.
      */
     private static final byte GPO_CID = CID_TC;
 
@@ -155,38 +127,36 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     /**
-     * CVM list: X = 0, Y = 0, one rule - 1F 03, "no CVM required, if the
-     * terminal supports it".
+     * CVM list: X = 0, Y = 0, one rule - 1F 03, "no CVM required, if supported".
      *
      * WHY NOT ONLINE PIN (1E 03):
-     *   The card decides TC offline, so the terminal never opens an online
-     *   session - but an online-PIN rule says the card expects the PIN block
-     *   that only an online session produces. The kernel ends up with a CVM it
-     *   cannot perform and aborts with "error, insert card".
+     *   The card decides TC offline, so no online session opens - but an
+     *   online-PIN rule says the card expects a PIN block only an online session
+     *   produces. The kernel ends up with a CVM it cannot perform and aborts.
      *
-     * A no-CVM card approves offline with nothing to collect. Any digits the
-     * terminal shows are ignored, which is fine: nothing validates them.
-     *
-     * The old value was 00000000000000001E031F00.
+     * Old value was 00000000000000001E031F00.
      */
     private static final String CVMLIST = "00000000000000001F03";
 
-    /** 9F34 CVM Results - no CVM performed, if supported, unknown result. */
-    private static final String CVM_RESULTS = "1F0300";
+    /**
+     * 9F34 CVM Results - no CVM performed, if supported, SUCCESSFUL.
+     *
+     * Third byte 02 is the result. 00 (unknown) is legal but says nothing; a
+     * terminal that checks it prefers 02.
+     */
+    private static final String CVM_RESULTS = "1F0302";
 
     /**
      * Used when the selected card has no script of its own. One per line:
      *   <match>=<response>
-     *   match    - hex PREFIX of the command APDU. 80A80000 catches every GPO.
-     *   response - sent verbatim, so paste the '<<' line out of the tap log.
      * '#' starts a comment, spaces are ignored, longest match wins.
      *
      * INCLUDE THE 9000 ON THE SAME LINE. It is part of the response.
      *
      * GATED. The script is OFF unless the card's 'usescript' pref says otherwise.
      *
-     * NOTE: a script that serves a GPO also bypasses everything gpo() does -
-     * the CDA clear and the CID rewrite.
+     * NOTE: a script that serves a GPO bypasses everything gpo() does - the CDA
+     * clear, the CID rewrite and the MSD framing.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
@@ -221,13 +191,7 @@ public class ShadowApduService extends HostApduService {
     /**
      * The tap log, persisted to a file as well as the in-memory buffer.
      *
-     * The clipboard copy in onDeactivated() only ever holds the LAST tap, and a
-     * terminal that gives up early fires onDeactivated with a log you cannot
-     * compare against the previous attempt. The file keeps a short history, and
-     * CaptureActivity prints its tail on screen.
-     *
-     * Trimmed to ~30 KB once it passes 60 KB so it cannot grow without bound.
-     * Never throws: a logging failure must not take the card down.
+     * Trimmed to ~30 KB once it passes 60 KB. Never throws.
      */
     private void termLog(String s) {
         try {
@@ -272,12 +236,8 @@ public class ShadowApduService extends HostApduService {
     private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
 
     /**
-     * Local TLV writer, so the service no longer depends on how Tlv.t encodes
-     * the length.
-     *
-     * The length is always taken from v.length, so an outer length can never
-     * disagree with the bytes it covers - which is what "the terminal read the
-     * app then stopped" usually is.
+     * Local TLV writer. The length is always taken from v.length, so an outer
+     * length can never disagree with the bytes it covers.
      */
     static byte[] tlv(int tag, byte[] v) {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
@@ -333,15 +293,7 @@ public class ShadowApduService extends HostApduService {
         return l;
     }
 
-    /**
-     * Lc of an incoming APDU, extended length included.
-     *
-     * FIX: reading apdu[4] as a plain Lc gives 0 for an extended APDU. The
-     * reader emits extended when a PDOL or CDOL1 is over 255 bytes, and both
-     * consequences were silent: a long SELECT took the empty-name path and
-     * selected the card's own AID, and a long GENERATE AC MACed over an empty
-     * CDOL.
-     */
+    /** Lc of an incoming APDU, extended length included. */
     private static int lcOf(byte[] apdu) {
         if (apdu.length < 5) return 0;
         int lc = apdu[4] & 0xFF;
@@ -369,9 +321,8 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * FIX: this used getString, and SharedPreferences does no type coercion, so
-     * every pref MainActivity wrote with putInt (msd, usescript, atc...) threw
-     * ClassCastException the moment it was read here. Read the raw object and
-     * stringify, so either storage type works.
+     * any pref written with putInt threw ClassCastException on read. Read the raw
+     * object and stringify instead.
      */
     private String p(String k, String d) {
         Object o = prefs().getAll().get(sel() + k);
@@ -390,14 +341,6 @@ public class ShadowApduService extends HostApduService {
 
     // ---------- card fields, normalised once ----------
 
-    /**
-     * FIX: PAN and PSN were being read with two different defaults in two
-     * different places - the record said PSN 01 while the ARQC was MACed over
-     * PSN 00. One helper each, used by every caller.
-     *
-     * PSN is zero padded, not F padded: hex("1") gives 1F, which is the wrong
-     * byte for a one-digit sequence number.
-     */
     private String pan() {
         String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
         return s.isEmpty() ? "4111111111111111" : s;
@@ -447,15 +390,6 @@ public class ShadowApduService extends HostApduService {
         gpoCid = "";
     }
 
-    /**
-     * The AIP that goes into the MAC input.
-     *
-     * FIX: it used to mask the prefs value whenever gpo() had not run, which is
-     * whenever a script line served the GPO - but a script can return its own
-     * 82 02 xxxx, and the MAC then ran over a completely different AIP than the
-     * one on the wire. The script branch now parses that AIP and parks it in
-     * txnAip, so this only falls back when there genuinely was no GPO at all.
-     */
     private byte[] aipForMac() {
         byte[] a = txnAip;
         if (a == null) {
@@ -509,14 +443,6 @@ public class ShadowApduService extends HostApduService {
         return p("script", DEFAULT_SCRIPT);
     }
 
-    /**
-     * The script is OFF unless the card says otherwise.
-     *
-     * FIX: 'usescript' is written by MainActivity with putInt, but p() reads it
-     * with getString. SharedPreferences does no type coercion, so getString on
-     * an Integer threw ClassCastException on EVERY APDU. Read the raw object so
-     * either type works.
-     */
     private boolean useScript() {
         Object o = prefs().getAll().get(sel() + "usescript");
         if (o instanceof Number) return ((Number) o).intValue() != 0;
@@ -651,9 +577,9 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * FIX: this used to append 9F2A when it was missing, which put it after
-     * BF0C - and 9F2A sorts before BF0C, so the template came out of ascending
-     * order. It now rebuilds through a sorted map.
+     * FIX: this used to append 9F2A when missing, which put it after BF0C - and
+     * 9F2A sorts before BF0C, so the template came out of ascending order. Now
+     * rebuilt through a sorted map.
      */
     private byte[] patchA5(byte[] a5, byte[] aid) {
         TreeMap<Integer, byte[]> tags = new TreeMap<>();
@@ -736,10 +662,6 @@ public class ShadowApduService extends HostApduService {
         out.write(0x00);
     }
 
-    /**
-     * FIX: a five digit value used to fall through every branch and land on the
-     * hardcoded 311201, and the two digit branch hardcoded the year 27.
-     */
     private String expiry6() {
         String d = p("expiry", "3112").replaceAll("[^0-9]", "");
         if (d.length() >= 6) return d.substring(0, 6);
@@ -776,13 +698,10 @@ public class ShadowApduService extends HostApduService {
     /**
      * Synthetic SFI 1 record for a card with no capture.
      *
-     * Tags in the order real cards use them. 9F07 (AUC) and 9F08 (application
-     * version) are included because a kernel-2 EMV record without a version
-     * number is a data-validation fault, and a validation fault is exactly an
-     * "error, insert card" fallback.
-     *
-     * 9F07 = FF00 allows every transaction type; nothing contactless reads it
-     * but its absence is noticed.
+     * 9F07 (AUC) and 9F08 (version) because a kernel-2 EMV record without a
+     * version number is a data-validation fault. 5F28 (issuer country) and 9F0D
+     * (CIAC-Default) because terminals expect them and a missing one is another
+     * validation fault.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -797,12 +716,14 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x5F24, hex(expS)),
                 tlv(0x5F34, hex(psnS)),
                 h == null ? new byte[0] : tlv(0x5F20, h),
+                tlv(0x5F28, hex("0840")),
                 tlv(0x57, track2()),
                 tlv(0x8C, hex(CDOL1)),
                 tlv(0x8D, hex(CDOL2)),
                 tlv(0x8E, hex(CVMLIST)),
                 tlv(0x9F07, hex("FF00")),
-                tlv(0x9F08, hex("0002"))));
+                tlv(0x9F08, hex("0002")),
+                tlv(0x9F0D, hex("0000F800"))));
     }
 
     @Override
@@ -944,38 +865,18 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * Replay the card's captured GPO, with two deliberate changes: the CDA bit
-     * of the AIP is cleared, and the CID is rewritten to TC.
+     * Replay the card's captured GPO, with the CDA bit cleared and the CID
+     * rewritten to TC.
      *
      * WHY THE CID IS REWRITTEN:
-     *   Some terminals take the application cryptogram out of the GPO response
-     *   and never send GENERATE AC. The captured CID is 80 (ARQC), so such a
-     *   terminal goes online - and the ARQC is the real card's, computed over a
-     *   different unpredictable number, so the host cannot match it and answers
-     *   005 do not honour.
+     *   Some terminals take the cryptogram out of the GPO response and never send
+     *   GENERATE AC. The captured CID is 80 (ARQC), so such a terminal goes
+     *   online - and the ARQC is the real card's, computed over a different
+     *   unpredictable number, so the host cannot match it and answers 005.
+     *   Rewriting that byte to 40 (TC) says "approved, do not call the host".
      *
-     *   Rewriting that one byte to 40 (TC) makes the card say "approved, do not
-     *   call the host". The terminal approves offline and prints.
-     *
-     *   Set GPO_CID back to CID_ARQC once a real MK-AC is in place and the ARQC
-     *   is computed rather than replayed.
-     *
-     * WHY CDA GOES:
-     *   CDA needs the SDAD in 9F4B, signed with the ICC private key a clone does
-     *   not have. Clearing the bit makes the terminal skip ODA entirely.
-     *
-     * WHY CVM STAYS:
-     *   Clearing the CV bit gave AIP 0800 and the terminal bailed. The CVM list
-     *   itself is now no-CVM - see CVMLIST.
-     *
-     * The changes are made by mutating the captured template in place, not by
-     * rebuilding it, so any extra tags the card put in its GPO response survive.
-     *
-     * The MSD field still wins: if you tick MSD on a card captured in EMV mode,
-     * the framing genuinely has to change, so the built path is used.
-     *
-     * NOTE: while a capture is present, a typed 'aip' or 'afl' override is
-     * bypassed. Clear cap_rawgpo to get the built path back.
+     * The MSD field wins: if MSD is ticked, the framing genuinely has to change,
+     * so the built path is used.
      */
     private byte[] gpo() {
         byte[] raw = rawGpo();
@@ -1035,7 +936,9 @@ public class ShadowApduService extends HostApduService {
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a));
 
         if (msd) {
-            byte[] payload = cat(used, tlv(0x57, track2()));
+            // Format 1 is AIP, then 57, then 94. The AFL is not optional - without
+            // it the terminal has nothing to read and gives up at the GPO.
+            byte[] payload = cat(used, tlv(0x57, track2()), tlv(0x94, a));
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
@@ -1045,10 +948,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * Clear the CDA bit in the AIP of a captured GPO template, in place.
      *
-     * FIX: format 1 (outer tag 80) has NO inner TLVs - the payload is two raw
-     * AIP bytes followed by the track 2. The old version walked inner TLVs
-     * looking for 82, found none, and returned, so the CDA bit survived
-     * untouched in MSD mode.
+     * FIX: format 1 (outer tag 80) has NO inner TLVs - the payload is two raw AIP
+     * bytes followed by the track 2. The old version walked inner TLVs looking
+     * for 82, found none, and returned, so the CDA bit survived in MSD mode.
      */
     private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
@@ -1077,10 +979,6 @@ public class ShadowApduService extends HostApduService {
     /**
      * Overwrite the CID in a captured GPO template, in place, or append one if
      * the template carries none.
-     *
-     * This byte is the whole decision: the terminal takes the AC from here and
-     * never asks for another, so nothing else can influence approve / online /
-     * decline.
      */
     private static byte[] forceCid(byte[] tpl, byte cid) {
         int[] pos = new int[1];
@@ -1106,8 +1004,7 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * Rebuild a captured GPO template without the tags in GPO_AC_TAGS, so the
-     * terminal is left holding only the AIP and the AFL.
+     * Rebuild a captured GPO template without the tags in GPO_AC_TAGS.
      *
      * Only used when STRIP_AC is true. Format 1 is not a template of TLVs - the
      * payload is <AIP 2 bytes> <57 track 2> - so the AIP is copied verbatim and
@@ -1167,9 +1064,8 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * FIX: the format 1 branch used raw[2] and raw[3], which is only right for a
-     * short-form length. A long-form payload (0x81 xx) put the AIP two bytes
-     * further along.
+     * FIX: the format 1 branch used raw[2] and raw[3], only right for a short-form
+     * length. A long-form payload (0x81 xx) put the AIP two bytes further along.
      */
     private byte[] capturedAip(byte[] raw) {
         if (raw == null || raw.length < 4) return null;
@@ -1219,12 +1115,8 @@ public class ShadowApduService extends HostApduService {
      * The CID box in the editor wins on the FIRST GENERATE AC when it holds a
      * two-digit value, except that an AAC request can never be improved on.
      *
-     * FIX: the flags were tested BEFORE the request, so a terminal asking for
-     * AAC (P1 0x00) was handed TC. CID severity runs AAC < ARQC < TC and a card
-     * may only answer equal or lower - never better than it was asked.
-     *
-     * The body is assembled into its own array and its length logged, so the
-     * outer 77 length and the bytes it covers can be compared at a glance.
+     * CID severity runs AAC < ARQC < TC and a card may only answer equal or
+     * lower - never better than it was asked.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
@@ -1326,19 +1218,6 @@ public class ShadowApduService extends HostApduService {
         return SW_NOT_FOUND;
     }
 
-    /**
-     * Built from counters, not from searching the log text.
-     *
-     * FIX: the "AC came out of the GPO" branch used to run before the record
-     * count, so a terminal that bailed at the GPO and one that read every record
-     * then went online produced the identical verdict. They are different
-     * faults. The record count is now tested first.
-     *
-     * FIX: "found no AID it supports" was a lie whenever a terminal had already
-     * selected that exact AID a moment earlier. One SELECT means it read the
-     * directory and quit - a field drop or an unready terminal, not an AID
-     * mismatch. Two SELECTs and no GPO is the real AID/ FCI rejection.
-     */
     private String baseVerdict() {
         if (sawError)     return "TAP: an APDU threw - read the !! line, not the AID list";
         if (tapLog.length() == 0) return "TAP: nothing recorded";
@@ -1349,12 +1228,9 @@ public class ShadowApduService extends HostApduService {
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
-            if (nGens == 0)          return "TAP: MSD mode - terminal took the track 2 and decided on its own";
-            if (nGens >= 2)          return "TAP: MSD mode - terminal WENT ONLINE";
-            if ("40".equals(lastCid)) return "TAP: MSD mode - we answered TC, terminal should APPROVE";
-            if ("80".equals(lastCid)) return "TAP: MSD mode - we answered ARQC, terminal must go online";
-            if ("00".equals(lastCid)) return "TAP: MSD mode - we answered AAC, terminal read it as a decline";
-            return "TAP: MSD mode - terminal asked for a cryptogram and we did not answer TC";
+            if (nGens > 0)           return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";
+            if (nRecs == 0)          return "TAP: MSD mode - terminal took the track 2 and read no record";
+            return "TAP: MSD mode - terminal read " + nRecs + " record(s) and should have decided";
         }
 
         if (nRecs == 0) {
