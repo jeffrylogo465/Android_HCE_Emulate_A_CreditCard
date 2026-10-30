@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">SHADOWS WALLET</string>
+    <string name="app_name">Shadow Wallet</string>
 
     <string name="header_write">This app emulates a Credit Card</string>
     <!-- updated: the app clones any card now, not just Visa -->
