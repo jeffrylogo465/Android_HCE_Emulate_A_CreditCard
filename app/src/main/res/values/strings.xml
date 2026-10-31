@@ -19,4 +19,8 @@
     <string name="aidDiscover">A0000001523010</string>
 
     <string name="hce_service_log">HCE Service Log</string>
+
+    <!-- persistent payment-role prompt -->
+    <string name="become_default">Tap to use Shadow Wallet for taps — Android needs one confirmation, and Google Wallet is replaced until you switch back.</string>
+    <string name="nfc_off">NFC is off — turn it on, then tap here to become the payment app.</string>
 </resources>
