@@ -1,6 +1,7 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -8,6 +9,7 @@ import android.nfc.NfcAdapter;
 import android.nfc.NfcManager;
 import android.nfc.cardemulation.CardEmulation;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
@@ -59,6 +61,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String CVMLIST = "00000000000000001F03";
 
     private static final String PPSE    = "325041592E5359532E4444463031";
+
+    /** One-shot flag for the payment-role prompt. */
+    private static final String ASKED_DEFAULT = "asked_default";
 
     private static final String HINT =
             "Paste a dump anywhere - it fills itself in.\n"
@@ -113,7 +118,7 @@ public class MainActivity extends AppCompatActivity {
     private RecyclerView pager;
     private LinearLayoutManager layoutManager;
     private PagerSnapHelper snapHelper;
-    private TextView txtCount, txtStatus;
+    private TextView txtCount, txtStatus, banner;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -149,6 +154,7 @@ public class MainActivity extends AppCompatActivity {
         pager = findViewById(R.id.pager);
         txtCount = findViewById(R.id.txtCount);
         txtStatus = findViewById(R.id.txtStatus);
+        banner = findViewById(R.id.banner);
 
         etLabel = findViewById(R.id.etLabel);
         etName = findViewById(R.id.etName);
@@ -180,6 +186,8 @@ public class MainActivity extends AppCompatActivity {
 
         navWallet.setOnClickListener(v -> showPage(0));
         navEdit.setOnClickListener(v -> showPage(1));
+
+        if (banner != null) banner.setOnClickListener(v -> promptDefault());
 
         adapter = new CardAdapter();
         layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
@@ -1428,6 +1436,15 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- payment role ----------
 
+    /**
+     * Foreground boost. While this activity is resumed our AIDs win the
+     * arbitration even if we are not the default payment app - which is what
+     * makes tapping with the app open work without touching settings.
+     *
+     * It is released in onPause, so it does NOT cover a tap with the app closed,
+     * the screen locked, or another app in front. That is what promptDefault()
+     * is for.
+     */
     private void claimPaymentRole() {
         try {
             NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
@@ -1448,6 +1465,61 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable ignored) { }
     }
 
+    private boolean isDefaultPayment() {
+        try {
+            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
+            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
+            if (nfc == null) return false;
+            CardEmulation ce = CardEmulation.getInstance(nfc);
+            return ce.isDefaultServiceForCategory(
+                    new ComponentName(this, ShadowApduService.class),
+                    CardEmulation.CATEGORY_PAYMENT);
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
+    /** Ask the system to make us the default payment service. */
+    private void promptDefault() {
+        try {
+            Intent i = new Intent(CardEmulation.ACTION_CHANGE_DEFAULT);
+            i.putExtra(CardEmulation.EXTRA_SERVICE_COMPONENT,
+                    new ComponentName(this, ShadowApduService.class));
+            i.putExtra(CardEmulation.EXTRA_CATEGORY, CardEmulation.CATEGORY_PAYMENT);
+            startActivity(i);
+        } catch (ActivityNotFoundException e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_NFC_PAYMENT_SETTINGS));
+            } catch (ActivityNotFoundException ignored) { }
+        }
+    }
+
+    /**
+     * Show the banner whenever we are not the default, and fire the system
+     * dialog once. The banner stays after the one-shot so there is always a way
+     * back in.
+     */
+    private void maybeAskDefault() {
+        boolean isDefault = isDefaultPayment();
+
+        if (banner != null) {
+            boolean nfcOff = false;
+            try {
+                NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
+                NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
+                nfcOff = (nfc == null || !nfc.isEnabled());
+            } catch (Throwable ignored) { }
+
+            banner.setText(nfcOff ? R.string.nfc_off : R.string.become_default);
+            banner.setVisibility(isDefault ? View.GONE : View.VISIBLE);
+        }
+
+        if (isDefault) return;
+        if (prefs.getBoolean(ASKED_DEFAULT, false)) return;
+        prefs.edit().putBoolean(ASKED_DEFAULT, true).apply();
+        promptDefault();
+    }
+
     @Override
     protected void onPause() {
         releasePaymentRole();
@@ -1459,6 +1531,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         claimPaymentRole();
+        maybeAskDefault();
         if (suppressResumeStatus) {
             suppressResumeStatus = false;
             return;
