@@ -97,11 +97,14 @@ public class ShadowApduService extends HostApduService {
     private static final boolean EXTRA_AIDS = false;
 
     /**
-     * BISECT SWITCH - the PPSE entry carries 4F and 87 only.
+     * BISECT SWITCH - the generated PPSE entry carries 4F and 87 only.
      *
      * Terminals were answering INSERT CARD straight after the directory, so they
      * read the PPSE and refused the app before sending SELECT AID. With the label
      * and 9F2A gone a terminal DID select the AID. Leave true.
+     *
+     * NOTE: this only affects the GENERATED directory. A captured PPSE is served
+     * verbatim and keeps whatever the real card carried.
      */
     private static final boolean PPSE_MINIMAL = true;
 
@@ -403,6 +406,7 @@ public class ShadowApduService extends HostApduService {
         return hexOrNull(p("cap_" + key, ""));
     }
 
+    private byte[] rawPpse() { return cap("rawppse"); }
     private byte[] rawFci()  { return cap("rawfci"); }
     private byte[] rawGpo()  { return cap("rawgpo"); }
 
@@ -508,7 +512,27 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
+    /**
+     * PPSE directory.
+     *
+     * A captured PPSE is served verbatim - it carries the real label and 9F2A,
+     * and 9F2A is what the terminal uses to pick a kernel. The generated
+     * fallback is the BISECT BUILD described at PPSE_MINIMAL.
+     */
     private byte[] buildPpse() {
+        byte[] captured = rawPpse();
+        if (captured != null && captured.length >= 4) {
+            // Tolerate a capture that kept its trailing 9000.
+            if (captured.length >= 2
+                    && (captured[captured.length - 2] & 0xFF) == 0x90
+                    && (captured[captured.length - 1] & 0xFF) == 0x00) {
+                captured = Arrays.copyOf(captured, captured.length - 2);
+            }
+            tap("-- ppse source: captured " + captured.length + "B");
+            return captured;
+        }
+        tap("-- ppse source: generated");
+
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
 
