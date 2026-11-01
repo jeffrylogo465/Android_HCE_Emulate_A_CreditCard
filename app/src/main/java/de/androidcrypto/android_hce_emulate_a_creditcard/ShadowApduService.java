@@ -1,490 +1,500 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import android.app.AlertDialog;
-import android.content.ActivityNotFoundException;
-import android.content.ComponentName;
-import android.content.Intent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.SharedPreferences;
-import android.nfc.NfcAdapter;
-import android.nfc.NfcManager;
-import android.nfc.cardemulation.CardEmulation;
+import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
-import android.provider.Settings;
-import android.text.Editable;
-import android.text.TextWatcher;
-import android.view.View;
-import android.widget.EditText;
-import android.widget.TextView;
+import android.util.Log;
 import android.widget.Toast;
 
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.PagerSnapHelper;
-import androidx.recyclerview.widget.RecyclerView;
-
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
-import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
-public class MainActivity extends AppCompatActivity {
+public class ShadowApduService extends HostApduService {
 
-    private static final String PREF = "hce_card";
-    private static final int MAX_CARDS = 20;
-    private static final int REQ_CLONE = 4711;
+    private static final String TAG = "HCE";
 
-    private static final long FRESH_MS = 3 * 60 * 1000L;
-    private static final long WARM_MS = 60 * 60 * 1000L;
+    private static final byte[] SW_OK          = hex("9000");
+    private static final byte[] SW_BAD         = hex("6A82");
+    private static final byte[] SW_UNSUPPORTED = hex("6D00");
+    private static final byte[] SW_MALFORMED   = hex("6700");
+    private static final byte[] SW_NO_RECORD   = hex("6A83");
+    private static final byte[] SW_NOT_FOUND   = hex("6A88");
+    private static final byte[] SW_ERR         = hex("6F00");
+    private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    private static final int COL_NEUTRAL = 0xFF9CA3AF;
-    private static final int COL_FRESH   = 0xFF9AE6B4;
-    private static final int COL_WARM    = 0xFFF6C177;
-    private static final int COL_STALE   = 0xFF6B7280;
+    /**
+     * Fallback AIP when the card has no captured GPO and no typed value.
+     *
+     * EMV Contactless AIP byte 1:
+     *   0x80 mag-stripe mode (Mastercard)   0x10 cardholder verification
+     *   0x40 qVSDC supported (Mastercard)   0x08 terminal risk management
+     *   0x20 DDA   0x02 on-device CVM   0x01 CDA   0x04 issuer authentication
+     *
+     * Byte 2 bit 8 (0x80) is RFU on a Mastercard - the sample card carries 19 80
+     * and still works, which is where the "1080 says neither" note came from: it
+     * was byte 1 that was wrong there, not byte 2.
+     *
+     * 5800 is the working value for the test terminal: EMV mode, CVM supported,
+     * terminal risk management. No ODA bits - a clone cannot honour them.
+     */
+    private static final String DEFAULT_AIP = "5800";
 
-    /** Must match the service, or a seeded record and the ARQC MAC disagree. */
+    /**
+     * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the ODA
+     * bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a clone
+     * can never satisfy, and keeps mag-stripe (0x80), CV (0x10) and TRM (0x08).
+     *
+     * FIX: this used to be 0x18, which also cleared 0x40 - and 0x40 is the
+     * Mastercard qVSDC bit, so a typed 1040 was MACed over as 1000. Mode bits are
+     * not ODA bits; they stay.
+     */
+    private static final byte AIP_KEEP_MASK = (byte) 0xD8;
+
+    /**
+     * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
+     * SDAD in 9F4B, signed with the ICC private key we do not have. gpo() clears
+     * this bit off whatever AIP it sends.
+     *
+     * VERIFIED against Sample_Mastercard_Reader_Logfile.md: that card's AIP is
+     * 19 80, and 0x01 is the CDA bit. Byte 2's 0x80 is RFU and needs no clearing.
+     */
+    private static final byte AIP_CDA = (byte) 0x01;
+
+    /**
+     * AIP byte 1 bit 5 - cardholder verification supported.
+     *
+     * STAYS SET. Clearing it produced AIP 0800 and the terminal bailed on the
+     * GPO without sending a single READ RECORD.
+     *
+     * The list itself is what decides, and it is now no-CVM. See CVMLIST.
+     */
+    private static final byte AIP_CVM = (byte) 0x10;
+
+    /**
+     * Tags a real card may legitimately put in a GPO response but which a clone
+     * normally must NOT, because they describe a cryptogram the card already
+     * produced.
+     *
+     * false - keep the card's own AC tags and rewrite the CID to TC instead.
+     */
+    private static final boolean STRIP_AC = false;
+
+    private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
+
+    /**
+     * Whether buildPpse() advertises Visa and Mastercard alongside the card's
+     * own AID. Unused while PPSE_MINIMAL is true, kept for the bisect.
+     */
+    private static final boolean EXTRA_AIDS = false;
+
+    /**
+     * BISECT SWITCH - the generated PPSE entry carries 4F and 87 only.
+     *
+     * Terminals were answering INSERT CARD straight after the directory, so they
+     * read the PPSE and refused the app before sending SELECT AID. With the label
+     * and 9F2A gone a terminal DID select the AID. Leave true.
+     *
+     * NOTE: this only affects the GENERATED directory. A captured PPSE is served
+     * verbatim and keeps whatever the real card carried.
+     */
+    private static final boolean PPSE_MINIMAL = true;
+
+    private static final byte CID_AAC  = (byte) 0x00;
+    private static final byte CID_TC   = (byte) 0x40;
+    private static final byte CID_ARQC = (byte) 0x80;
+
+    /**
+     * The CID written into the GPO response when STRIP_AC is false.
+     *
+     * 40 = TC   approve offline, the terminal never asks the host  <- this
+     * 80 = ARQC go online, the host judges the cryptogram
+     * 00 = AAC  decline offline
+     *
+     * Declared after CID_TC on purpose: a static initialiser referring to a later
+     * simple name is an illegal forward reference in Java.
+     */
+    private static final byte GPO_CID = CID_TC;
+
+    private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
+    private static final boolean FORCE_ONLINE_ARQC = true;
+    private static final boolean FORCE_OFFLINE_TC = true;
+
+    private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     /**
-     * No CVM required - 1F 03. Must match the service.
+     * CVM list: X = 0, Y = 0, one rule - 1F 03, "no CVM required, if supported".
      *
-     * The card decides TC offline, so no online session exists and an online-PIN
-     * rule (1E 03) asks the kernel for a PIN block nothing can produce. The
-     * kernel then aborts with "error, insert card".
-     *
-     * This constant only applies when the CVM box is EMPTY. A card already
-     * carrying 1E031F00 keeps it - blank the box and seed again.
+     * WHY NOT ONLINE PIN (1E 03):
+     *   The card decides TC offline, so no online session opens - but an
+     *   online-PIN rule says the card expects a PIN block only an online session
+     *   produces. The kernel ends up with a CVM it cannot perform and aborts.
      */
     private static final String CVMLIST = "00000000000000001F03";
 
-    private static final String PPSE    = "325041592E5359532E4444463031";
+    /**
+     * 9F34 CVM Results - no CVM performed, if supported, SUCCESSFUL.
+     *
+     * Third byte 02 is the result. 00 (unknown) is legal but says nothing; a
+     * terminal that checks it prefers 02.
+     */
+    private static final String CVM_RESULTS = "1F0302";
 
-    /** One-shot flag for the payment-role prompt. */
-    private static final String ASKED_DEFAULT = "asked_default";
+    /**
+     * Used when the selected card has no script of its own. One per line:
+     *   <match>=<response>
+     * '#' starts a comment, spaces are ignored, longest match wins.
+     *
+     * INCLUDE THE 9000 ON THE SAME LINE. It is part of the response.
+     *
+     * GATED. The script is OFF unless the card's 'usescript' pref says otherwise.
+     *
+     * NOTE: a script that serves a GPO bypasses everything gpo() does - the CDA
+     * clear, the CID rewrite and the MSD framing.
+     */
+    private static final String DEFAULT_SCRIPT =
+            "# match=response, hex only. Longest match wins.\n"
+          + "# 80A80000=770A82021080940408010100 9000\n"
+          + "# 00B2010C=70265A0860114994320077045F24033112318C149F02069F03069F1A0295055F2A029A039C019F3704 9000\n";
 
-    private static final String HINT =
-            "Paste a dump anywhere - it fills itself in.\n"
-          + "Long-press AID to pick a brand, the card count to see the capture.";
+    private final StringBuilder tapLog = new StringBuilder();
+    private final Random rnd = new Random();
 
-    private static final String[][] VARIANTS = {
-            {"0", "CDOL, AIP, ATC  -  option 0"},
-            {"1", "CDOL, AIP, ATC  -  option 1"},
-            {"2", "AIP, ATC, CDOL  -  option 0"},
-            {"3", "AIP, ATC, CDOL  -  option 1"},
-    };
+    private byte[] txnAip;
+    private String txnAtc;
+    private boolean cryptogramSent;
+    private int scriptHits;
 
-    private static final String[][] AID_PRESETS = {
-            {"Discover / Diners",      "A0000001523010"},
-            {"Discover (legacy RID)",  "A0000000152001"},
-            {"Mastercard",             "A0000000041010"},
-            {"Maestro",                "A0000000043060"},
-            {"Visa",                   "A0000000031010"},
-            {"Visa Electron",          "A0000000032010"},
-            {"American Express",       "A00000002501"},
-            {"JCB",                    "A0000000651010"},
-            {"UnionPay",               "A000000333010101"},
-            {"Interac",                "A0000002771010"},
-            {"Eftpos",                 "A0000003841010"},
-            {"Girocard",               "A0000003591010"},
-    };
+    /** The captured IAD, lifted out of the GPO replay before any rewrite. */
+    private byte[] capturedIad;
 
-    private static final String[] ROUTABLE = {
-            "325041592E5359532E4444463031",
-            "A0000000031010", "A0000000031020", "A0000000032010",
-            "A0000000032020", "A0000000038010",
-            "A0000000041010", "A0000000041000", "A0000000043060",
-            "A0000000046000", "A0000000048002", "A0000000050001",
-            "A00000002501", "A0000000250104", "A0000000250001",
-            "A0000001523010", "A0000001524010", "A0000001521010",
-            "A0000001522010", "A0000001522001", "A0000001522300",
-            "A0000001522400", "A0000000152001", "A0000000152010",
-            "A0000000152020", "A0000000152200", "A0000000152300",
-            "A0000000152400", "A0000000010101",
-            "A0000000651010", "A0000000650000",
-            "A0000003330101", "A000000333010101", "A000000333010102",
-            "A000000333010103",
-            "A0000002771010", "A0000003845010", "A0000003841010",
-            "A00000038410", "F0010203040506",
-            "A0000003591010", "A0000003591010028001", "A00000000386980701",
-            "A0000000410100", "A0000000422035",
-    };
+    /** CID currently in force in the GPO response, for the verdict. */
+    private String gpoCid = "";
 
-    private SharedPreferences prefs;
-    private final List<CardAdapter.CardModel> cards = new ArrayList<>();
-    private CardAdapter adapter;
-    private RecyclerView pager;
-    private LinearLayoutManager layoutManager;
-    private PagerSnapHelper snapHelper;
-    private TextView txtCount, txtStatus, banner;
+    private boolean sawPpse;
+    private int nSelects, nGpos, nRecs, nGens;
+    private String lastCid = "";
 
-    private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
-            etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-            etMsd, etScript, etCvmlist, etCvmres, etPdol, etCdol1, etCdol2;
+    // Set when an APDU throws, so baseVerdict() can say so instead of blaming
+    // the terminal's AID list for what is actually our own exception.
+    private boolean sawError;
 
-    private View pageWallet, pageEdit;
-    private TextView navWallet, navEdit;
+    /** Name of the on-device terminal log. App-private, no permission needed. */
+    private static final String TERM_LOG = "term_log.txt";
 
-    private int current = 0;
-    private boolean binding = false;
-    private boolean suppressResumeStatus = false;
+    private void termLog(String s) {
+        try {
+            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(s + "\n");
+            w.close();
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-
-        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
-            String s = android.util.Log.getStackTraceString(e);
-            try {
-                android.content.ClipboardManager cm = (android.content.ClipboardManager)
-                        getSystemService(CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", s));
-            } catch (Exception ignored) { }
-            try { Thread.sleep(400); } catch (Exception ignored) { }
-            android.os.Process.killProcess(android.os.Process.myPid());
-        });
-
-        setContentView(R.layout.activity_main);
-        if (getSupportActionBar() != null) getSupportActionBar().hide();
-
-        prefs = getSharedPreferences(PREF, MODE_PRIVATE);
-
-        pager = findViewById(R.id.pager);
-        txtCount = findViewById(R.id.txtCount);
-        txtStatus = findViewById(R.id.txtStatus);
-        banner = findViewById(R.id.banner);
-
-        etLabel = findViewById(R.id.etLabel);
-        etName = findViewById(R.id.etName);
-        etPan = findViewById(R.id.etPan);
-        etExpiry = findViewById(R.id.etExpiry);
-        etService = findViewById(R.id.etService);
-        etDiscretionary = findViewById(R.id.etDiscretionary);
-        etTrack2 = findViewById(R.id.etTrack2);
-        etAid = findViewById(R.id.etAid);
-        etAip = findViewById(R.id.etAip);
-        etAfl = findViewById(R.id.etAfl);
-        etCid = findViewById(R.id.etCid);
-        etAtc = findViewById(R.id.etAtc);
-        etArqc = findViewById(R.id.etArqc);
-        etIad = findViewById(R.id.etIad);
-        etMkac = findViewById(R.id.etMkac);
-        etMsd = findViewById(R.id.etMsd);
-        etScript = findViewById(R.id.etScript);
-        etCvmlist = findViewById(R.id.etCvmlist);
-        etCvmres = findViewById(R.id.etCvmres);
-        etPdol = findViewById(R.id.etPdol);
-        etCdol1 = findViewById(R.id.etCdol1);
-        etCdol2 = findViewById(R.id.etCdol2);
-
-        pageWallet = findViewById(R.id.pageWallet);
-        pageEdit = findViewById(R.id.pageEdit);
-        navWallet = findViewById(R.id.navWallet);
-        navEdit = findViewById(R.id.navEdit);
-
-        navWallet.setOnClickListener(v -> showPage(0));
-        navEdit.setOnClickListener(v -> showPage(1));
-
-        if (banner != null) banner.setOnClickListener(v -> promptDefault());
-
-        adapter = new CardAdapter();
-        layoutManager = new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false);
-        snapHelper = new PagerSnapHelper();
-        pager.setLayoutManager(layoutManager);
-        pager.setAdapter(adapter);
-        snapHelper.attachToRecyclerView(pager);
-
-        loadAll();
-        bindCard(Math.min(Math.max(prefs.getInt("selected", 0), 0), cards.size() - 1));
-        pager.post(this::applyTransforms);
-
-        pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override
-            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
-                applyTransforms();
+            if (f.length() > 60000) {
+                long keep = 30000;
+                byte[] buf = new byte[(int) keep];
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
+                raf.seek(f.length() - keep);
+                raf.readFully(buf);
+                raf.setLength(0);
+                raf.write(buf);
+                raf.close();
             }
+        } catch (Throwable ignored) { }
+    }
 
-            @Override
-            public void onScrollStateChanged(@NonNull RecyclerView rv, int state) {
-                if (state != RecyclerView.SCROLL_STATE_IDLE) return;
-                View v = snapHelper.findSnapView(layoutManager);
-                if (v == null) return;
-                int pos = layoutManager.getPosition(v);
-                if (pos >= 0 && pos != current) {
-                    collect();
-                    current = pos;
-                    bindCard(pos);
-                    prefs.edit().putInt("selected", pos).apply();
+    private void tap(String s) {
+        tapLog.append(s).append('\n');
+        if (tapLog.length() > 32000) tapLog.delete(0, 16000);
+        termLog(s);
+    }
+
+    private void popup(final String s) {
+        if (s == null || s.isEmpty()) return;
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(ShadowApduService.this, s, Toast.LENGTH_SHORT).show();
                 }
-            }
-        });
-
-        findViewById(R.id.btnSave).setOnClickListener(v -> onSave());
-        findViewById(R.id.btnSave).setOnLongClickListener(v -> { showPreview(); return true; });
-        findViewById(R.id.btnAdd).setOnClickListener(v -> { onAdd(); showPage(1); });
-        findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
-        findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
-        findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
-        findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
-
-        etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
-        etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
-        etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
-        navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
-        txtCount.setOnLongClickListener(v -> { startCapture(); return true; });
-        txtStatus.setOnLongClickListener(v -> { clearVerdict(); return true; });
-
-        TextWatcher watcher = new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            public void afterTextChanged(Editable s) {
-                if (!binding) {
-                    collect();
-                    adapter.notifyItemChanged(current);
-                }
-            }
-        };
-        EditText[] fields = { etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
-                etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
-                etMsd, etScript, etCvmlist, etCvmres, etPdol, etCdol1, etCdol2 };
-        for (EditText f : fields) f.addTextChangedListener(watcher);
-
-        TextWatcher filler = new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
-            public void onTextChanged(CharSequence s, int a, int b, int c) { }
-            public void afterTextChanged(Editable s) {
-                if (!binding) autoFill();
-            }
-        };
-        etTrack2.addTextChangedListener(filler);
-        etPan.addTextChangedListener(filler);
-
-        showPage(0);
+            });
+        } catch (Exception ignored) { }
     }
 
-    // ---------- status line ----------
+    static byte[] hex(String s) { return Hex.hex(s); }
+    static byte[] cat(byte[]... arrs) { return Tlv.cat(arrs); }
+    private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
 
-    private void status(String s) { status(s, COL_NEUTRAL); }
-
-    private void status(String s, int colour) {
-        txtStatus.setText(s == null ? "" : s);
-        txtStatus.setTextColor(colour);
-    }
-
-    private void clearVerdict() {
-        prefs.edit().remove("lastverdict").remove("lastverdict_at").apply();
-        status("Verdict cleared - tap a till to make a new one");
-    }
-
-    private void showLastVerdict() {
-        String v = prefs.getString("lastverdict", "");
-        if (v.isEmpty()) {
-            status(HINT);
-            return;
-        }
-
-        long at = prefs.getLong("lastverdict_at", 0L);
-        if (at == 0L) {
-            status("(undated) " + v, COL_STALE);
-            return;
-        }
-
-        long age = System.currentTimeMillis() - at;
-        if (age < 0) age = 0;
-
-        if (age < FRESH_MS) {
-            status(v, COL_FRESH);
-        } else if (age < WARM_MS) {
-            status(ago(age) + " ago: " + v, COL_WARM);
+    /**
+     * Local TLV writer. The length is always taken from v.length, so an outer
+     * length can never disagree with the bytes it covers.
+     */
+    static byte[] tlv(int tag, byte[] v) {
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        if ((tag & 0xFF00) != 0) {
+            o.write((tag >> 8) & 0xFF);
+            o.write(tag & 0xFF);
         } else {
-            status(ago(age) + " ago: " + v, COL_STALE);
+            o.write(tag & 0xFF);
         }
-    }
-
-    private static String ago(long ms) {
-        long m = ms / 60000L;
-        if (m < 1) return "seconds";
-        if (m < 60) return m + " min";
-        long h = m / 60;
-        if (h < 24) return h + " h";
-        return (h / 24) + " d";
-    }
-
-    // ---------- pages ----------
-
-    private void showPage(int page) {
-        pageWallet.setVisibility(page == 0 ? View.VISIBLE : View.GONE);
-        pageEdit.setVisibility(page == 1 ? View.VISIBLE : View.GONE);
-        navWallet.setTextColor(page == 0 ? 0xFF14B8A6 : 0xFF4B5563);
-        navEdit.setTextColor(page == 1 ? 0xFF14B8A6 : 0xFF4B5563);
-        if (page == 0) hideKeyboard();
-    }
-
-    private void hideKeyboard() {
-        View v = getCurrentFocus();
-        if (v == null) return;
-        android.view.inputmethod.InputMethodManager im =
-                (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
-        v.clearFocus();
-    }
-
-    // ---------- BIN hints ----------
-
-    private void applyHints(String pan) {
-        if (pan == null || pan.length() < 6) return;
-        String[] h = BankDirectory.hintsFor(pan);
-        if (h == null) return;
-
-        boolean changed = false;
-        binding = true;
-        if (t(etAid).isEmpty()) { etAid.setText(h[0]); changed = true; }
-        if (t(etLabel).isEmpty()) { etLabel.setText(h[1]); changed = true; }
-        if (t(etService).length() != 3) { etService.setText(h[2]); changed = true; }
-        binding = false;
-
-        if (changed) {
-            collect();
-            adapter.notifyItemChanged(current);
-            status((BankDirectory.knownBin(pan) ? h[4] : h[4] + " (network only)")
-                    + " - AID " + h[0] + " filled from the BIN");
-        }
-    }
-
-    private void autoFill() {
-        if (binding) return;
-
-        if (t(etName).isEmpty()) {
-            String n = nameFromTrack1(t(etTrack2));
-            if (n.isEmpty()) n = nameFromTrack1(t(etPan));
-            if (!n.isEmpty()) {
-                binding = true;
-                etName.setText(n);
-                binding = false;
-                collect();
-            }
-        }
-
-        String fromTrack = normaliseTrack2(t(etTrack2));
-        String fromPan = normaliseTrack2(t(etPan));
-
-        String src = null;
-        if (fromTrack.indexOf('D') > 0) {
-            src = fromTrack;
-        } else if (fromPan.indexOf('D') > 0) {
-            src = fromPan;
+        int n = v.length;
+        if (n < 0x80) {
+            o.write(n);
+        } else if (n <= 0xFF) {
+            o.write(0x81);
+            o.write(n);
+        } else if (n <= 0xFFFF) {
+            o.write(0x82);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
         } else {
-            String p = digits(t(etPan));
-            if (p.length() > 20) {
-                int panLen = (p.startsWith("34") || p.startsWith("37")) ? 15 : 16;
-                if (p.length() > panLen + 7) {
-                    src = p.substring(0, panLen) + "D" + p.substring(panLen);
-                }
+            o.write(0x83);
+            o.write((n >> 16) & 0xFF);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        }
+        o.write(v, 0, n);
+        return o.toByteArray();
+    }
+
+    private static int readTag(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
+        int t = b[pos[0]++] & 0xFF;
+        if ((t & 0x1F) == 0x1F) {
+            if (pos[0] >= b.length) return t;
+            t = (t << 8) | (b[pos[0]++] & 0xFF);
+            while (pos[0] < b.length && (b[pos[0] - 1] & 0x80) != 0) {
+                t = (t << 8) | (b[pos[0]++] & 0xFF);
             }
         }
-        if (src == null) return;
-
-        int sep = src.indexOf('D');
-        if (sep < 12 || sep > 19) return;
-        String pan = src.substring(0, sep);
-        if (!pan.matches("[0-9]+")) return;
-
-        String rest = src.substring(sep + 1);
-        if (rest.length() < 7) return;
-        String expiry = rest.substring(0, 4);
-        String service = rest.substring(4, 7);
-        String disc = rest.substring(7);
-        if (!expiry.matches("[0-9]{4}")) return;
-        if (!service.matches("[0-9]{3}")) return;
-
-        binding = true;
-        etTrack2.setText(src);
-        etPan.setText(pan);
-        etExpiry.setText(expiry);
-        etService.setText(service);
-        etDiscretionary.setText(disc);
-        binding = false;
-
-        collect();
-        adapter.notifyItemChanged(current);
-        applyHints(pan);
+        return t;
     }
 
-    private void applyTransforms() {
-        int centre = pager.getWidth() / 2;
-        if (centre == 0) return;
-        for (int i = 0; i < pager.getChildCount(); i++) {
-            View child = pager.getChildAt(i);
-            float mid = (child.getLeft() + child.getRight()) / 2f;
-            float dist = Math.min(Math.abs(mid - centre) / (float) centre, 1f);
-            child.setScaleY(1f - dist * 0.12f);
-            child.setAlpha(0.55f + (1f - dist) * 0.45f);
+    private static int readLen(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
+        int l = b[pos[0]++] & 0xFF;
+        if ((l & 0x80) != 0) {
+            int n = l & 0x7F, v = 0;
+            for (int k = 0; k < n && pos[0] < b.length; k++) {
+                v = (v << 8) | (b[pos[0]++] & 0xFF);
+            }
+            return v;
         }
+        return l;
     }
 
-    // ---------- storage ----------
-
-    private static String key(int i, String name) {
-        return "card" + i + "_" + name;
+    /** Lc of an incoming APDU, extended length included. */
+    private static int lcOf(byte[] apdu) {
+        if (apdu.length < 5) return 0;
+        int lc = apdu[4] & 0xFF;
+        if (lc != 0x00) return lc;
+        if (apdu.length < 7) return 0;
+        return ((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF);
     }
 
-    private static String t(EditText e) {
-        return e.getText().toString().trim();
+    /** Offset of the data field, past an extended length if there is one. */
+    private static int dataOff(byte[] apdu) {
+        return (apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00) ? 7 : 5;
     }
 
-    private static String digits(String s) {
-        return s.replaceAll("[^0-9]", "");
+    private static byte[] hexOrNull(String s) {
+        return (s == null || s.isEmpty()) ? null : hex(s);
     }
 
-    private String panFromTrack2() {
-        String track2 = normaliseTrack2(t(etTrack2));
-        int d = track2.indexOf('D');
-        if (d < 12 || d > 19) return "";
-        String p = digits(track2.substring(0, d));
-        return p.matches("[0-9]+") ? p : "";
+    private SharedPreferences prefs() {
+        return getSharedPreferences("hce_card", Context.MODE_PRIVATE);
     }
 
-    private static int expectedCheckDigit(String pan) {
-        if (pan.length() < 2) return -1;
-        String body = pan.substring(0, pan.length() - 1);
-        int sum = 0;
-        boolean dbl = true;
-        for (int i = body.length() - 1; i >= 0; i--) {
-            int d = body.charAt(i) - '0';
-            if (dbl) { d *= 2; if (d > 9) d -= 9; }
-            sum += d;
-            dbl = !dbl;
+    private String sel() {
+        return "card" + prefs().getInt("selected", 0) + "_";
+    }
+
+    private String p(String k, String d) {
+        Object o = prefs().getAll().get(sel() + k);
+        String v = (o == null) ? null : o.toString();
+        return (v == null || v.isEmpty()) ? d : v;
+    }
+
+    private void put(String k, String v) {
+        prefs().edit().putString(sel() + k, v).apply();
+    }
+
+    private boolean isMsd() {
+        String v = p("msd", "0").trim();
+        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
+    }
+
+    // ---------- card fields, normalised once ----------
+
+    private String pan() {
+        String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
+        return s.isEmpty() ? "4111111111111111" : s;
+    }
+
+    private String psn() {
+        String s = p("psn", "01").replaceAll("[^0-9]", "");
+        if (s.isEmpty()) return "01";
+        if (s.length() > 2) s = s.substring(0, 2);
+        if (s.length() == 1) s = "0" + s;
+        return s;
+    }
+
+    private String labelText() {
+        String s = p("label", p("cap_label", "CARD"));
+        return s.length() > 16 ? s.substring(0, 16) : s;
+    }
+
+    private String nextAtc() {
+        int atc = 0x001B;
+        try {
+            String cur = p("atc", "001B").replaceAll("[^0-9A-Fa-f]", "");
+            if (!cur.isEmpty()) atc = Integer.parseInt(cur, 16);
+        } catch (Exception ignored) { }
+        atc = (atc + 1) & 0xFFFF;
+        String h = String.format("%04X", atc);
+        put("atc", h);
+        return h;
+    }
+
+    private String txnAtc() {
+        if (txnAtc == null) txnAtc = nextAtc();
+        return txnAtc;
+    }
+
+    private void resetTransaction() {
+        txnAip = null;
+        txnAtc = null;
+        cryptogramSent = false;
+        scriptHits = 0;
+        sawPpse = false;
+        nSelects = nGpos = nRecs = nGens = 0;
+        lastCid = "";
+        sawError = false;
+        capturedIad = null;
+        gpoCid = "";
+    }
+
+    private byte[] aipForMac() {
+        byte[] a = txnAip;
+        if (a == null) {
+            a = hex(p("aip", DEFAULT_AIP));
+            if (a.length >= 2) a = new byte[]{(byte) (a[0] & AIP_KEEP_MASK), a[1]};
         }
-        return (10 - (sum % 10)) % 10;
+        if (a.length < 2) a = hex(DEFAULT_AIP);
+        return a;
     }
 
-    private String boxDiff(String pan) {
-        if (pan.isEmpty()) return null;
-        String ref = panFromTrack2();
-        if (ref.isEmpty() || ref.equals(pan)) return null;
-        if (ref.length() != pan.length()) {
-            return "PAN is " + pan.length() + " digits, TRACK 2 has " + ref.length()
-                    + " - different cards";
+    /**
+     * FIX: this used to accept anything 32 characters or longer, so an 8-byte
+     * (16 hex) key passed the gate and produced a half-length MAC.
+     */
+    private boolean haveKey() {
+        int n = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "").length();
+        return n == 32 || n == 48;
+    }
+
+    private byte[] cap(String key) {
+        return hexOrNull(p("cap_" + key, ""));
+    }
+
+    private byte[] rawPpse() { return cap("rawppse"); }
+    private byte[] rawFci()  { return cap("rawfci"); }
+    private byte[] rawGpo()  { return cap("rawgpo"); }
+
+    private byte[] rawRec(int sfi, int rec) {
+        return cap("rec" + sfi + "_" + rec);
+    }
+
+    private String holderName() {
+        return p("name", p("cap_holder", ""));
+    }
+
+    private String nameLine() {
+        String h = holderName();
+        String pan = p("pan", "");
+        String tail = pan.length() >= 4 ? "  \u2022\u2022" + pan.substring(pan.length() - 4) : "";
+        if (h.isEmpty()) return pan.isEmpty() ? "Tapping - card is empty" : "Tapping" + tail;
+        return h + tail;
+    }
+
+    private byte[] holder() {
+        String h = holderName().toUpperCase()
+                .replaceAll("[^A-Z0-9 ./'-]", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (h.length() < 2) return null;
+        if (h.length() > 26) h = h.substring(0, 26);
+        return h.getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    // ---------- script overrides ----------
+
+    private String scriptRaw() {
+        return p("script", DEFAULT_SCRIPT);
+    }
+
+    private boolean useScript() {
+        Object o = prefs().getAll().get(sel() + "usescript");
+        if (o instanceof Number) return ((Number) o).intValue() != 0;
+        if (o == null) return false;
+        String v = o.toString().trim();
+        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
+    }
+
+    private int scriptLines() {
+        String raw = scriptRaw();
+        if (raw.isEmpty()) return 0;
+        int n = 0;
+        for (String line : raw.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            if (line.indexOf('=') > 0) n++;
         }
-        for (int i = 0; i < pan.length(); i++) {
-            if (pan.charAt(i) != ref.charAt(i)) {
-                return "Digit " + (i + 1) + " is " + pan.charAt(i)
-                        + ", TRACK 2 has " + ref.charAt(i) + " - use the TRACK 2 value";
+        return n;
+    }
+
+    private String scriptMatch(byte[] apdu) {
+        String raw = scriptRaw();
+        if (raw.isEmpty()) return null;
+
+        String cmd = bytesToHex(apdu);
+        String best = null;
+        int bestLen = -1;
+
+        for (String line : raw.split("\\R")) {
+            int hash = line.indexOf('#');
+            if (hash >= 0) line = line.substring(0, hash);
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+
+            String m = line.substring(0, eq).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            String r = line.substring(eq + 1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            if (m.isEmpty() || m.length() % 2 != 0) continue;
+            if (r.length() < 2 || r.length() % 2 != 0) continue;
+            if (cmd.startsWith(m) && m.length() > bestLen) {
+                best = r;
+                bestLen = m.length();
             }
         }
-        return null;
+        return best;
     }
 
-    private static boolean routable(String aid) {
-        if (aid == null || aid.isEmpty()) return false;
-        for (String f : ROUTABLE) if (aid.startsWith(f)) return true;
-        return false;
+    /** A status word always starts 0x90 or in the 0x61-0x6F range. */
+    private static boolean looksLikeSw(int cls) {
+        return cls == 0x90 || (cls >= 0x61 && cls <= 0x6F);
     }
 
-    private static int kernelOf(String aid) {
-        String a = aid == null ? "" : aid.toUpperCase();
+    private static int kernelFor(String aidHex) {
+        String a = aidHex == null ? "" : aidHex.toUpperCase();
         if (a.startsWith("A000000152")) return 6;
         if (a.startsWith("A000000015")) return 6;
         if (a.startsWith("A000000004")) return 2;
@@ -494,1308 +504,836 @@ public class MainActivity extends AppCompatActivity {
         return 3;
     }
 
-    private void loadAll() {
-        cards.clear();
-        int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
-        SharedPreferences.Editor e = prefs.edit();
-        for (int i = 0; i < n; i++) {
-            CardAdapter.CardModel c = new CardAdapter.CardModel();
-            c.label = prefs.getString(key(i, "label"), "");
-            c.pan = prefs.getString(key(i, "pan"), "");
-            c.expiry = prefs.getString(key(i, "expiry"), "");
-            c.aid = prefs.getString(key(i, "aid"), "");
-            c.msd = prefs.getInt(key(i, "msd"), 0);
-            cards.add(c);
-
-            e.putInt(key(i, "usescript"),
-                    armedLines(prefs.getString(key(i, "script"), "")) > 0 ? 1 : 0);
-        }
-        e.apply();
-        if (cards.isEmpty()) cards.add(new CardAdapter.CardModel());
-        adapter.setCards(cards);
-        updateCount();
-    }
-
-    private void collect() {
-        int i = current;
-        SharedPreferences.Editor e = prefs.edit();
-        e.putString(key(i, "label"), t(etLabel));
-        e.putString(key(i, "name"), t(etName).toUpperCase());
-        e.putString(key(i, "pan"), digits(t(etPan)));
-        e.putString(key(i, "expiry"), t(etExpiry));
-        e.putString(key(i, "service"), t(etService));
-        e.putString(key(i, "discretionary"), t(etDiscretionary).toUpperCase());
-        e.putString(key(i, "track2"), normaliseTrack2(t(etTrack2)));
-        e.putString(key(i, "aid"), t(etAid).toUpperCase());
-        e.putString(key(i, "aip"), t(etAip).toUpperCase());
-        e.putString(key(i, "afl"), t(etAfl).toUpperCase());
-        e.putString(key(i, "cid"), t(etCid).toUpperCase());
-        e.putString(key(i, "atc"), t(etAtc).toUpperCase());
-        e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
-        e.putString(key(i, "iad"), t(etIad).toUpperCase());
-        e.putString(key(i, "cvmlist"), t(etCvmlist).toUpperCase());
-        e.putString(key(i, "cvmres"), t(etCvmres).toUpperCase());
-        e.putString(key(i, "pdol"), t(etPdol).toUpperCase());
-        e.putString(key(i, "cdol1"), t(etCdol1).toUpperCase());
-        e.putString(key(i, "cdol2"), t(etCdol2).toUpperCase());
-        e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
-        e.putString(key(i, "script"), t(etScript));
-        e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
-        e.putInt(key(i, "usescript"), armedLines(t(etScript)) > 0 ? 1 : 0);
-        e.putInt("card_count", cards.size());
-        e.putInt("selected", i);
-        e.apply();
-
-        if (i < cards.size()) {
-            CardAdapter.CardModel c = cards.get(i);
-            c.label = t(etLabel);
-            c.pan = t(etPan);
-            c.expiry = t(etExpiry);
-            c.aid = t(etAid);
-            c.msd = t(etMsd).startsWith("1") ? 1 : 0;
-        }
-    }
-
-    private void bindCard(int i) {
-        binding = true;
-        current = i;
-        etLabel.setText(prefs.getString(key(i, "label"), ""));
-        etName.setText(prefs.getString(key(i, "name"), ""));
-        etPan.setText(prefs.getString(key(i, "pan"), ""));
-        etExpiry.setText(prefs.getString(key(i, "expiry"), ""));
-        etService.setText(prefs.getString(key(i, "service"), "201"));
-        etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
-        etTrack2.setText(prefs.getString(key(i, "track2"), ""));
-        etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "5800"));
-        etAfl.setText(prefs.getString(key(i, "afl"), ""));
-        etCid.setText(prefs.getString(key(i, "cid"), ""));
-        etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
-        etArqc.setText(prefs.getString(key(i, "arqc"), ""));
-        etIad.setText(prefs.getString(key(i, "iad"), ""));
-        etCvmlist.setText(prefs.getString(key(i, "cvmlist"), ""));
-        etCvmres.setText(prefs.getString(key(i, "cvmres"), ""));
-        etPdol.setText(prefs.getString(key(i, "pdol"), ""));
-        etCdol1.setText(prefs.getString(key(i, "cdol1"), ""));
-        etCdol2.setText(prefs.getString(key(i, "cdol2"), ""));
-        etMkac.setText(prefs.getString(key(i, "mkac"), ""));
-
-        if (t(etMkac).isEmpty()) {
-            String b6 = digits(prefs.getString(key(i, "pan"), ""));
-            if (b6.length() >= 6) {
-                String kk = prefs.getString("keyfor_" + b6.substring(0, 6), "");
-                if (kk.length() == 32) etMkac.setText(kk);
-            }
-        }
-
-        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
-        etScript.setText(prefs.getString(key(i, "script"), ""));
-        binding = false;
-        updateCount();
-        status("");
-        autoFill();
-    }
-
-    private void updateCount() {
-        txtCount.setText(cards.size() == 1 ? "1 card" : cards.size() + " cards");
-    }
-
-    private static int armedLines(String script) {
-        if (script == null) return 0;
-        int n = 0;
-        for (String line : script.split("\\R")) {
-            int hash = line.indexOf('#');
-            if (hash >= 0) line = line.substring(0, hash);
-            if (line.indexOf('=') > 0) n++;
-        }
-        return n;
-    }
-
-    // ---------- AID presets ----------
-
-    private void showAidPicker() {
-        String[] labels = new String[AID_PRESETS.length];
-        for (int i = 0; i < AID_PRESETS.length; i++) {
-            labels[i] = AID_PRESETS[i][0] + "  (" + AID_PRESETS[i][1] + ")";
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("Which brand is this card?")
-                .setItems(labels, (d, which) -> {
-                    etAid.setText(AID_PRESETS[which][1]);
-                    collect();
-                    status("AID set to " + AID_PRESETS[which][0]);
-                    Toast.makeText(this, AID_PRESETS[which][0] + " AID set", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    // ---------- preview ----------
-
-    private String previewText() {
-        String pan = digits(t(etPan));
-        String exp = digits(t(etExpiry));
-        String sc = digits(t(etService));
-        String disc = t(etDiscretionary).toUpperCase();
-        String aid = t(etAid).toUpperCase();
-        String msd = t(etMsd).isEmpty() ? "0" : t(etMsd);
-
-        String track2 = normaliseTrack2(t(etTrack2));
-        if (track2.isEmpty() && !pan.isEmpty()) {
-            track2 = pan + "D" + exp + sc + disc;
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("AID  (4F)  : ")
-                .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
-        sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
-        sb.append("CID        : ")
-                .append(t(etCid).isEmpty() ? "(empty - logic decides: TC offline, ARQC only if a key)"
-                        : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
-        sb.append("MSD        : ").append("0".equals(msd)
-                ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
-        sb.append("MAC variant: ").append(prefs.getString(key(current, "keyvar"), "0")).append('\n');
-        sb.append('\n');
-
-        sb.append("5A  PAN    : ")
-                .append(pan.isEmpty() ? "4111111111111111  <-- DEFAULT, fill the PAN" : pan)
-                .append('\n');
-        if (!pan.isEmpty()) {
-            sb.append("   check digit : ")
-                    .append(luhn(pan) ? "ok" : "FAILS - last digit should be "
-                            + expectedCheckDigit(pan)).append('\n');
-            String diff = boxDiff(pan);
-            if (diff != null) sb.append("   !! ").append(diff).append('\n');
-
-            String[] h = BankDirectory.hintsFor(pan);
-            if (h != null) {
-                sb.append("   issuer : ").append(h[4]).append("  (").append(h[3]).append(')').append('\n');
-                if (!BankDirectory.knownBin(pan)) {
-                    sb.append("   note   : BIN not in the table - network range only\n");
-                }
-            } else {
-                sb.append("   issuer : unknown range, AID is a guess\n");
-            }
-        }
-        String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
-        if (exp.length() == 4) expOut = exp + "01";
-        sb.append("5F24 expiry: ").append(expOut).append('\n');
-        sb.append("5F20 name  : ")
-                .append(t(etName).isEmpty() ? "(empty - slip shows no name)" : t(etName).toUpperCase())
-                .append('\n');
-        sb.append("57  track2 : ")
-                .append(track2.isEmpty() ? "(empty)" : hexOf(track2)).append('\n');
-
-        sb.append("CVM list   : ")
-                .append(t(etCvmlist).isEmpty() ? "service constant (" + CVMLIST + ")"
-                        : t(etCvmlist).toUpperCase())
-                .append('\n');
-        sb.append("CVM result : ")
-                .append(t(etCvmres).isEmpty() ? "1F0300" : t(etCvmres).toUpperCase())
-                .append('\n');
-        sb.append("9F07/9F08  : FFC0 / 0002  (written by SEED RECORDS)\n");
-
-        if (t(etCvmlist).toUpperCase().startsWith("1E")) {
-            sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
-                    + " so nothing can collect a PIN\n");
-            sb.append("   blank the CVM box and seed again\n");
-        }
-
-        String script = t(etScript);
-        int scriptLines = armedLines(script);
-        sb.append("script     : ").append(scriptLines == 0
-                ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
-
-        String trackPan = track2.contains("D")
-                ? track2.substring(0, track2.indexOf("D")) : "";
-        if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
-            sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
-        }
-        if (aid.isEmpty()) {
-            sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
-        }
-        if (!aid.isEmpty() && !routable(aid)) {
-            sb.append('\n').append("!! AID has no <aid-filter> in apduservice.xml\n");
-            sb.append("   Android will not route the SELECT - tap dies with NO log line\n");
-            sb.append("   add: <aid-filter android:name=\"").append(aid).append("\" />\n");
-        }
-        if (pan.isEmpty() && track2.isEmpty()) {
-            sb.append('\n').append("nothing filled in yet\n");
-        }
-        return sb.toString();
-    }
-
-    private void showPreview() {
-        new AlertDialog.Builder(this)
-                .setTitle("What the terminal will see")
-                .setMessage(previewText())
-                .setPositiveButton("SEED RECORDS", (d, w) -> seedRecords())
-                .setNeutralButton("CLEAR CAPTURE", (d, w) -> clearCapture())
-                .setNegativeButton("Close", null)
-                .show();
-    }
-
-    // ---------- capture: clear and seed ----------
-
-    private void clearCapture() {
-        final int i = current;
-        new AlertDialog.Builder(this)
-                .setTitle("Clear the capture for card " + (i + 1) + "?")
-                .setMessage("Removes the captured PPSE, FCI, GPO and records, plus the "
-                        + "captured AID and label, and resets MSD to 0.\n\n"
-                        + "The PAN, expiry, name and AID fields stay.")
-                .setPositiveButton("Clear", (d, w) -> {
-                    wipeCapture(i);
-                    binding = true;
-                    etMsd.setText("0");
-                    binding = false;
-                    collect();
-                    status("Capture cleared - MSD reset to 0, re-read or seed before tapping");
-                    Toast.makeText(this, "Capture cleared", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void wipeCapture(int i) {
-        SharedPreferences.Editor e = prefs.edit();
-        String p = key(i, "cap_");
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(p)) e.remove(k);
-        }
-        e.putInt(key(i, "msd"), 0);
-        e.apply();
+    private byte[] appEntry(String aidHex, String label, int priority) {
+        return cat(
+                tlv(0x4F, hex(aidHex)),
+                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{(byte) priority}),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
     /**
-     * Build a usable capture out of the typed fields, with no plastic and no
-     * reader.
+     * PPSE directory.
      *
-     * A card that only works after a successful read is a card that dies with
-     * the reader. This writes the two things select() and gpo() actually need -
-     * a one-entry directory advertising the card's own AID, and an SFI 1 record
-     * carrying the PAN, track 2 and the CDOLs - and clears any stale FCI and GPO
-     * so the built GPO path is the one that runs.
-     *
-     * MSD is forced to 0 because the built path frames a 77 template; a leftover
-     * 1 would make gpo() look for an 80 framing that no longer exists.
-     *
-     * The record takes the CDOLs and CVM list from the boxes on screen when they
-     * are filled, so a seeded card and the service cannot drift apart.
-     *
-     * FIX: this used to write 5A/5F24/5F34/5F20/57/8C/8D/8E/9F07/9F08 and stop,
-     * so a seeded card carried no CIACs at all - the exact data-validation gap
-     * syntheticRecord() was patched to close. The record is now the same tag set
-     * in the same order, with 9F0D/9F0E/9F0F copied byte-for-byte from the real
-     * card in Sample_Mastercard_Reader_Logfile.md. 9F42 opens it for the same
-     * reason, and 9F07 is FFC0 to match.
-     *
-     * Seeding blanks the CID and AFL boxes by design: the CID falls through to
-     * GPO_CID (40) and the AFL re-derives from the one record.
+     * A captured PPSE is served verbatim - it carries the real label and 9F2A,
+     * and 9F2A is what the terminal uses to pick a kernel. The generated
+     * fallback is the BISECT BUILD described at PPSE_MINIMAL.
      */
-    private void seedRecords() {
-        final int i = current;
-        final String pan = digits(t(etPan));
-        final String aid = t(etAid).toUpperCase();
-
-        if (pan.length() < 12 || pan.length() > 19) {
-            Toast.makeText(this, "Fill a valid PAN first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (aid.isEmpty() || !routable(aid)) {
-            Toast.makeText(this, "Fill a routable AID first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        new AlertDialog.Builder(this)
-                .setTitle("Seed records for card " + (i + 1) + "?")
-                .setMessage("Builds a directory and one SFI 1 record from the fields on "
-                        + "screen, so this card can be tapped without reading a plastic.\n\n"
-                        + "Any existing capture on this card is replaced. The record is "
-                        + "synthetic - the real card's discretionary data is not in it.")
-                .setPositiveButton("Seed", (d, w) -> {
-                    String exp = digits(t(etExpiry));
-                    if (exp.length() != 4) exp = "3112";
-                    String svc = digits(t(etService));
-                    if (svc.length() != 3) svc = "201";
-                    String disc = digits(t(etDiscretionary));
-                    String name = t(etName).toUpperCase()
-                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                    if (name.length() > 26) name = name.substring(0, 26);
-
-                    String track2 = pan + "D" + exp + svc + disc;
-
-                    String cdol1 = t(etCdol1).isEmpty() ? CDOL1 : t(etCdol1).toUpperCase();
-                    String cdol2 = t(etCdol2).isEmpty() ? CDOL2 : t(etCdol2).toUpperCase();
-                    String cvm = t(etCvmlist).isEmpty() ? CVMLIST : t(etCvmlist).toUpperCase();
-
-                    StringBuilder rec = new StringBuilder();
-                    rec.append(tlvHex(0x9F42, "0840"));
-                    rec.append(tlvHex(0x5F24, exp + "01"));
-                    rec.append(tlvHex(0x5A, pan));
-                    rec.append(tlvHex(0x5F34, "01"));
-                    if (name.length() >= 2) {
-                        rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
-                    }
-                    rec.append(tlvHex(0x9F07, "FFC0"));
-                    rec.append(tlvHex(0x9F08, "0002"));
-                    rec.append(tlvHex(0x8C, cdol1));
-                    rec.append(tlvHex(0x8D, cdol2));
-                    rec.append(tlvHex(0x8E, cvm));
-                    rec.append(tlvHex(0x9F0D, "B450840000"));
-                    rec.append(tlvHex(0x9F0E, "0000000000"));
-                    rec.append(tlvHex(0x9F0F, "B470848000"));
-                    rec.append(tlvHex(0x5F28, "0840"));
-                    rec.append(tlvHex(0x57, track2));
-                    String record = tlvHex(0x70, rec.toString());
-
-                    String label = t(etLabel).toUpperCase()
-                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                    if (label.length() < 2) label = "CARD";
-                    if (label.length() > 16) label = label.substring(0, 16);
-
-                    String entry = tlvHex(0x4F, aid)
-                            + tlvHex(0x50, bytesToHex(label.getBytes(StandardCharsets.US_ASCII)))
-                            + tlvHex(0x87, "01")
-                            + tlvHex(0x9F2A, String.format("%02X", kernelOf(aid)));
-                    String dir = tlvHex(0x61, entry);
-                    String ppse = tlvHex(0x6F,
-                            tlvHex(0x84, PPSE) + tlvHex(0xA5, tlvHex(0xBF0C, dir)));
-
-                    wipeCapture(i);
-
-                    SharedPreferences.Editor e = prefs.edit();
-                    e.putString(key(i, "cap_rawppse"), ppse);
-                    e.putString(key(i, "cap_rec1_1"), record);
-                    e.putString(key(i, "cap_aid"), aid);
-                    e.putString(key(i, "cap_label"), label);
-                    if (name.length() >= 2) e.putString(key(i, "cap_holder"), name);
-                    e.putInt(key(i, "msd"), 0);
-                    e.apply();
-
-                    binding = true;
-                    etMsd.setText("0");
-                    etAfl.setText("");
-                    etCid.setText("");
-                    binding = false;
-                    collect();
-
-                    if (cvm.startsWith("1E")) {
-                        status("Seeded - but the CVM list is still ONLINE PIN (" + cvm
-                                + "). Blank the CVM box and seed again.");
-                    } else {
-                        status("Seeded 1 record + directory for " + aid
-                                + " - cvm " + cvm + ", MSD 0, tap it");
-                    }
-                    Toast.makeText(this, "Seeded - long-press the card count to inspect",
-                            Toast.LENGTH_LONG).show();
-                    showPage(0);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    /** TLV as hex, with proper long-form lengths. */
-    private static String tlvHex(int tag, String hexValue) {
-        byte[] v = hexToBytes(hexValue);
-        String tagH = tag > 0xFF ? String.format("%04X", tag) : String.format("%02X", tag);
-        int n = v.length;
-        String len;
-        if (n < 0x80) len = String.format("%02X", n);
-        else if (n <= 0xFF) len = "81" + String.format("%02X", n);
-        else len = "82" + String.format("%04X", n);
-        return tagH + len + bytesToHex(v);
-    }
-
-    private static String hexOf(String s) {
-        String h = s.toUpperCase().replaceAll("[^0-9A-F]", "");
-        if (h.length() % 2 != 0) h = h + "F";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < h.length(); i += 2) {
-            if (i > 0) sb.append(' ');
-            sb.append(h, i, i + 2);
-        }
-        return sb.toString();
-    }
-
-    // ---------- routing self-check ----------
-
-    private void showRoutingCheck() {
-        ComponentName me = new ComponentName(this, ShadowApduService.class);
-        StringBuilder sb = new StringBuilder();
-
-        NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
-        NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
-
-        if (nfc == null) {
-            sb.append("NFC: no adapter - this device cannot do HCE at all\n");
-        } else {
-            sb.append("NFC radio: ")
-              .append(nfc.isEnabled() ? "on" : "OFF - enable it first").append('\n');
-        }
-        sb.append('\n');
-
-        CardEmulation ce = null;
-        if (nfc != null) {
-            try { ce = CardEmulation.getInstance(nfc); } catch (Throwable ignored) { }
-        }
-        if (ce == null) {
-            sb.append("CardEmulation unavailable - HCE not supported on this device\n");
-            dialog("Can the terminal reach us?", sb.toString());
-            return;
-        }
-
-        boolean isDefault = ce.isDefaultServiceForCategory(me, CardEmulation.CATEGORY_PAYMENT);
-        sb.append("default payment app: ").append(isDefault ? "YES" : "NO").append('\n');
-        sb.append(isDefault
-                ? "  good - you outrank Google Wallet for the big-brand AIDs\n"
-                : "  NOT default - you only get AIDs no payment app claims\n");
-
-        String prefix = "?";
-        try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Throwable ignored) { }
-        sb.append("prefix AID matching : ").append(prefix).append("\n\n");
-
-        String aid = t(etAid).toUpperCase();
-        List<String> check = new ArrayList<>();
-        check.add("325041592E5359532E4444463031");
-        if (!aid.isEmpty()) check.add(aid);
-        if (!"A0000000031010".equals(aid)) check.add("A0000000031010");
-        if (!"A0000000041010".equals(aid)) check.add("A0000000041010");
-
-        sb.append("routing for every AID this card advertises:\n");
-        int blocked = 0;
-        for (String a : check) {
-            if (!routable(a)) {
-                sb.append("  NO FILTER ").append(a).append("  <- add to apduservice.xml\n");
-                blocked++;
-                continue;
+    private byte[] buildPpse() {
+        byte[] captured = rawPpse();
+        if (captured != null && captured.length >= 4) {
+            // Tolerate a capture that kept its trailing 9000.
+            if (captured.length >= 2
+                    && (captured[captured.length - 2] & 0xFF) == 0x90
+                    && (captured[captured.length - 1] & 0xFF) == 0x00) {
+                captured = Arrays.copyOf(captured, captured.length - 2);
             }
-            boolean routed;
-            try {
-                routed = ce.isDefaultServiceForAid(me, a);
-            } catch (Throwable ignored) {
-                routed = false;
+            tap("-- ppse source: captured " + captured.length + "B");
+            return captured;
+        }
+        tap("-- ppse source: generated");
+
+        String realAid = p("cap_aid", "");
+        if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
+
+        byte[] entry = PPSE_MINIMAL
+                ? cat(tlv(0x4F, hex(realAid)), tlv(0x87, new byte[]{0x01}))
+                : appEntry(realAid, labelText(), 1);
+
+        ByteArrayOutputStream dir = new ByteArrayOutputStream();
+        byte[] e0 = tlv(0x61, entry);
+        dir.write(e0, 0, e0.length);
+
+        if (EXTRA_AIDS) {
+            if (!realAid.equalsIgnoreCase("A0000000031010")) {
+                byte[] e = tlv(0x61, appEntry("A0000000031010", "VISA", 2));
+                dir.write(e, 0, e.length);
             }
-            if (routed) {
-                sb.append("  ok        ").append(a).append('\n');
-            } else {
-                sb.append("  BLOCKED   ").append(a)
-                  .append("  <- another app wins this, or you are not the default\n");
-                blocked++;
+            if (!realAid.equalsIgnoreCase("A0000000041010")) {
+                byte[] e = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 3));
+                dir.write(e, 0, e.length);
             }
         }
 
-        sb.append('\n').append(blocked == 0
-                ? "Verdict: a tap should reach the emulator."
-                : "Verdict: " + blocked + " of " + check.size()
-                  + " AIDs will never reach us. Fix before a real till.");
-
-        dialog("Can the terminal reach us?", sb.toString());
+        byte[] fci = tlv(0xBF0C, dir.toByteArray());
+        byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
+        return tlv(0x6F, inner);
     }
 
-    private void dialog(String title, String body) {
-        new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setMessage(body)
-                .setPositiveButton("Close", null)
-                .show();
-    }
+    private byte[] patchFci(byte[] fci, byte[] aid) {
+        int[] pos = new int[1];
+        int outer = readTag(fci, pos);
+        int outerLen = readLen(fci, pos);
+        int end = Math.min(fci.length, pos[0] + outerLen);
 
-    // ---------- issuer key search ----------
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(fci, q);
+            int l = readLen(fci, q);
+            if (q[0] + l > fci.length) break;
+            byte[] v = Arrays.copyOfRange(fci, q[0], q[0] + l);
+            i = q[0] + l;
 
-    private void showKeyTools() {
-        String v = prefs.getString(key(current, "keyvar"), "0");
-        String label = "MAC variant (" + v + ")";
-
-        new AlertDialog.Builder(this)
-                .setTitle("Issuer master key")
-                .setItems(new String[]{"Scan for the key", "Edit candidate list", label},
-                        (d, w) -> {
-                            if (w == 0) scanForKey();
-                            else if (w == 1) editKeyList();
-                            else pickKeyVariant();
-                        })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void pickKeyVariant() {
-        String[] labels = new String[VARIANTS.length];
-        for (int i = 0; i < VARIANTS.length; i++) labels[i] = VARIANTS[i][0] + " - " + VARIANTS[i][1];
-
-        new AlertDialog.Builder(this)
-                .setTitle("MAC input variant")
-                .setItems(labels, (d, w) -> {
-                    prefs.edit().putString(key(current, "keyvar"), VARIANTS[w][0]).apply();
-                    status("MAC variant " + VARIANTS[w][0] + " - " + VARIANTS[w][1]);
-                    Toast.makeText(this, "Variant " + VARIANTS[w][0], Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void editKeyList() {
-        final EditText e = new EditText(this);
-        e.setText(prefs.getString("keylist", ""));
-        e.setHint("32 hex chars per key, one per line");
-        new AlertDialog.Builder(this)
-                .setTitle("Candidate keys")
-                .setView(e)
-                .setPositiveButton("Save", (d, w) ->
-                        prefs.edit().putString("keylist", e.getText().toString().toUpperCase()).apply())
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private List<String> candidateKeys() {
-        List<String> out = new ArrayList<>(
-                KeyFinder.candidates(digits(t(etPan)), prefs.getString("keylist", "")));
-
-        String bin = digits(t(etPan));
-        if (bin.length() >= 6) {
-            String remembered = prefs.getString("keyfor_" + bin.substring(0, 6), "");
-            if (remembered.length() == 32 && !out.contains(remembered)) out.add(0, remembered);
-        }
-        return out;
-    }
-
-    private void scanForKey() { scanForKey(true); }
-
-    private void scanForKey(boolean announce) {
-        String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
-        String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
-        String pan = digits(t(etPan));
-
-        String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
-        if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
-
-        if (cmdHex.isEmpty() || rspHex.isEmpty()) {
-            if (announce) {
-                Toast.makeText(this, "No reference - read the physical card with READ CARD first",
-                        Toast.LENGTH_LONG).show();
+            if (t == 0x84) {
+                v = aid;
+            } else if (t == 0xA5) {
+                v = patchA5(v, aid);
             }
-            return;
+
+            byte[] one = tlv(t, v);
+            out.write(one, 0, one.length);
         }
-        if (pan.isEmpty() || aipHex.length() < 4) {
-            if (announce) {
-                Toast.makeText(this, "Need PAN and AIP set on the card", Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
-
-        byte[] cmd = hexToBytes(cmdHex);
-        byte[] rsp = hexToBytes(rspHex);
-        if (cmd.length < 6) return;
-        int lc = cmd[4] & 0xFF;
-        int off = 5;
-        if (lc == 0x00) {
-            if (cmd.length < 7) return;
-            lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
-            off = 7;
-        }
-        if (off + lc > cmd.length) return;
-
-        final byte[] cdol = Arrays.copyOfRange(cmd, off, off + lc);
-        final byte[] arqcRef = tagOf(rsp, 0x9F26);
-        final byte[] atcRef = tagOf(rsp, 0x9F36);
-        if (arqcRef == null || atcRef == null) {
-            if (announce) {
-                Toast.makeText(this, "Reference ARQC/ATC missing from the capture",
-                        Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
-        final byte[] aip = hexToBytes(aipHex);
-        final String atc = bytesToHex(atcRef);
-        final String psn = prefs.getString(key(current, "psn"), "01");
-        final List<String> keys = candidateKeys();
-
-        status("Scanning " + keys.size() + " keys x 4 variants...");
-
-        new Thread(() -> {
-            int tried = 0;
-            for (String k : keys) {
-                for (int variant = 0; variant < 4; variant++) {
-                    tried++;
-                    try {
-                        byte[] macIn = ((variant & 2) != 0)
-                                ? cat(aip, hexToBytes(atc), cdol)
-                                : cat(cdol, aip, hexToBytes(atc));
-                        byte[] ac = EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1);
-                        if (Arrays.equals(ac, arqcRef)) {
-                            final String fk = k;
-                            final int fv = variant;
-                            runOnUiThread(() -> {
-                                etMkac.setText(fk);
-                                prefs.edit().putString(key(current, "keyvar"),
-                                        String.valueOf(fv)).apply();
-
-                                String bin6 = digits(t(etPan));
-                                if (bin6.length() >= 6) {
-                                    prefs.edit().putString("keyfor_" + bin6.substring(0, 6),
-                                            fk).apply();
-                                }
-
-                                collect();
-                                status("KEY FOUND " + fk + "  (variant " + fv + ")");
-                                Toast.makeText(this, "Issuer key found", Toast.LENGTH_LONG).show();
-                            });
-                            return;
-                        }
-                    } catch (Exception ignored) { }
-                }
-            }
-            final int total = tried;
-            runOnUiThread(() -> {
-                status("Read OK - no key matched (" + total
-                        + " tries). Long-press MK-AC to add candidates.");
-                if (announce) {
-                    Toast.makeText(this, "No match - " + total + " tries", Toast.LENGTH_LONG).show();
-                }
-            });
-        }).start();
+        return tlv(outer, out.toByteArray());
     }
 
-    // ---------- small helpers for the scan ----------
-
-    private static byte[] cat(byte[]... arrs) {
-        int n = 0;
-        for (byte[] a : arrs) n += a.length;
-        byte[] out = new byte[n];
-        int p = 0;
-        for (byte[] a : arrs) { System.arraycopy(a, 0, out, p, a.length); p += a.length; }
-        return out;
-    }
-
-    private static byte[] hexToBytes(String h) {
-        h = h.replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        if (h.length() % 2 != 0) h = h + "F";
-        byte[] out = new byte[h.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(h.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
-    }
-
-    private static String bytesToHex(byte[] d) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : d) sb.append(String.format("%02X", b & 0xFF));
-        return sb.toString();
-    }
-
-    private static byte[] tagOf(byte[] d, int want) {
+    private byte[] patchA5(byte[] a5, byte[] aid) {
+        TreeMap<Integer, byte[]> tags = new TreeMap<>();
         int i = 0;
-        while (i < d.length) {
-            int tag = d[i++] & 0xFF;
-            if ((tag & 0x1F) == 0x1F) {
-                if (i >= d.length) return null;
-                tag = (tag << 8) | (d[i++] & 0xFF);
+        while (i < a5.length) {
+            int[] q = new int[]{i};
+            int t = readTag(a5, q);
+            int l = readLen(a5, q);
+            if (q[0] + l > a5.length) break;
+            tags.put(t, Arrays.copyOfRange(a5, q[0], q[0] + l));
+            i = q[0] + l;
+        }
+        tags.put(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (Map.Entry<Integer, byte[]> e : tags.entrySet()) {
+            byte[] one = tlv(e.getKey(), e.getValue());
+            out.write(one, 0, one.length);
+        }
+        return out.toByteArray();
+    }
+
+    private byte[] afl() {
+        String typed = p("afl", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (typed.length() >= 8 && typed.length() % 8 == 0) {
+            tap("-- afl source: typed");
+            return hex(typed);
+        }
+
+        TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
+        String prefix = sel() + "cap_rec";
+
+        for (String k : prefs().getAll().keySet()) {
+            if (!k.startsWith(prefix)) continue;
+            String rest = k.substring(prefix.length());
+            if (rest.startsWith("_")) rest = rest.substring(1);
+            int us = rest.indexOf('_');
+            if (us <= 0) continue;
+            try {
+                int sfi = Integer.parseInt(rest.substring(0, us));
+                int rec = Integer.parseInt(rest.substring(us + 1));
+                if (sfi < 1 || sfi > 30 || rec < 1 || rec > 255) continue;
+                TreeSet<Integer> set = map.get(sfi);
+                if (set == null) { set = new TreeSet<>(); map.put(sfi, set); }
+                set.add(rec);
+            } catch (NumberFormatException ignored) { }
+        }
+
+        if (map.isEmpty()) {
+            tap("-- afl source: no records - defaulting to SFI 1 rec 1");
+            TreeSet<Integer> one = new TreeSet<>();
+            one.add(1);
+            map.put(1, one);
+        } else {
+            tap("-- afl source: derived from " + map.size() + " SFI(s)");
+        }
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (Map.Entry<Integer, TreeSet<Integer>> e : map.entrySet()) {
+            int sfi = e.getKey();
+            int runStart = -1, prev = -1;
+            for (int rec : e.getValue()) {
+                if (runStart < 0) {
+                    runStart = rec;
+                } else if (rec != prev + 1) {
+                    aflEntry(out, sfi, runStart, prev);
+                    runStart = rec;
+                }
+                prev = rec;
             }
-            if (i >= d.length) return null;
-            int len = d[i++] & 0xFF;
-            if ((len & 0x80) != 0) {
-                int n = len & 0x7F;
-                len = 0;
-                for (int k = 0; k < n && i < d.length; k++) len = (len << 8) | (d[i++] & 0xFF);
+            if (runStart >= 0) aflEntry(out, sfi, runStart, prev);
+        }
+        return out.toByteArray();
+    }
+
+    private static void aflEntry(ByteArrayOutputStream out, int sfi, int first, int last) {
+        out.write((sfi << 3) & 0xFF);
+        out.write(first & 0xFF);
+        out.write(last & 0xFF);
+        out.write(0x00);
+    }
+
+    private String expiry6() {
+        String d = p("expiry", "3112").replaceAll("[^0-9]", "");
+        if (d.length() >= 6) return d.substring(0, 6);
+        if (d.length() == 5) return d.substring(0, 4) + "01";
+        if (d.length() == 4) return d + "01";
+        if (d.length() == 2) {
+            String yy = String.format("%02d", Calendar.getInstance().get(Calendar.YEAR) % 100);
+            int v = Integer.parseInt(d);
+            if (v >= 1 && v <= 12) return yy + d + "01";
+            return d + "0101";
+        }
+        return "311201";
+    }
+
+    private byte[] track2() {
+        String t = p("track2", "").toUpperCase().replace('=', 'D');
+        t = t.replaceAll("[^0-9A-F]", "");
+
+        if (t.isEmpty()) {
+            String exp = expiry6();
+            String svc = p("service", "201").replaceAll("[^0-9]", "");
+            while (svc.length() < 3) svc = "0" + svc;
+            t = pan()
+                    + "D"
+                    + exp.substring(0, 4)
+                    + svc.substring(0, 3)
+                    + p("discretionary", "").replaceAll("[^0-9]", "");
+        }
+
+        if (t.length() % 2 != 0) t += "F";
+        return hex(t);
+    }
+
+    /**
+     * Synthetic SFI 1 record for a card with no capture.
+     *
+     * FIXES, all found by auditing a real M/Chip record:
+     *   - 9F0D was FOUR bytes. A CIAC is one byte per TVR byte, so five.
+     *     The values below are lifted from the real card in the sample logfile,
+     *     byte for byte, as are 9F0E and 9F0F.
+     *   - 9F0E (Denial) and 9F0F (Online) were missing entirely, so the kernel
+     *     had nothing to compare TVR against.
+     *   - 9F42 (currency) added, and it opens the record because the real card
+     *     opens with it.
+     *   - 9F07 is FFC0, matching the real card. FF00 also allowed cash.
+     *
+     * 9F4A (SDA tag list) is deliberately absent - it is only required once an
+     * ODA bit is set, and every ODA bit is cleared.
+     */
+    private byte[] syntheticRecord() {
+        String panS = pan();
+        String expS = expiry6();
+        String psnS = psn();
+        if (panS.length() % 2 != 0) panS += "F";
+
+        byte[] h = holder();
+
+        return tlv(0x70, cat(
+                tlv(0x9F42, hex("0840")),
+                tlv(0x5F24, hex(expS)),
+                tlv(0x5A, hex(panS)),
+                tlv(0x5F34, hex(psnS)),
+                h == null ? new byte[0] : tlv(0x5F20, h),
+                tlv(0x9F07, hex("FFC0")),
+                tlv(0x9F08, hex("0002")),
+                tlv(0x8C, hex(CDOL1)),
+                tlv(0x8D, hex(CDOL2)),
+                tlv(0x8E, hex(CVMLIST)),
+                tlv(0x9F0D, hex("B450840000")),
+                tlv(0x9F0E, hex("0000000000")),
+                tlv(0x9F0F, hex("B470848000")),
+                tlv(0x5F28, hex("0840")),
+                tlv(0x57, track2())));
+    }
+
+    @Override
+    public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
+        try {
+            if (apdu == null || apdu.length < 4) return SW_MALFORMED;
+
+            int ins = apdu[1] & 0xFF;
+            int p1  = apdu[2] & 0xFF;
+            int p2  = apdu[3] & 0xFF;
+
+            boolean isSelect = (ins == 0xA4);
+
+            if (isSelect && apdu.length >= 5) {
+                int lc0 = lcOf(apdu);
+                int off0 = dataOff(apdu);
+                if (apdu.length >= off0 + lc0) {
+                    byte[] nm = new byte[lc0];
+                    System.arraycopy(apdu, off0, nm, 0, lc0);
+                    if (Arrays.equals(nm, PPSE)) {
+                        tapLog.setLength(0);
+                        resetTransaction();
+                        sawPpse = true;
+                        termLog("=== tap "
+                                + new java.text.SimpleDateFormat("HH:mm:ss",
+                                        java.util.Locale.US).format(new java.util.Date())
+                                + " ===");
+                        int n = scriptLines();
+                        if (n > 0) {
+                            tap("-- script armed: " + n + " line(s), gate="
+                                    + (useScript() ? "ON" : "OFF"));
+                        }
+                        popup(nameLine());
+                    }
+                }
             }
-            if (i + len > d.length) return null;
-            if (tag == want) return Arrays.copyOfRange(d, i, i + len);
-            if ((tag & 0x20) != 0) {
-                byte[] inner = tagOf(Arrays.copyOfRange(d, i, i + len), want);
-                if (inner != null) return inner;
+
+            tap(">> " + bytesToHex(apdu));
+
+            if (isSelect)         nSelects++;
+            else if (ins == 0xA8) nGpos++;
+            else if (ins == 0xB2) nRecs++;
+            else if (ins == 0xAE) nGens++;
+
+            String hit = useScript() ? scriptMatch(apdu) : null;
+            if (hit != null) {
+                byte[] out = hex(hit);
+                scriptHits++;
+
+                if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
+                    tap("-- script response had no status word - appended 9000");
+                    out = cat(out, SW_OK);
+                } else if (out.length < 2) {
+                    out = cat(out, SW_OK);
+                }
+
+                if (ins == 0xA8) {
+                    byte[] sa = capturedAip(out);
+                    if (sa != null && sa.length >= 2) {
+                        txnAip = sa;
+                        tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
+                    }
+                    cryptogramSent = true;
+                    tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
+                }
+                tap("-- script hit " + out.length + " bytes");
+                tap("<< " + bytesToHex(out));
+                return out;
             }
-            i += len;
+
+            byte[] out;
+            if (isSelect) {
+                if (apdu.length < dataOff(apdu)) return SW_MALFORMED;
+                out = select(apdu);
+            } else if (ins == 0xA8) {
+                out = gpo(apdu);
+            } else if (ins == 0xB2) {
+                out = readRecord(p1, p2);
+            } else if (ins == 0xAE) {
+                out = genac(apdu);
+            } else if (ins == 0xCA) {
+                out = getData(apdu);
+            } else if (ins == 0x20) {
+                out = SW_OK;
+            } else if (ins == 0x84) {
+                byte[] ch = new byte[8];
+                rnd.nextBytes(ch);
+                out = cat(ch, SW_OK);
+            } else {
+                out = SW_UNSUPPORTED;
+            }
+
+            tap("<< " + bytesToHex(out));
+            return out;
+        } catch (Exception e) {
+            sawError = true;
+            tap("!! " + e);
+            return SW_ERR;
+        }
+    }
+
+    private byte[] select(byte[] apdu) {
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (apdu.length < off + lc) return SW_MALFORMED;
+        byte[] name = new byte[lc];
+        System.arraycopy(apdu, off, name, 0, lc);
+
+        if (Arrays.equals(name, PPSE)) {
+            return cat(buildPpse(), SW_OK);
+        }
+
+        if (name.length == 0) {
+            String a = p("cap_aid", "");
+            if (a.isEmpty()) a = p("aid", "A0000000031010");
+            name = hex(a);
+        }
+
+        String real = p("cap_aid", "");
+        if (real.isEmpty()) real = p("aid", "");
+        tap("-- selected " + bytesToHex(name)
+                + " | card is " + (real.isEmpty() ? "?" : real));
+
+        byte[] captured = rawFci();
+        tap("-- fci source: " + (captured == null ? "generated" : "captured " + captured.length + "B"));
+        if (captured != null) {
+            return cat(patchFci(captured, name), SW_OK);
+        }
+
+        String label = labelText();
+        byte[] prop = cat(
+                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{0x01}),
+                tlv(0x9F11, new byte[]{0x01}),
+                tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
+                tlv(0x9F38, hex(PDOL)));
+        byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
+        return cat(tlv(0x6F, inner), SW_OK);
+    }
+
+    /**
+     * Serve the GPO. Replays a capture when one exists, otherwise builds one.
+     *
+     * The built path used to return 82 and 94 only. Contactless carries the
+     * cryptogram in the GPO response, so a terminal read the AIP, found no CID,
+     * and dropped the card without sending a single READ RECORD. It now emits
+     * 9F10/9F26/9F27/9F36 like a real card, over the PDOL data it was sent.
+     *
+     * BOTH paths mark cryptogramSent. Without that on the replay path a terminal
+     * that asks for a cryptogram after a replayed TC would get a freshly computed
+     * ARQC and go online into a decline - the card would have contradicted its
+     * own CID one APDU later.
+     */
+    private byte[] gpo(byte[] apdu) {
+        byte[] raw = rawGpo();
+        boolean msd = isMsd();
+
+        if (raw != null && raw.length >= 4) {
+            int[] q = new int[1];
+            int outer = readTag(raw, q);
+            int olen  = readLen(raw, q);
+
+            // Tolerate a capture that kept its trailing 9000.
+            if (q[0] + olen + 2 == raw.length
+                    && (raw[raw.length - 2] & 0xFF) == 0x90
+                    && (raw[raw.length - 1] & 0xFF) == 0x00) {
+                raw = Arrays.copyOf(raw, raw.length - 2);
+            }
+
+            boolean capMsd = (outer == 0x80);
+
+            if (capMsd == msd) {
+                byte[] aip = capturedAip(raw);
+                if (aip != null && aip.length >= 2) {
+                    capturedIad = findTag(raw, 0x9F10);
+
+                    weakenAip(raw);
+                    if (STRIP_AC) {
+                        raw = stripAcTags(raw);
+                        gpoCid = "(stripped)";
+                    } else {
+                        raw = forceCid(raw, GPO_CID);
+                        gpoCid = String.format("%02X", GPO_CID & 0xFF);
+                    }
+
+                    txnAip = capturedAip(raw);
+                    cryptogramSent = true;
+                    tap("-- gpo replay aip=" + bytesToHex(txnAip)
+                            + " (CDA dropped, "
+                            + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
+                            + ") len=" + raw.length
+                            + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
+                } else {
+                    tap("-- gpo replay verbatim len=" + raw.length);
+                }
+                return cat(raw, SW_OK);
+            }
+            tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
+        }
+
+        byte[] aip = capturedAip(raw);
+        if (aip == null || aip.length < 2) aip = hex(p("aip", DEFAULT_AIP));
+        if (aip.length < 2) aip = hex(DEFAULT_AIP);
+
+        byte[] used = new byte[]{aip[0], aip[1]};
+        used[0] &= (byte) ~AIP_CDA;
+        txnAip = used;
+
+        // PDOL data the terminal just sent - the GPO cryptogram covers this.
+        // Unwrap the 83 template first.
+        byte[] pdolData = new byte[0];
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            byte[] d = Arrays.copyOfRange(apdu, off, off + lc);
+            int[] q = new int[]{0};
+            int t = readTag(d, q);
+            int l = readLen(d, q);
+            if (t == 0x83 && q[0] + l <= d.length) {
+                pdolData = Arrays.copyOfRange(d, q[0], q[0] + l);
+            }
+        }
+
+        // FIX: a box value of 80 was used here, which sends an ARQC out of a
+        // GPO that cannot open an online session. Clamp it to TC.
+        byte cid = GPO_CID;
+        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (forced.length() == 2) {
+            cid = (byte) Integer.parseInt(forced, 16);
+            if (cid == CID_ARQC) cid = CID_TC;
+        }
+        gpoCid = String.format("%02X", cid & 0xFF);
+        lastCid = gpoCid;
+
+        String atc = txnAtc();
+        byte[] ac = computeAc(atc, pdolData);
+        cryptogramSent = true;
+
+        String iad = (capturedIad == null)
+                ? p("iad", "06010A03A0B800")
+                : bytesToHex(capturedIad);
+
+        byte[] a = afl();
+        tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
+                + " cid=" + gpoCid + " atc=" + atc + " arqc=" + bytesToHex(ac));
+
+        if (msd) {
+            // Format 1 is AIP, then 57, then 94.
+            byte[] payload = cat(used, tlv(0x57, track2()), tlv(0x94, a));
+            tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
+            return cat(tlv(0x80, payload), SW_OK);
+        }
+
+        byte[] body = cat(
+                tlv(0x82, used),
+                tlv(0x94, a),
+                tlv(0x9F10, hex(iad)),
+                tlv(0x9F26, ac),
+                tlv(0x9F27, new byte[]{cid}),
+                tlv(0x9F36, hex(atc)));
+
+        return cat(tlv(0x77, body), SW_OK);
+    }
+
+    private static void weakenAip(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        readLen(tpl, pos);
+
+        if (outer == 0x80) {
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~AIP_CDA;
+            return;
+        }
+
+        int i = pos[0];
+        while (i < tpl.length) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) return;
+            if (t == 0x82 && l >= 1) {
+                tpl[q[0]] &= (byte) ~AIP_CDA;
+                return;
+            }
+            i = q[0] + l;
+        }
+    }
+
+    private static byte[] forceCid(byte[] tpl, byte cid) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == 0x9F27 && l >= 1) {
+                tpl[q[0]] = cid;
+                return tpl;
+            }
+            i = q[0] + l;
+        }
+
+        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
+        return tlv(outer, cat(content, tlv(0x9F27, new byte[]{cid})));
+    }
+
+    private static byte[] stripAcTags(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        if (outer == 0x80) {
+            if (end - pos[0] < 2) return tpl;
+            out.write(tpl, pos[0], 2);
+            pos[0] += 2;
+        }
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            i = q[0] + l;
+
+            boolean drop = false;
+            for (int d : GPO_AC_TAGS) if (d == t) { drop = true; break; }
+            if (drop) continue;
+
+            byte[] one = tlv(t, Arrays.copyOfRange(tpl, q[0], q[0] + l));
+            out.write(one, 0, one.length);
+        }
+        return tlv(outer, out.toByteArray());
+    }
+
+    private static byte[] findTag(byte[] tpl, int want) {
+        if (tpl == null || tpl.length < 4) return null;
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        if (outer == 0x80) return null;
+        int olen = readLen(tpl, pos);
+        int end  = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == want) return Arrays.copyOfRange(tpl, q[0], q[0] + l);
+            i = q[0] + l;
         }
         return null;
     }
 
-    private static String aipFromGpo(String gpo) {
-        if (gpo == null || gpo.isEmpty()) return "";
-        byte[] d = hexToBytes(gpo);
-        if (d.length < 4) return "";
-        int i = 0;
-        int tag = d[i++] & 0xFF;
-        int len = d[i++] & 0xFF;
-        if ((len & 0x80) != 0) {
-            int n = len & 0x7F;
-            len = 0;
-            for (int k = 0; k < n && i < d.length; k++) len = (len << 8) | (d[i++] & 0xFF);
-        }
-        if (i + len > d.length) len = d.length - i;
-        if (tag == 0x80) {
-            return len < 2 ? "" : bytesToHex(Arrays.copyOfRange(d, i, i + 2));
-        }
-        byte[] aip = tagOf(Arrays.copyOfRange(d, i, i + len), 0x82);
-        return aip == null ? "" : bytesToHex(aip);
-    }
-
-    // ---------- actions ----------
-
-    private void startReader() {
-        collect();
-        Intent i = new Intent(this, ReaderActivity.class);
-        i.putExtra(ReaderActivity.EXTRA_CARD_INDEX, current);
-        startActivityForResult(i, REQ_CLONE);
-    }
-
-    private void startCapture() {
-        collect();
-        Intent i = new Intent(this, CaptureActivity.class);
-        i.putExtra(CaptureActivity.EXTRA_CARD_INDEX, current);
-        startActivity(i);
-    }
-
-    private void callIssuer() {
-        String pan = digits(t(etPan));
-        if (pan.length() < 12 || pan.length() > 19) pan = panFromTrack2();
-        if (pan.isEmpty()) {
-            Toast.makeText(this, "Fill the PAN first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        BankDirectory.showCallSheet(this, pan);
-    }
-
-    private void onSave() {
-        String diff = boxDiff(digits(t(etPan)));
-
-        syncFieldsFromTrack2();
-
-        if (diff != null) {
-            String trackPan = panFromTrack2();
-            if (!trackPan.isEmpty()) {
-                binding = true;
-                etPan.setText(trackPan);
-                binding = false;
+    private byte[] capturedAip(byte[] raw) {
+        if (raw == null || raw.length < 4) return null;
+        int[] pos = new int[1];
+        int outer = readTag(raw, pos);
+        if (outer == 0x80) {
+            int l = readLen(raw, pos);
+            if (l >= 2 && pos[0] + 2 <= raw.length) {
+                return Arrays.copyOfRange(raw, pos[0], pos[0] + 2);
             }
+            return null;
         }
-
-        String[] hints = BankDirectory.hintsFor(digits(t(etPan)));
-        if (hints != null) {
-            if (t(etLabel).isEmpty()) etLabel.setText(hints[1]);
-            if (t(etAid).isEmpty()) etAid.setText(hints[0]);
-            if (t(etService).length() != 3) etService.setText(hints[2]);
+        int len = readLen(raw, pos);
+        int end = Math.min(raw.length, pos[0] + len);
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(raw, q);
+            int l = readLen(raw, q);
+            if (q[0] + l > raw.length) break;
+            if (t == 0x82 && l >= 2) return Arrays.copyOfRange(raw, q[0], q[0] + 2);
+            i = q[0] + l;
         }
-        if (t(etLabel).isEmpty()) {
-            String b = brandFromPan(digits(t(etPan)));
-            if (!b.isEmpty()) etLabel.setText(b);
-        }
-        if (t(etAid).isEmpty()) {
-            String a = aidFromPan(digits(t(etPan)));
-            if (!a.isEmpty()) etAid.setText(a);
-        }
-        collect();
-
-        String pan = digits(t(etPan));
-        if (pan.length() < 12 || pan.length() > 19) {
-            Toast.makeText(this, "PAN must be 12-19 digits, this is " + pan.length(),
-                    Toast.LENGTH_LONG).show();
-            return;
-        }
-        if (!luhn(pan)) {
-            if (diff != null) {
-                status(diff);
-                Toast.makeText(this, diff, Toast.LENGTH_LONG).show();
-                showPage(0);
-                return;
-            }
-            String want = String.valueOf(expectedCheckDigit(pan));
-            String msg = "Pasted line fails its own check digit. Either the last digit "
-                    + "should be " + want + ", or a digit earlier in the PAN is wrong. "
-                    + "Re-copy the line from the source.";
-            status(msg);
-            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-        if (t(etExpiry).length() != 4) {
-            Toast.makeText(this, "Expiry must be YYMM, e.g. 2803", Toast.LENGTH_LONG).show();
-            return;
-        }
-        try {
-            int expYy = Integer.parseInt(t(etExpiry).substring(0, 2));
-            int thisYy = Calendar.getInstance().get(Calendar.YEAR) % 100;
-            if (expYy < thisYy - 20 || expYy > thisYy + 30) {
-                String m = "Year " + expYy + " looks wrong - field is YYMM, not MMYY";
-                status(m);
-                Toast.makeText(this, m, Toast.LENGTH_LONG).show();
-                showPage(0);
-                return;
-            }
-        } catch (NumberFormatException ignored) { }
-        if (t(etService).length() != 3) {
-            Toast.makeText(this, "Service code must be 3 digits", Toast.LENGTH_LONG).show();
-            return;
-        }
-        etPan.setText(pan);
-        collect();
-        adapter.notifyItemChanged(current);
-
-        String track2 = normaliseTrack2(t(etTrack2));
-        String trackPan2 = track2.contains("D")
-                ? track2.substring(0, track2.indexOf("D")) : track2;
-        if (track2.contains("D") && !trackPan2.isEmpty() && !trackPan2.equals(pan)) {
-            status("Saved - but PAN and TRACK 2 are different cards");
-            Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-        if (t(etAid).isEmpty()) {
-            status("Saved - but AID is empty, terminal will pick Visa");
-            Toast.makeText(this, "AID is empty - long-press the AID field", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-
-        String aidNow = t(etAid).toUpperCase();
-        if (!routable(aidNow)) {
-            status("Saved - AID " + aidNow + " is not in apduservice.xml, tap will die silently");
-            Toast.makeText(this, "AID not routable - add an <aid-filter>", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-
-        status(diff == null
-                ? "Saved card " + (current + 1) + " of " + cards.size()
-                : "Saved - " + diff);
-        Toast.makeText(this, diff == null ? "Card saved" : "Saved using the TRACK 2 value",
-                Toast.LENGTH_SHORT).show();
-        showPage(0);
+        return null;
     }
 
-    private void onAdd() {
-        collect();
-        if (cards.size() >= MAX_CARDS) {
-            Toast.makeText(this, "Max " + MAX_CARDS + " cards", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        cards.add(new CardAdapter.CardModel());
-        prefs.edit().putInt("card_count", cards.size()).apply();
-        adapter.setCards(cards);
-        current = cards.size() - 1;
-        pager.smoothScrollToPosition(current);
-        bindCard(current);
-        prefs.edit().putInt("selected", current).apply();
-    }
+    private byte[] readRecord(int p1, int p2) {
+        int sfi = (p2 & 0xFF) >> 3;
+        int rec = p1 & 0xFF;
 
-    // ---------- delete ----------
-
-    private void onDelete() {
-        if (cards.isEmpty()) return;
-        final int victim = current;
-        new AlertDialog.Builder(this)
-                .setTitle("Delete card " + (victim + 1) + "?")
-                .setMessage("This cannot be undone.")
-                .setPositiveButton("Delete", (d, w) -> doDelete(victim))
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    private void doDelete(int index) {
-        SharedPreferences.Editor e = prefs.edit();
-        int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
-        if (n <= 0) return;
-
-        String victim = key(index, "");
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(victim)) e.remove(k);
+        byte[] captured = rawRec(sfi, rec);
+        if (captured != null) {
+            tap("-- rec sfi=" + sfi + " rec=" + rec + " (captured)");
+            return cat(captured, SW_OK);
         }
 
-        for (int i = index; i < n - 1; i++) {
-            String from = key(i + 1, "");
-            String to = key(i, "");
-            for (String k : prefs.getAll().keySet()) {
-                if (k.startsWith(to)) e.remove(k);
-            }
-            copyBlock(e, from, to);
+        if (sfi == 1) {
+            tap("-- rec sfi=1 rec=" + rec + " (synthetic)");
+            return cat(syntheticRecord(), SW_OK);
         }
 
-        String last = key(n - 1, "");
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(last)) e.remove(k);
+        tap("-- rec miss sfi=" + sfi + " rec=" + rec);
+        return SW_NO_RECORD;
+    }
+
+    private byte[] genac(byte[] apdu) {
+        int p1 = apdu[2] & 0xFF;
+        int requested = p1 & 0xC0;
+
+        byte cid;
+        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
+
+        if (cryptogramSent) {
+            cid = (requested == 0x00) ? CID_AAC : CID_TC;
+        } else if (requested == 0x00) {
+            cid = CID_AAC;
+        } else if (forced.length() == 2) {
+            cid = (byte) Integer.parseInt(forced, 16);
+        } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
+            cid = CID_ARQC;
+        } else if (haveKey() && FORCE_ONLINE_ARQC) {
+            cid = CID_ARQC;
+        } else if (FORCE_OFFLINE_TC) {
+            cid = CID_TC;
+        } else if (requested == 0x80) {
+            cid = CID_ARQC;
+        } else if (requested == 0x40) {
+            cid = CID_TC;
+        } else {
+            cid = CID_TC;
         }
 
-        e.putInt("card_count", n - 1);
-        e.putInt("selected", Math.max(0, Math.min(index, n - 2)));
-        e.apply();
+        lastCid = String.format("%02X", cid);
+        String atc = txnAtc();
 
-        cards.clear();
-        loadAll();
-        current = Math.max(0, Math.min(index, cards.size() - 1));
-        bindCard(current);
-        status("Card deleted - " + cards.size() + " left");
-        showPage(0);
-    }
-
-    private void copyBlock(SharedPreferences.Editor e, String from, String to) {
-        for (Map.Entry<String, ?> en : prefs.getAll().entrySet()) {
-            String k = en.getKey();
-            if (!k.startsWith(from)) continue;
-            String nk = to + k.substring(from.length());
-            Object v = en.getValue();
-            if (v instanceof Integer) e.putInt(nk, (Integer) v);
-            else if (v instanceof Boolean) e.putBoolean(nk, (Boolean) v);
-            else if (v instanceof Long) e.putLong(nk, (Long) v);
-            else if (v instanceof Float) e.putFloat(nk, (Float) v);
-            else if (v != null) e.putString(nk, v.toString());
+        byte[] cdol = new byte[0];
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            cdol = Arrays.copyOfRange(apdu, off, off + lc);
         }
-    }
 
-    private static boolean luhn(String s) {
-        return Luhn.valid(s);
-    }
+        byte[] ac = computeAc(atc, cdol);
+        cryptogramSent = true;
 
-    // ---------- payment role ----------
+        String iad = (capturedIad == null)
+                ? p("iad", "06010A03A0B800")
+                : bytesToHex(capturedIad);
 
-    /**
-     * Foreground boost. While this activity is resumed our AIDs win the
-     * arbitration even if we are not the default payment app - which is what
-     * makes tapping with the app open work without touching settings.
-     *
-     * It is released in onPause, so it does NOT cover a tap with the app closed,
-     * the screen locked, or another app in front. That is what promptDefault()
-     * is for.
-     */
-    private void claimPaymentRole() {
-        try {
-            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
-            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
-            if (nfc == null) return;
-            CardEmulation ce = CardEmulation.getInstance(nfc);
-            ce.setPreferredService(this, new ComponentName(this, ShadowApduService.class));
-        } catch (Throwable ignored) { }
-    }
+        tap("-- genac requested=" + String.format("%02X", requested)
+                + " cid=" + lastCid
+                + (forced.length() == 2 ? " (forced from the CID box)" : "")
+                + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
-    private void releasePaymentRole() {
-        try {
-            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
-            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
-            if (nfc == null) return;
-            CardEmulation ce = CardEmulation.getInstance(nfc);
-            ce.unsetPreferredService(this);
-        } catch (Throwable ignored) { }
-    }
+        byte[] body = cat(
+                tlv(0x9F10, hex(iad)),
+                tlv(0x9F26, ac),
+                tlv(0x9F27, new byte[]{cid}),
+                tlv(0x9F34, hex(CVM_RESULTS)),
+                tlv(0x9F36, hex(atc)));
 
-    private boolean isDefaultPayment() {
-        try {
-            NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
-            NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
-            if (nfc == null) return false;
-            CardEmulation ce = CardEmulation.getInstance(nfc);
-            return ce.isDefaultServiceForCategory(
-                    new ComponentName(this, ShadowApduService.class),
-                    CardEmulation.CATEGORY_PAYMENT);
-        } catch (Throwable e) {
-            return false;
-        }
-    }
+        tap("-- genac body=" + body.length + "B iad=" + hex(iad).length
+                + "B arqc=" + ac.length + "B cvm=" + hex(CVM_RESULTS).length + "B");
 
-    /** Ask the system to make us the default payment service. */
-    private void promptDefault() {
-        try {
-            Intent i = new Intent(CardEmulation.ACTION_CHANGE_DEFAULT);
-            i.putExtra(CardEmulation.EXTRA_SERVICE_COMPONENT,
-                    new ComponentName(this, ShadowApduService.class));
-            i.putExtra(CardEmulation.EXTRA_CATEGORY, CardEmulation.CATEGORY_PAYMENT);
-            startActivity(i);
-        } catch (ActivityNotFoundException e) {
-            try {
-                startActivity(new Intent(Settings.ACTION_NFC_PAYMENT_SETTINGS));
-            } catch (ActivityNotFoundException ignored) { }
-        }
+        return cat(tlv(0x77, body), SW_OK);
     }
 
     /**
-     * Show the banner whenever we are not the default, and fire the system
-     * dialog once. The banner stays after the one-shot so there is always a way
-     * back in.
+     * FIX: the key gate here was a raw length check at 32 while haveKey() demands
+     * 32 or 48. A 40-character key passed this and reached DESede as 20 bytes,
+     * threw, and fell into the catch returning zeros. Same gate as haveKey() now.
      */
-    private void maybeAskDefault() {
-        boolean isDefault = isDefaultPayment();
-
-        if (banner != null) {
-            boolean nfcOff = false;
-            try {
-                NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
-                NfcAdapter nfc = mgr == null ? null : mgr.getDefaultAdapter();
-                nfcOff = (nfc == null || !nfc.isEnabled());
-            } catch (Throwable ignored) { }
-
-            banner.setText(nfcOff ? R.string.nfc_off : R.string.become_default);
-            banner.setVisibility(isDefault ? View.GONE : View.VISIBLE);
+    private byte[] computeAc(String atc, byte[] cdol) {
+        if (!haveKey()) {
+            tap("!! no valid MK-AC set - ARQC will be all zeros");
+            return new byte[8];
         }
+        String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
 
-        if (isDefault) return;
-        if (prefs.getBoolean(ASKED_DEFAULT, false)) return;
-        prefs.edit().putBoolean(ASKED_DEFAULT, true).apply();
-        promptDefault();
-    }
-
-    @Override
-    protected void onPause() {
-        releasePaymentRole();
-        super.onPause();
-        collect();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        claimPaymentRole();
-        maybeAskDefault();
-        if (suppressResumeStatus) {
-            suppressResumeStatus = false;
-            return;
-        }
-        showLastVerdict();
-    }
-
-    // ---------- clone from reader ----------
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_CLONE || resultCode != RESULT_OK || data == null) return;
-
-        String pan = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_PAN)));
-        String expiry = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_EXPIRY)));
-        String service = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_SERVICE)));
-        String disc = nz(data.getStringExtra(ReaderActivity.EXTRA_DISC));
-        String aid = nz(data.getStringExtra(ReaderActivity.EXTRA_AID)).toUpperCase();
-        String track2 = normaliseTrack2(data.getStringExtra(ReaderActivity.EXTRA_TRACK2));
-        String psn = digits(nz(data.getStringExtra(ReaderActivity.EXTRA_PSN)));
-        String iad = nz(data.getStringExtra(ReaderActivity.EXTRA_IAD)).toUpperCase();
-        String atc = nz(data.getStringExtra(ReaderActivity.EXTRA_ATC)).toUpperCase();
-        String aip = nz(data.getStringExtra(ReaderActivity.EXTRA_AIP)).toUpperCase();
-
-        if (expiry.length() > 4) expiry = expiry.substring(0, 4);
-        if (psn.length() > 2) psn = psn.substring(0, 2);
-
-        if (pan.isEmpty() && !track2.isEmpty()) {
-            int d = track2.indexOf('D');
-            pan = digits(d > 0 ? track2.substring(0, d) : track2);
-        }
-        if (track2.isEmpty() && !pan.isEmpty()) {
-            track2 = pan + "D" + expiry + service + disc;
-        }
-        if (pan.isEmpty() && track2.isEmpty()) {
-            Toast.makeText(this, "Nothing read from the card", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (expiry.isEmpty() && !track2.isEmpty()) {
-            int d = track2.indexOf('D');
-            if (d >= 0 && track2.length() >= d + 5) expiry = track2.substring(d + 1, d + 5);
-        }
-        if (service.length() != 3) {
-            int d = track2.indexOf('D');
-            if (d >= 0 && track2.length() >= d + 8) service = track2.substring(d + 5, d + 8);
-        }
-        if (service.length() != 3) service = "201";
-
-        boolean reuse = t(etPan).isEmpty() && t(etTrack2).isEmpty();
-        if (!reuse) {
-            if (cards.size() >= MAX_CARDS) {
-                Toast.makeText(this, "Max " + MAX_CARDS + " cards", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            collect();
-            cards.add(new CardAdapter.CardModel());
-            prefs.edit().putInt("card_count", cards.size()).apply();
-            adapter.setCards(cards);
-            current = cards.size() - 1;
-        }
-
-        binding = true;
-        etLabel.setText(pan.length() >= 4 ? "CLONE " + pan.substring(pan.length() - 4) : "CLONE");
-        etPan.setText(pan);
-        etExpiry.setText(expiry);
-        etService.setText(service);
-        etTrack2.setText(track2);
-        etAid.setText(aid);
-        etDiscretionary.setText(track2.isEmpty() ? disc : "");
-        if (!iad.isEmpty()) etIad.setText(iad);
-        if (!aip.isEmpty()) etAip.setText(aip);
-        if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
-        etAfl.setText("");
-        etCid.setText("");
-        binding = false;
-
-        collect();
-        prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "01" : psn).apply();
-
-        copyStagingToCard(current);
-
-        binding = true;
-        etMsd.setText(String.valueOf(msdFromCapture(current)));
-        binding = false;
-        collect();
-
-        adapter.notifyItemChanged(current);
-        pager.smoothScrollToPosition(current);
-        prefs.edit().putInt("selected", current).apply();
-
-        int recs = recordCountOnCard();
-        String st = recs == 0
-                ? "Cloned - no records captured, terminal will get a synthetic one"
-                : "Cloned " + recs + " records - check it, then SAVE";
-
-        if (t(etName).isEmpty()) {
-            String h = holderFromCapture(current);
-            if (!h.isEmpty()) {
-                binding = true;
-                etName.setText(h);
-                binding = false;
-                collect();
-                st = st + " | name: " + h;
-                Toast.makeText(this, "Name read off the card: " + h, Toast.LENGTH_LONG).show();
-            } else {
-                st = st + " | no 5F20 in those " + recs + " records";
-                Toast.makeText(this, "No 5F20 name in the " + recs
-                        + " captured records - type it", Toast.LENGTH_LONG).show();
-            }
-        }
-        status(st);
-        suppressResumeStatus = true;
-
-        Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
-        showPage(1);
-
-        if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
-                && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
-            scanForKey(false);
-        }
-    }
-
-    private int msdFromCapture(int index) {
-        String gpo = prefs.getString(key(index, "cap_rawgpo"), "");
-        if (gpo.isEmpty()) gpo = prefs.getString("cap_rawgpo", "");
-        if (gpo.length() < 2) return 1;
+        int variant = 0;
         try {
-            return (Integer.parseInt(gpo.substring(0, 2), 16) == 0x80) ? 1 : 0;
-        } catch (NumberFormatException e) {
-            return 1;
-        }
-    }
+            String kv = p("keyvar", "0").replaceAll("[^0-9A-Fa-f]", "");
+            if (!kv.isEmpty()) {
+                variant = kv.matches("[0-9]+")
+                        ? Integer.parseInt(kv)
+                        : Integer.parseInt(kv, 16);
+            }
+        } catch (Exception ignored) { }
+        variant &= 0x03;
 
-    private int recordCountOnCard() {
-        int n = 0;
-        String p = key(current, "cap_rec");
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(p)) n++;
-        }
-        return n;
-    }
-
-    private String holderFromCapture(int index) {
-        String prefix = key(index, "cap_rec");
-        for (String k : prefs.getAll().keySet()) {
-            if (!k.startsWith(prefix)) continue;
-            String hex = prefs.getString(k, "");
-            if (hex == null || hex.isEmpty()) continue;
-            try {
-                byte[] v = tagOf(hexToBytes(hex), 0x5F20);
-                if (v == null || v.length < 2) continue;
-                String n = new String(v, StandardCharsets.ISO_8859_1);
-                n = n.toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                if (n.length() >= 2) return n.length() > 26 ? n.substring(0, 26) : n;
-            } catch (Exception ignored) { }
-        }
-        return "";
-    }
-
-    private static String nameFromTrack1(String raw) {
-        if (raw == null) return "";
-        int a = raw.indexOf('^');
-        if (a < 0) return "";
-        int b = raw.indexOf('^', a + 1);
-        if (b < 0) return "";
-        String n = raw.substring(a + 1, b).toUpperCase()
-                .replaceAll("[^A-Z0-9 ./'-]", "")
-                .replaceAll("\\s+", " ")
-                .trim();
-        if (n.length() < 2) return "";
-        return n.length() > 26 ? n.substring(0, 26) : n;
-    }
-
-    private static String nextAtc(String hexAtc) {
         try {
-            int v = Integer.parseInt(hexAtc.replaceAll("[^0-9A-Fa-f]", ""), 16);
-            return String.format("%04X", (v + 1) & 0xFFFF);
+            byte[] macIn = ((variant & 2) != 0)
+                    ? cat(aipForMac(), hex(atc), cdol)
+                    : cat(cdol, aipForMac(), hex(atc));
+            return EmvCrypto.arqc(mk, pan(), psn(), atc, macIn, variant & 1);
         } catch (Exception e) {
-            return "001B";
+            tap("!! ARQC failed: " + e);
+            return new byte[8];
         }
     }
 
-    private void copyStagingToCard(int index) {
-        SharedPreferences.Editor e = prefs.edit();
-        String dst = key(index, "cap_");
+    /**
+     * FIX: only 9F36, 9F13, 9F17 and 9F4F were served, so a kernel probing 9F4D
+     * got 6A88. 9F4D is now served too.
+     */
+    private byte[] getData(byte[] apdu) {
+        int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);
 
-        List<String> stale = new ArrayList<>();
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(dst)) stale.add(k);
+        if (tag == 0x9F36)      return cat(tlv(0x9F36, hex(txnAtc())), SW_OK);
+        else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("00")), SW_OK);
+        else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
+        else if (tag == 0x9F4D) return cat(tlv(0x9F4D, hex("0B0A")), SW_OK);
+        else if (tag == 0x9F4F) return cat(tlv(0x9F4F, hex("9F4D020B0A")), SW_OK);
+        return SW_NOT_FOUND;
+    }
+
+    private String baseVerdict() {
+        if (sawError)     return "TAP: an APDU threw - read the !! line, not the AID list";
+        if (tapLog.length() == 0) return "TAP: nothing recorded";
+
+        if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
+        if (nSelects <= 1) return "TAP: terminal read the directory and quit after one SELECT"
+                + " - field drop, or it was not ready";
+        if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
+
+        if (isMsd()) {
+            if (nGens > 0)           return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";
+            if (nRecs == 0)          return "TAP: MSD mode - terminal took the track 2 and read no record";
+            return "TAP: MSD mode - terminal read " + nRecs + " record(s) and should have decided";
         }
-        for (String k : stale) e.remove(k);
 
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("cap_")) {
-                e.putString(dst + k.substring(4), prefs.getString(k, ""));
-            }
+        if (nRecs == 0) {
+            return "TAP: terminal took the GPO response and read NO records - "
+                    + (gpoCid.isEmpty()
+                        ? "check the logged AFL"
+                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it");
         }
 
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("cap_")) e.remove(k);
+        // FIX: this said "it went online with it" unconditionally, so a clean
+        // offline approve with cid 40 read back as a failure.
+        if (nGens == 0 && !gpoCid.isEmpty()) {
+            return "TAP: terminal read " + nRecs + " record(s) and never asked for a cryptogram"
+                    + " | GPO cid " + gpoCid
+                    + ("40".equals(gpoCid)
+                        ? " (TC - offline approve, this is the good path)"
+                        : "");
         }
 
-        e.apply();
+        if (nGens == 0)   return "TAP: terminal read " + nRecs + " records then quit before the cryptogram";
+        if (nGens >= 2)   return "TAP: terminal WENT ONLINE - the issuer judged our ARQC";
+        if ("40".equals(lastCid)) return "TAP: we answered TC - terminal should have APPROVED offline";
+        if ("80".equals(lastCid)) return "TAP: we answered ARQC - terminal must go online";
+        if ("00".equals(lastCid)) return "TAP: we answered AAC - terminal treated it as an offline decline";
+        return "TAP: terminal asked for a cryptogram and we did not answer TC";
     }
 
-    private static String nz(String s) {
-        return s == null ? "" : s.trim();
+    private String verdict() {
+        String v = baseVerdict();
+        int armed = scriptLines();
+        if (armed == 0) return v;
+        if (!useScript()) return v + " | script armed " + armed + " line(s) but OFF";
+        if (scriptHits > 0) return v + " | script hit " + scriptHits + "x";
+        return v + " | script armed " + armed + " line(s) but never matched";
     }
 
-    private static String normaliseTrack2(String raw) {
-        if (raw == null) return "";
-        String s = raw.trim().toUpperCase().replace('=', 'D');
-        while (s.endsWith("F")) s = s.substring(0, s.length() - 1);
-        return s;
-    }
+    @Override
+    public void onDeactivated(int reason) {
+        final String t = tapLog.toString();
 
-    private void syncFieldsFromTrack2() {
-        String track2 = normaliseTrack2(t(etTrack2));
-        int d = track2.indexOf('D');
-        if (d <= 0) return;
+        String v;
+        try {
+            v = verdict();
+        } catch (Exception e) {
+            v = "TAP: verdict failed - " + e;
+        }
+        resetTransaction();
 
-        String pan  = digits(track2.substring(0, d));
-        String tail = track2.substring(d + 1);
-        String exp  = tail.length() >= 4 ? tail.substring(0, 4) : "";
-        String sc   = tail.length() >= 7 ? tail.substring(4, 7) : "";
-        String disc = tail.length() > 7 ? tail.substring(7) : "";
+        if (!t.isEmpty()) termLog("!! verdict: " + v);
 
-        binding = true;
-        if (!pan.isEmpty() && !pan.equals(digits(t(etPan)))) etPan.setText(pan);
-        if (!exp.isEmpty() && !exp.equals(t(etExpiry))) etExpiry.setText(exp);
-        if (!sc.isEmpty() && !sc.equals(t(etService))) etService.setText(sc);
-        if (!disc.equals(t(etDiscretionary))) etDiscretionary.setText(disc);
-        binding = false;
-    }
-
-    private static String brandFromPan(String pan) {
-        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
-        if (pan.startsWith("35")) return "JCB";
-        if (pan.startsWith("62")) return "UNIONPAY";
-        if (pan.startsWith("4")) return "VISA";
-        if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
-        return "CARD";
-    }
-
-    private static String aidFromPan(String pan) {
-        if (pan.startsWith("34") || pan.startsWith("37")) return "A00000002501";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "A0000001523010";
-        if (pan.startsWith("35")) return "A0000000651010";
-        if (pan.startsWith("62")) return "A000000333010101";
-        if (pan.startsWith("4")) return "A0000000031010";
-        if (pan.startsWith("5") || pan.startsWith("2")) return "A0000000041010";
-        return "";
+        if (!t.isEmpty()) {
+            try {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("tap log", t));
+            } catch (Exception ignored) { }
+            try {
+                prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
+            } catch (Exception ignored) { }
+            popup(v);
+        }
+        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
 }
