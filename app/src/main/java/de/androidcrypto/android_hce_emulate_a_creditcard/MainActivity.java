@@ -567,7 +567,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "1080"));
+        etAip.setText(prefs.getString(key(i, "aip"), "5800"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), ""));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -649,7 +649,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "1080" : t(etAip).toUpperCase()).append('\n');
+                .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
         sb.append("CID        : ")
                 .append(t(etCid).isEmpty() ? "(empty - logic decides: TC offline, ARQC only if a key)"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
@@ -694,7 +694,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("CVM result : ")
                 .append(t(etCvmres).isEmpty() ? "1F0300" : t(etCvmres).toUpperCase())
                 .append('\n');
-        sb.append("9F07/9F08  : FF00 / 0002  (written by SEED RECORDS)\n");
+        sb.append("9F07/9F08  : FFC0 / 0002  (written by SEED RECORDS)\n");
 
         if (t(etCvmlist).toUpperCase().startsWith("1E")) {
             sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
@@ -784,9 +784,15 @@ public class MainActivity extends AppCompatActivity {
      * The record takes the CDOLs and CVM list from the boxes on screen when they
      * are filled, so a seeded card and the service cannot drift apart.
      *
-     * 9F07 (AUC) and 9F08 (application version) go in unconditionally: a
-     * kernel-2 EMV record without a version number is a data-validation fault,
-     * and a validation fault is an "error, insert card" fallback.
+     * FIX: this used to write 5A/5F24/5F34/5F20/57/8C/8D/8E/9F07/9F08 and stop,
+     * so a seeded card carried no CIACs at all - the exact data-validation gap
+     * syntheticRecord() was patched to close. The record is now the same tag set
+     * in the same order, with 9F0D/9F0E/9F0F copied byte-for-byte from the real
+     * card in Sample_Mastercard_Reader_Logfile.md. 9F42 opens it for the same
+     * reason, and 9F07 is FFC0 to match.
+     *
+     * Seeding blanks the CID and AFL boxes by design: the CID falls through to
+     * GPO_CID (40) and the AFL re-derives from the one record.
      */
     private void seedRecords() {
         final int i = current;
@@ -825,18 +831,23 @@ public class MainActivity extends AppCompatActivity {
                     String cvm = t(etCvmlist).isEmpty() ? CVMLIST : t(etCvmlist).toUpperCase();
 
                     StringBuilder rec = new StringBuilder();
-                    rec.append(tlvHex(0x5A, pan));
+                    rec.append(tlvHex(0x9F42, "0840"));
                     rec.append(tlvHex(0x5F24, exp + "01"));
+                    rec.append(tlvHex(0x5A, pan));
                     rec.append(tlvHex(0x5F34, "01"));
                     if (name.length() >= 2) {
                         rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
                     }
-                    rec.append(tlvHex(0x57, track2));
+                    rec.append(tlvHex(0x9F07, "FFC0"));
+                    rec.append(tlvHex(0x9F08, "0002"));
                     rec.append(tlvHex(0x8C, cdol1));
                     rec.append(tlvHex(0x8D, cdol2));
                     rec.append(tlvHex(0x8E, cvm));
-                    rec.append(tlvHex(0x9F07, "FF00"));
-                    rec.append(tlvHex(0x9F08, "0002"));
+                    rec.append(tlvHex(0x9F0D, "B450840000"));
+                    rec.append(tlvHex(0x9F0E, "0000000000"));
+                    rec.append(tlvHex(0x9F0F, "B470848000"));
+                    rec.append(tlvHex(0x5F28, "0840"));
+                    rec.append(tlvHex(0x57, track2));
                     String record = tlvHex(0x70, rec.toString());
 
                     String label = t(etLabel).toUpperCase()
