@@ -80,13 +80,20 @@ public class ShadowApduService extends HostApduService {
     private static final byte AIP_CVM = (byte) 0x10;
 
     /**
-     * Tags a real card may legitimately put in a GPO response but which a clone
-     * normally must NOT, because they describe a cryptogram the card already
-     * produced.
+     * Whether the GPO response carries the AC tags at all.
      *
+     * true  - strip 9F26/9F27/9F36/9F10/9F71, so the terminal MUST read the
+     *         records and then ask for a cryptogram with GENERATE AC.
      * false - keep the card's own AC tags and rewrite the CID to TC instead.
+     *
+     * Was false, and only the capture replay path ever honoured it, so the built
+     * path could never stop sending an AC. A TC inside the GPO says "approved,
+     * done" and a kernel takes that literally: it finishes on the spot without a
+     * single READ RECORD, holding an AIP and an AFL but no PAN to print a
+     * receipt from. Verified against a real tap - GPO accepted, 7728 well formed,
+     * zero READ RECORD, no receipt.
      */
-    private static final boolean STRIP_AC = false;
+    private static final boolean STRIP_AC = true;
 
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
@@ -891,10 +898,16 @@ public class ShadowApduService extends HostApduService {
      * and dropped the card without sending a single READ RECORD. It now emits
      * 9F10/9F26/9F27/9F36 like a real card, over the PDOL data it was sent.
      *
-     * BOTH paths mark cryptogramSent. Without that on the replay path a terminal
-     * that asks for a cryptogram after a replayed TC would get a freshly computed
-     * ARQC and go online into a decline - the card would have contradicted its
-     * own CID one APDU later.
+     * BOTH paths mark cryptogramSent, unless STRIP_AC is on - there is no AC in
+     * the response then, so a later GENERATE AC has to be decided from the
+     * request rather than treated as already answered. Without the flag on the
+     * replay path a terminal that asks for a cryptogram after a replayed TC got a
+     * freshly computed ARQC and went online into a decline - the card would have
+     * contradicted its own CID one APDU later.
+     *
+     * STRIP_AC is ON, so by default the AC tags come back out. A TC sitting in
+     * the GPO tells a kernel the transaction is finished, and it finishes it -
+     * no READ RECORD, no PAN, no receipt.
      */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
@@ -929,7 +942,7 @@ public class ShadowApduService extends HostApduService {
                     }
 
                     txnAip = capturedAip(raw);
-                    cryptogramSent = true;
+                    cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
                             + " (CDA dropped, "
                             + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
@@ -979,7 +992,7 @@ public class ShadowApduService extends HostApduService {
 
         String atc = txnAtc();
         byte[] ac = computeAc(atc, pdolData);
-        cryptogramSent = true;
+        cryptogramSent = !STRIP_AC;
 
         String iad = (capturedIad == null)
                 ? p("iad", "06010A03A0B800")
@@ -999,10 +1012,14 @@ public class ShadowApduService extends HostApduService {
         byte[] body = cat(
                 tlv(0x82, used),
                 tlv(0x94, a),
-                tlv(0x9F10, hex(iad)),
-                tlv(0x9F26, ac),
-                tlv(0x9F27, new byte[]{cid}),
-                tlv(0x9F36, hex(atc)));
+                tlv(0x9F10, hex(iad)));
+
+        if (!STRIP_AC) {
+            body = cat(body,
+                    tlv(0x9F26, ac),
+                    tlv(0x9F27, new byte[]{cid}),
+                    tlv(0x9F36, hex(atc)));
+        }
 
         return cat(tlv(0x77, body), SW_OK);
     }
