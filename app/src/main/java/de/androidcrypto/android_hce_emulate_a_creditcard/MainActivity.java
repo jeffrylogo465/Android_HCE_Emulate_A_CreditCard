@@ -58,7 +58,7 @@ public class MainActivity extends AppCompatActivity {
      * This constant only applies when the CVM box is EMPTY. A card already
      * carrying 1E031F00 keeps it - blank the box and seed again.
      */
-    private static final String CVMLIST = "00000000000000001F01";
+    private static final String CVMLIST = "00000000000000001F03";
 
     private static final String PPSE    = "325041592E5359532E4444463031";
 
@@ -69,21 +69,23 @@ public class MainActivity extends AppCompatActivity {
      * The PPSE carries TWO applets - Mastercard A0000000041010 at priority 01
      * and Maestro A0000000043060 at priority 02 - with their labels and no 9F2A.
      * The FCI carries no 9F38 at all, so the terminal sends 8300 like it did on
-     * the real card.
+     * the real card, and its label is MCHIP Base 01.
      *
-     * The outer lengths in the log did not reconcile with the byte counts (one
-     * too high on the PPSE, one too low on the FCI), so they are recomputed here
-     * and these strings are valid TLV.
+     * The lengths are the ones the card and the log both carry, byte for byte.
+     * An earlier revision "corrected" them - A533/6F45 and 6F1B/A510/500E - and
+     * was wrong on all three. A working receipt off the same data is what settled
+     * it: the PPSE's A5 content is 52 bytes because the second 61 entry is
+     * counted twice over, and the FCI's label is 13 bytes, not 14.
      *
      * NOTE: a captured PPSE is served verbatim, so this bypasses buildPpse()'s
      * generated branch entirely - and PPSE_MINIMAL with it.
      */
     private static final String REAL_PPSE =
-            "6F45840E325041592E5359532E4444463031A533BF0C3161184F07A0000000041010500A4D617374657263617264870101"
+            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
           + "61154F07A000000004306050074D41455354524F870102";
 
     private static final String REAL_FCI =
-            "6F1B8407A0000000041010A510500E4D434849502042617365203031";
+            "6F1A8407A0000000041010A50F500D4D434849502042617365203031";
 
     /** One-shot flag for the payment-role prompt. */
     private static final String ASKED_DEFAULT = "asked_default";
