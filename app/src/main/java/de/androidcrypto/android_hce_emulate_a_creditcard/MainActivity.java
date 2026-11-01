@@ -58,9 +58,32 @@ public class MainActivity extends AppCompatActivity {
      * This constant only applies when the CVM box is EMPTY. A card already
      * carrying 1E031F00 keeps it - blank the box and seed again.
      */
-    private static final String CVMLIST = "00000000000000001F03";
+    private static final String CVMLIST = "00000000000000001F01";
 
     private static final String PPSE    = "325041592E5359532E4444463031";
+
+    /**
+     * The plastic's own directory and FCI, lifted off the card in the reader
+     * log. Replayed verbatim by seedRecords().
+     *
+     * The PPSE carries TWO applets - Mastercard A0000000041010 at priority 01
+     * and Maestro A0000000043060 at priority 02 - with their labels and no 9F2A.
+     * The FCI carries no 9F38 at all, so the terminal sends 8300 like it did on
+     * the real card.
+     *
+     * The outer lengths in the log did not reconcile with the byte counts (one
+     * too high on the PPSE, one too low on the FCI), so they are recomputed here
+     * and these strings are valid TLV.
+     *
+     * NOTE: a captured PPSE is served verbatim, so this bypasses buildPpse()'s
+     * generated branch entirely - and PPSE_MINIMAL with it.
+     */
+    private static final String REAL_PPSE =
+            "6F45840E325041592E5359532E4444463031A533BF0C3161184F07A0000000041010500A4D617374657263617264870101"
+          + "61154F07A000000004306050074D41455354524F870102";
+
+    private static final String REAL_FCI =
+            "6F1B8407A0000000041010A510500E4D434849502042617365203031";
 
     /** One-shot flag for the payment-role prompt. */
     private static final String ASKED_DEFAULT = "asked_default";
@@ -694,7 +717,8 @@ public class MainActivity extends AppCompatActivity {
         sb.append("CVM result : ")
                 .append(t(etCvmres).isEmpty() ? "1F0300" : t(etCvmres).toUpperCase())
                 .append('\n');
-        sb.append("9F07/9F08  : FF00 / 0002  (written by SEED RECORDS)\n");
+        sb.append("9F07/9F08  : FFC0 / 0002  (written by SEED RECORDS)\n");
+        sb.append("PPSE / FCI : the plastic's own, replayed by SEED RECORDS\n");
 
         if (t(etCvmlist).toUpperCase().startsWith("1E")) {
             sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
@@ -774,9 +798,19 @@ public class MainActivity extends AppCompatActivity {
      *
      * A card that only works after a successful read is a card that dies with
      * the reader. This writes the two things select() and gpo() actually need -
-     * a one-entry directory advertising the card's own AID, and an SFI 1 record
-     * carrying the PAN, track 2 and the CDOLs - and clears any stale FCI and GPO
-     * so the built GPO path is the one that runs.
+     * a directory and an SFI 1 record carrying the PAN, track 2 and the CDOLs -
+     * and clears any stale FCI and GPO so the built GPO path is the one that
+     * runs.
+     *
+     * The directory and the FCI are NOT invented: they are the plastic's own,
+     * taken off the card in the reader log and replayed verbatim from REAL_PPSE
+     * and REAL_FCI. That buys the real label, the second applet, the absence of
+     * 9F38, and a GPO payload shaped like the real card's. It also means
+     * buildPpse()'s generated branch never runs on a seeded card.
+     *
+     * The AFL is deliberately NOT the real one. The plastic lists six records
+     * over SFI 1-4 and readRecord() only synthesizes SFI 1, so a real AFL would
+     * draw 6A83 on SFI 2. The derived single-entry AFL is self-consistent.
      *
      * MSD is forced to 0 because the built path frames a 77 template; a leftover
      * 1 would make gpo() look for an 80 framing that no longer exists.
@@ -784,17 +818,14 @@ public class MainActivity extends AppCompatActivity {
      * The record takes the CDOLs and CVM list from the boxes on screen when they
      * are filled, so a seeded card and the service cannot drift apart.
      *
-     * 9F07 (AUC) and 9F08 (application version) go in unconditionally: a
-     * kernel-2 EMV record without a version number is a data-validation fault,
-     * and a validation fault is an "error, insert card" fallback.
-     *
-     * 9F42 (currency), 5F28 (country) and the 9F0D/9F0E/9F0F CIAC triplet also
-     * go in unconditionally, and the tag order mirrors syntheticRecord() in the
-     * service tag for tag. The CIACs are the values lifted off the sample
-     * Mastercard logfile; without them the kernel has nothing to compare the TVR
-     * against, which is the exact gap syntheticRecord() was once fixed to close.
-     * 9F07 is FFC0 - goods, services and cash, domestic and international. FF00
-     * would have blocked international use.
+     * 9F07 (AUC), 9F08 (application version), 9F42 (currency), 5F28 (country)
+     * and the 9F0D/9F0E/9F0F CIAC triplet go in unconditionally, and the tag
+     * order mirrors syntheticRecord() in the service tag for tag. The CIACs are
+     * the values lifted off the sample Mastercard logfile; without them the
+     * kernel has nothing to compare the TVR against, which is the exact gap
+     * syntheticRecord() was once fixed to close. 9F07 is FFC0 - goods, services
+     * and cash, domestic and international. FF00 would have blocked
+     * international use.
      */
     private void seedRecords() {
         final int i = current;
@@ -812,10 +843,10 @@ public class MainActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("Seed records for card " + (i + 1) + "?")
-                .setMessage("Builds a directory and one SFI 1 record from the fields on "
+                .setMessage("Builds a record and a directory from the fields on "
                         + "screen, so this card can be tapped without reading a plastic.\n\n"
-                        + "Any existing capture on this card is replaced. The record is "
-                        + "synthetic - the real card's discretionary data is not in it.")
+                        + "The directory and FCI are the real card's, replayed. The record is "
+                        + "synthetic - the real card's records are not in it.")
                 .setPositiveButton("Seed", (d, w) -> {
                     String exp = digits(t(etExpiry));
                     if (exp.length() != 4) exp = "3112";
@@ -857,18 +888,11 @@ public class MainActivity extends AppCompatActivity {
                     if (label.length() < 2) label = "CARD";
                     if (label.length() > 16) label = label.substring(0, 16);
 
-                    String entry = tlvHex(0x4F, aid)
-                            + tlvHex(0x50, bytesToHex(label.getBytes(StandardCharsets.US_ASCII)))
-                            + tlvHex(0x87, "01")
-                            + tlvHex(0x9F2A, String.format("%02X", kernelOf(aid)));
-                    String dir = tlvHex(0x61, entry);
-                    String ppse = tlvHex(0x6F,
-                            tlvHex(0x84, PPSE) + tlvHex(0xA5, tlvHex(0xBF0C, dir)));
-
                     wipeCapture(i);
 
                     SharedPreferences.Editor e = prefs.edit();
-                    e.putString(key(i, "cap_rawppse"), ppse);
+                    e.putString(key(i, "cap_rawppse"), REAL_PPSE);
+                    e.putString(key(i, "cap_rawfci"), REAL_FCI);
                     e.putString(key(i, "cap_rec1_1"), record);
                     e.putString(key(i, "cap_aid"), aid);
                     e.putString(key(i, "cap_label"), label);
@@ -887,7 +911,7 @@ public class MainActivity extends AppCompatActivity {
                         status("Seeded - but the CVM list is still ONLINE PIN (" + cvm
                                 + "). Blank the CVM box and seed again.");
                     } else {
-                        status("Seeded 1 record + directory for " + aid
+                        status("Seeded 1 record + real directory for " + aid
                                 + " - cvm " + cvm + ", MSD 0, tap it");
                     }
                     Toast.makeText(this, "Seeded - long-press the card count to inspect",
