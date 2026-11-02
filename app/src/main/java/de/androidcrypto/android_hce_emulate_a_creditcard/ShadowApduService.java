@@ -34,111 +34,38 @@ public class ShadowApduService extends HostApduService {
     /**
      * Fallback AIP when the card has no captured GPO and no typed value.
      *
-     * EMV Contactless AIP byte 1:
-     *   0x80 mag-stripe mode (Mastercard)   0x10 cardholder verification
-     *   0x40 qVSDC supported (Mastercard)   0x08 terminal risk management
-     *   0x20 DDA   0x02 on-device CVM   0x01 CDA   0x04 issuer authentication
+     * 5800 is the working value for a contactless till: EMV mode (0x40 on a
+     * Mastercard), CVM supported (0x10), terminal risk management (0x08). No ODA
+     * bits - a clone cannot honour them.
      *
-     * Byte 2 bit 8 (0x80) is RFU on a Mastercard - the sample card carries 19 80
-     * and still works, which is where the "1080 says neither" note came from: it
-     * was byte 1 that was wrong there, not byte 2.
-     *
-     * 5800 is the working value for the test terminal: EMV mode, CVM supported,
-     * terminal risk management. No ODA bits - a clone cannot honour them.
-     *
-     * Only reached when no script is armed. DEFAULT_SCRIPT normally supplies the
-     * AIP instead, and that one is 5800 too.
+     * Only reached when nothing else supplies an AIP. The profiles below supply
+     * 5800 too, and a scripted GPO carries it verbatim.
      */
     private static final String DEFAULT_AIP = "5800";
 
     /**
-     * Keep-mask applied to byte 1 of whatever AIP is in force.
+     * Keep-mask applied to byte 1 of whatever AIP reaches the MAC.
      *
      * 0xD9 keeps the mode bits - mag-stripe (0x80), qVSDC (0x40), CV (0x10),
      * TRM (0x08) - and the CDA bit (0x01). It clears only DDA (0x20) and issuer
      * authentication (0x04).
-     *
-     * FIX: this used to be 0x18, which also cleared 0x40 - and 0x40 is the
-     * Mastercard qVSDC bit, so a typed 1040 was MACed over as 1000. Mode bits are
-     * not ODA bits; they stay.
      */
     private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
-    /**
-     * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
-     * SDAD in 9F4B, signed with the ICC private key we do not have.
-     *
-     * weakenAip() still clears it, but neither gpo() branch calls it any more -
-     * the reference card advertises 5980 with no 9F4B anywhere and the kernel
-     * read every one of its records.
-     *
-     * VERIFIED against Sample_Mastercard_Reader_Logfile.md: that card's AIP is
-     * 19 80, and 0x01 is the CDA bit. Byte 2's 0x80 is RFU and needs no clearing.
-     */
     private static final byte AIP_CDA = (byte) 0x01;
-
-    /**
-     * AIP byte 1 bit 5 - cardholder verification supported.
-     *
-     * STAYS SET. Clearing it produced AIP 0800 and the terminal bailed on the
-     * GPO without sending a single READ RECORD.
-     *
-     * The list itself is what decides, and it is now no-CVM. See CVMLIST.
-     */
     private static final byte AIP_CVM = (byte) 0x10;
 
-    /**
-     * Whether the GPO response carries the AC tags at all.
-     *
-     * true  - strip 9F26/9F27/9F36/9F10/9F71, so the terminal MUST read the
-     *         records and then ask for a cryptogram with GENERATE AC.
-     * false - keep the AC tags and rewrite the CID instead.
-     *
-     * Left FALSE on purpose, and the default script now puts the AC tags in the
-     * GPO itself. A bare AIP+AFL GPO - what the reference card sent - was
-     * tolerated by one till and refused by the next: that kernel read the AIP and
-     * AFL and quit without a single READ RECORD. qVSDC without a 9F27 gives a
-     * kernel nothing to decide on.
-     *
-     * Only reached when no script is armed - a script that serves the GPO bypasses
-     * gpo() completely.
-     */
     private static final boolean STRIP_AC = false;
 
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
-    /**
-     * Whether buildPpse() advertises Visa and Mastercard alongside the card's
-     * own AID. Unused while PPSE_MINIMAL is true, kept for the bisect.
-     */
     private static final boolean EXTRA_AIDS = false;
-
-    /**
-     * BISECT SWITCH - the generated PPSE entry carries 4F and 87 only.
-     *
-     * Terminals were answering INSERT CARD straight after the directory, so they
-     * read the PPSE and refused the app before sending SELECT AID. With the label
-     * and 9F2A gone a terminal DID select the AID. Leave true.
-     *
-     * NOTE: this only affects the GENERATED directory. A captured PPSE is served
-     * verbatim and keeps whatever the real card carried.
-     */
     private static final boolean PPSE_MINIMAL = true;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
     private static final byte CID_ARQC = (byte) 0x80;
 
-    /**
-     * The CID written into the GPO response when STRIP_AC is false.
-     *
-     * 40 = TC   approve offline, the terminal never asks the host  <- this
-     * 80 = ARQC go online, the host judges the cryptogram
-     * 00 = AAC  decline offline
-     *
-     * Declared after CID_TC on purpose: a static initialiser referring to a later
-     * simple name is an illegal forward reference in Java.
-     */
     private static final byte GPO_CID = CID_TC;
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
@@ -149,84 +76,110 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    /**
-     * CVM list: X = 0, Y = 0, one rule - 1F 03, "no CVM required, if supported".
-     *
-     * WHY NOT ONLINE PIN (1E 03):
-     *   The card decides TC offline, so no online session opens - but an
-     *   online-PIN rule says the card expects a PIN block only an online session
-     *   produces. The kernel ends up with a CVM it cannot perform and aborts.
-     *
-     * NOTE: the reference card's own list is 42 03 / 1E 03 / 1F 03 - online PIN
-     * WITH fallbacks to signature and no-CVM. A captured record carries that, so
-     * this constant only applies to a synthetic one.
-     */
     private static final String CVMLIST = "00000000000000001F03";
-
-    /**
-     * 9F34 CVM Results - no CVM performed, if supported, SUCCESSFUL.
-     *
-     * Third byte 02 is the result. 00 (unknown) is legal but says nothing; a
-     * terminal that checks it prefers 02.
-     */
     private static final String CVM_RESULTS = "1F0302";
 
+    // ---------- profile material ----------
+
     /**
-     * Default transaction script. Used when the selected card's own script box is
-     * EMPTY - see useScript().
+     * The reference Mastercard's own directory and FCI, lifted off the card in
+     * the reader log and replayed byte for byte.
      *
-     * One per line: <match>=<response>. '#' starts a comment, spaces are ignored,
-     * longest match wins. The 9000 belongs on the SAME line as the response; a
-     * line with no '=' is discarded, so a 9000 on its own line is lost.
-     *
-     * The directory, both FCIs and the GPO are the reference card's, byte for
-     * byte. The GPO additionally carries 9F26/9F27/9F36 with CID 40 - the card
-     * itself sends a bare AIP+AFL and one kernel accepted that, but the next one
-     * read the AIP and AFL and quit without a single READ RECORD.
-     *
-     * WHY A LINE FOR MAESTRO: the reference directory advertises two applets and
-     * a terminal may select either. Without a 43060 line the second select falls
-     * through to the generated FCI, which carries 9F2A and a 9F38 PDOL - and then
-     * the tap is running a Maestro applet against a Mastercard-shaped GPO.
-     *
-     * WHY ONE AFL ENTRY AND NOT FIVE: readRecord() synthesizes SFI 1 and nothing
-     * else, so the reference's five-entry AFL would draw 6A83 on SFI 2. Pointing
-     * the AFL at SFI 1 rec 1 is self-consistent with what this build can serve.
-     * Put the five-entry AFL back the moment the real records are on the card.
-     *
-     * A script that serves the GPO bypasses everything gpo() does - the CID
-     * rewrite and the MSD framing - and a scripted SELECT bypasses patchFci().
+     * The PPSE carries TWO applets - Mastercard at priority 01 and Maestro at
+     * priority 02 - with their labels and no 9F2A. The FCI carries no 9F38 at
+     * all, so the terminal sends 8300 and then a PDOL-free GPO, and its label is
+     * "CHIP Base 01", 13 characters under the 500D it sits in.
      */
-    private static final String DEFAULT_SCRIPT =
-            "00A404000E325041592E5359532E4444463031=6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D61737465726361726487010161154F07A000000004306050074D41455354524F8701029000\n"
-          + "00A4040007A0000000041010=6F1A8407A0000000041010A50F500D4348495020426173652030319000\n"
-          + "00A4040007A0000000043060=6F1A8407A0000000043060A50F500D4348495020426173652030319000\n"
-          + "80A80000=771E820258009404080101009F260800000000000000009F2701409F3602001C9000\n"
-          + "80AE=77299F2701409F36025B009F26086D14503D408943A19F10120110A000092400000102000000000000FF9000\n";
+    private static final String REAL_PPSE =
+            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
+          + "61154F07A000000004306050074D41455354524F870102";
+
+    private static final String REAL_FCI =
+            "6F1A8407A0000000041010A50F500D434849502042617365203031";
+
+    private static final String MAESTRO_FCI =
+            "6F1A8407A0000000043060A50F500D434849502042617365203031";
+
+    /**
+     * The GPO response, built per tap.
+     *
+     * AIP 5800, one AFL entry, an ARQC, CID 40, the live ATC and the reference
+     * IAD. The ARQC and the ATC are no longer frozen, and the 77 length is
+     * computed instead of typed, so it can never drift from the bytes it covers.
+     *
+     * The ATC must climb: EMV expects it to, and a till holding the last ATC for
+     * this PAN treats an identical one as a possible replay. The ARQC is only
+     * ever looked at if the transaction goes online, which CID 40 prevents - so
+     * with no key it stays eight zero bytes and costs nothing.
+     *
+     * A bare AIP+AFL GPO - what the card itself sends - was tolerated by one
+     * till and refused by the next, which read the AIP and AFL and quit without
+     * a single READ RECORD. The AC tags are in the GPO here on purpose.
+     *
+     * WHY ONE AFL ENTRY AND NOT THE CARD'S FIVE: readRecord() synthesizes SFI 1
+     * and nothing else, so a five-entry AFL would draw 6A83 on SFI 2. Pointing
+     * the AFL at SFI 1 rec 1 is self-consistent with what this build can serve.
+     *
+     * 50 bytes of body, 0x32: 82/5800, 94/08010100, 9F26/8, 9F27/40,
+     * 9F36/<atc>, 9F10/17. The 9F10 is the reference card's own IAD, with the
+     * institution digit changed per network.
+     */
+    private String gpoLine(boolean visa) {
+        String atc = txnAtc();
+        String ac = txnAcHex();
+        String iad = visa
+                ? "0110A000032400000102000000000000FF"
+                : "0110A000092400000102000000000000FF";
+
+        String body = "82025800"
+                + "940408010100"
+                + "9F2608" + ac
+                + "9F270140"
+                + "9F3602" + atc
+                + "9F1011" + iad;
+
+        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
+    }
+
+    /**
+     * The cryptogram for this transaction, computed once and cached.
+     *
+     * Cached because profileScript() is rebuilt on every APDU - scriptLines()
+     * and scriptMatch() both call it, and verdict() calls scriptLines() again -
+     * and computeAc() logs a line, so an uncached call would print the same
+     * warning a dozen times a tap.
+     *
+     * No PDOL is sent (the FCIs carry no 9F38), so the MAC input is empty; the
+     * AIP and the ATC are folded in by computeAc() itself.
+     */
+    private String txnAcHex() {
+        if (txnAc == null) {
+            txnAc = haveKey()
+                    ? bytesToHex(computeAc(txnAtc(), new byte[0]))
+                    : "0000000000000000";
+        }
+        return txnAc;
+    }
 
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
 
     private byte[] txnAip;
     private String txnAtc;
+    /** Hex, cached with txnAtc so the two can never disagree. */
+    private String txnAc;
     private boolean cryptogramSent;
     private int scriptHits;
 
-    /** The captured IAD, lifted out of the GPO replay before any rewrite. */
     private byte[] capturedIad;
-
-    /** CID currently in force in the GPO response, for the verdict. */
     private String gpoCid = "";
 
     private boolean sawPpse;
     private int nSelects, nGpos, nRecs, nGens;
     private String lastCid = "";
 
-    // Set when an APDU throws, so baseVerdict() can say so instead of blaming
-    // the terminal's AID list for what is actually our own exception.
     private boolean sawError;
 
-    /** Name of the on-device terminal log. App-private, no permission needed. */
     private static final String TERM_LOG = "term_log.txt";
 
     private void termLog(String s) {
@@ -271,10 +224,6 @@ public class ShadowApduService extends HostApduService {
     static byte[] cat(byte[]... arrs) { return Tlv.cat(arrs); }
     private static String bytesToHex(byte[] d) { return Hex.toHex(d); }
 
-    /**
-     * Local TLV writer. The length is always taken from v.length, so an outer
-     * length can never disagree with the bytes it covers.
-     */
     static byte[] tlv(int tag, byte[] v) {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
         if ((tag & 0xFF00) != 0) {
@@ -329,7 +278,6 @@ public class ShadowApduService extends HostApduService {
         return l;
     }
 
-    /** Lc of an incoming APDU, extended length included. */
     private static int lcOf(byte[] apdu) {
         if (apdu.length < 5) return 0;
         int lc = apdu[4] & 0xFF;
@@ -338,7 +286,6 @@ public class ShadowApduService extends HostApduService {
         return ((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF);
     }
 
-    /** Offset of the data field, past an extended length if there is one. */
     private static int dataOff(byte[] apdu) {
         return (apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00) ? 7 : 5;
     }
@@ -410,6 +357,7 @@ public class ShadowApduService extends HostApduService {
     private void resetTransaction() {
         txnAip = null;
         txnAtc = null;
+        txnAc = null;
         cryptogramSent = false;
         scriptHits = 0;
         sawPpse = false;
@@ -430,10 +378,6 @@ public class ShadowApduService extends HostApduService {
         return a;
     }
 
-    /**
-     * FIX: this used to accept anything 32 characters or longer, so an 8-byte
-     * (16 hex) key passed the gate and produced a half-length MAC.
-     */
     private boolean haveKey() {
         int n = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "").length();
         return n == 32 || n == 48;
@@ -473,23 +417,88 @@ public class ShadowApduService extends HostApduService {
         return h.getBytes(StandardCharsets.ISO_8859_1);
     }
 
-    // ---------- script overrides ----------
+    // ---------- network profiles ----------
 
-    private String scriptRaw() {
-        return p("script", DEFAULT_SCRIPT);
+    private boolean isVisa() {
+        return pan().startsWith("4");
+    }
+
+    private String profileName() {
+        String a = p("aid", "").toUpperCase();
+        if (a.startsWith("A0000000041010")) return "MASTERCARD";
+        if (a.startsWith("A000000003"))     return "VISA";
+        if (a.startsWith("A000000025"))     return "AMEX";
+        if (a.startsWith("A000000152"))     return "DISCOVER";
+        if (a.startsWith("A000000015"))     return "DISCOVER";
+        if (a.startsWith("A000000065"))     return "JCB";
+        if (a.startsWith("A000000333"))     return "UNIONPAY";
+        return "GENERIC";
+    }
+
+    /** A one-applet directory built around whatever AID the card carries. */
+    private byte[] oneAppPpse(String aidHex) {
+        byte[] entry = cat(tlv(0x4F, hex(aidHex)), tlv(0x87, new byte[]{0x01}));
+        byte[] dir = tlv(0xBF0C, tlv(0x61, entry));
+        return tlv(0x6F, cat(tlv(0x84, PPSE), tlv(0xA5, dir)));
+    }
+
+    /** A label-only FCI with no 9F38, so the terminal sends a PDOL-free GPO. */
+    private byte[] labelFci(String aidHex, String label) {
+        byte[] prop = cat(
+                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{0x01}));
+        return tlv(0x6F, cat(tlv(0x84, hex(aidHex)), tlv(0xA5, prop)));
     }
 
     /**
-     * Whether the script is consulted.
+     * The whole transaction, built from the card's own AID and network.
      *
-     * An EMPTY script box means "use DEFAULT_SCRIPT", so the default arms itself
-     * without the box having to carry a copy. A non-empty box is gated by the
-     * card's 'usescript' pref, which MainActivity writes from the armed-line
-     * count - a box full of comments alone is off, not armed.
+     * Mastercard keeps the reference card's directory, FCI and Maestro applet
+     * verbatim - that pair is proven on a till and the second applet stops a
+     * Maestro select from falling through to a generated FCI. Everything else
+     * gets a directory and FCI built around its own AID, which is what a
+     * single-applet card looks like, and the GPO shaped for its network.
      *
-     * FIX: this used to return false on a null pref and nothing else, so an empty
-     * box silently disabled the default and dropped through to the built GPO path.
+     * The record is NOT scripted - READ RECORD falls through to readRecord()
+     * and syntheticRecord(), which is driven by the fields on the card, so the
+     * PAN, expiry, track 2, CDOLs and CVM list can never drift from the script.
+     *
+     * The GPO comes from gpoLine(), so its ATC and ARQC are live rather than
+     * frozen in a constant.
      */
+    private String profileScript() {
+        String aid = p("aid", "").toUpperCase();
+        if (aid.isEmpty()) aid = "A0000000031010";
+
+        StringBuilder sb = new StringBuilder();
+        String selPpse = "00A404000E" + bytesToHex(PPSE);
+
+        if (aid.equals("A0000000041010")) {
+            sb.append(selPpse).append('=').append(REAL_PPSE).append("9000\n");
+            sb.append("00A4040007A0000000041010=").append(REAL_FCI).append("9000\n");
+            sb.append("00A4040007A0000000043060=").append(MAESTRO_FCI).append("9000\n");
+            sb.append(gpoLine(false)).append('\n');
+            return sb.toString();
+        }
+
+        sb.append(selPpse).append('=').append(bytesToHex(oneAppPpse(aid))).append("9000\n");
+        sb.append("00A4040007").append(aid).append('=')
+          .append(bytesToHex(labelFci(aid, labelText()))).append("9000\n");
+        sb.append(gpoLine(isVisa())).append('\n');
+        return sb.toString();
+    }
+
+    // ---------- script overrides ----------
+
+    /**
+     * The script in force. A non-empty box beats the profile, so a hand-tuned
+     * replay still wins; an empty box means the profile runs.
+     */
+    private String scriptRaw() {
+        String box = p("script", "").trim();
+        return box.isEmpty() ? profileScript() : box;
+    }
+
     private boolean useScript() {
         if (p("script", "").trim().isEmpty()) return scriptLines() > 0;
 
@@ -538,7 +547,6 @@ public class ShadowApduService extends HostApduService {
         return best;
     }
 
-    /** A status word always starts 0x90 or in the 0x61-0x6F range. */
     private static boolean looksLikeSw(int cls) {
         return cls == 0x90 || (cls >= 0x61 && cls <= 0x6F);
     }
@@ -562,17 +570,9 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
-    /**
-     * PPSE directory.
-     *
-     * A captured PPSE is served verbatim - it carries the real label and 9F2A,
-     * and 9F2A is what the terminal uses to pick a kernel. The generated
-     * fallback is the BISECT BUILD described at PPSE_MINIMAL.
-     */
     private byte[] buildPpse() {
         byte[] captured = rawPpse();
         if (captured != null && captured.length >= 4) {
-            // Tolerate a capture that kept its trailing 9000.
             if (captured.length >= 2
                     && (captured[captured.length - 2] & 0xFF) == 0x90
                     && (captured[captured.length - 1] & 0xFF) == 0x00) {
@@ -638,15 +638,6 @@ public class ShadowApduService extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
-    /**
-     * Rewrite the proprietary template of a captured FCI.
-     *
-     * 9F2A is no longer injected. The reference FCI is
-     * 6F1A8407A0000000041010A50F500D434849502042617365203031 - label only,
-     * no 9F2A - and the kernel still selected the applet and picked a kernel off
-     * the AID. Injecting it made this FCI five bytes longer than the card it is
-     * pretending to be.
-     */
     private byte[] patchA5(byte[] a5, byte[] aid) {
         TreeMap<Integer, byte[]> tags = new TreeMap<>();
         int i = 0;
@@ -760,25 +751,6 @@ public class ShadowApduService extends HostApduService {
         return hex(t);
     }
 
-    /**
-     * Synthetic SFI 1 record for a card with no capture.
-     *
-     * FIXES, all found by auditing a real M/Chip record:
-     *   - 9F0D was FOUR bytes. A CIAC is one byte per TVR byte, so five.
-     *     The values below are lifted from the real card in the sample logfile,
-     *     byte for byte, as are 9F0E and 9F0F.
-     *   - 9F0E (Denial) and 9F0F (Online) were missing entirely, so the kernel
-     *     had nothing to compare TVR against.
-     *   - 9F42 (currency) added, and it opens the record because the real card
-     *     opens with it.
-     *   - 9F07 is FFC0, matching the real card. FF00 also allowed cash.
-     *
-     * 9F4A (SDA tag list) is deliberately absent - a clone cannot satisfy it.
-     *
-     * NOTE: a captured record always wins over this. The reference card's SFI 1
-     * record 1 is a mag-stripe record (9F6C/9F62/9F63/56/9F6B/9F66), which this
-     * does not build at all.
-     */
     private byte[] syntheticRecord() {
         String panS = pan();
         String expS = expiry6();
@@ -831,10 +803,9 @@ public class ShadowApduService extends HostApduService {
                                         java.util.Locale.US).format(new java.util.Date())
                                 + " ===");
                         int n = scriptLines();
-                        if (n > 0) {
-                            tap("-- script armed: " + n + " line(s), gate="
-                                    + (useScript() ? "ON" : "OFF"));
-                        }
+                        tap("-- profile: " + profileName()
+                                + " | script " + n + " line(s), gate="
+                                + (useScript() ? "ON" : "OFF"));
                         popup(nameLine());
                     }
                 }
@@ -865,6 +836,8 @@ public class ShadowApduService extends HostApduService {
                         txnAip = sa;
                         tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
                     }
+                    byte[] siad = findTag(out, 0x9F10);
+                    if (siad != null) capturedIad = siad;
                     cryptogramSent = true;
                     tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
                 }
@@ -944,30 +917,6 @@ public class ShadowApduService extends HostApduService {
         return cat(tlv(0x6F, inner), SW_OK);
     }
 
-    /**
-     * Serve the GPO. Replays a capture when one exists, otherwise builds one.
-     *
-     * The built path used to return 82 and 94 only. Contactless carries the
-     * cryptogram in the GPO response, so a terminal read the AIP, found no CID,
-     * and dropped the card without sending a single READ RECORD. It now emits
-     * 9F10/9F26/9F27/9F36 like a real card, over the PDOL data it was sent.
-     *
-     * BOTH paths mark cryptogramSent, unless STRIP_AC is on - there is no AC in
-     * the response then, so a later GENERATE AC has to be decided from the
-     * request rather than treated as already answered. Without the flag on the
-     * replay path a terminal that asks for a cryptogram after a replayed TC got a
-     * freshly computed ARQC and went online into a decline - the card would have
-     * contradicted its own CID one APDU later.
-     *
-     * The CDA bit is no longer cleared from either path. The reference card
-     * answers 5980 and serves no 9F4B at all, and the kernel read every record.
-     *
-     * watchForStall() is armed on the built path. A terminal can drop us after
-     * the GPO without ever calling onDeactivated, and then the verdict was never
-     * written at all - the log just stopped and looked like a dead app.
-     *
-     * Not reached at all while a script serves the GPO.
-     */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
         boolean msd = isMsd();
@@ -977,7 +926,6 @@ public class ShadowApduService extends HostApduService {
             int outer = readTag(raw, q);
             int olen  = readLen(raw, q);
 
-            // Tolerate a capture that kept its trailing 9000.
             if (q[0] + olen + 2 == raw.length
                     && (raw[raw.length - 2] & 0xFF) == 0x90
                     && (raw[raw.length - 1] & 0xFF) == 0x00) {
@@ -1021,8 +969,6 @@ public class ShadowApduService extends HostApduService {
         byte[] used = new byte[]{aip[0], aip[1]};
         txnAip = used;
 
-        // PDOL data the terminal just sent - the GPO cryptogram covers this.
-        // Unwrap the 83 template first.
         byte[] pdolData = new byte[0];
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
@@ -1036,8 +982,6 @@ public class ShadowApduService extends HostApduService {
             }
         }
 
-        // FIX: a box value of 80 was used here, which sends an ARQC out of a
-        // GPO that cannot open an online session. Clamp it to TC.
         byte cid = GPO_CID;
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
         if (forced.length() == 2) {
@@ -1061,7 +1005,6 @@ public class ShadowApduService extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         if (msd) {
-            // Format 1 is AIP, then 57, then 94.
             byte[] payload = cat(used, tlv(0x57, track2()), tlv(0x94, a));
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
@@ -1083,17 +1026,6 @@ public class ShadowApduService extends HostApduService {
         return cat(tlv(0x77, body), SW_OK);
     }
 
-    /**
-     * The terminal can take the GPO and drop us without ever deactivating, in
-     * which case onDeactivated() never runs and no verdict is written - the log
-     * just stops and reads like a dead app. This fires 1.5 s after the GPO and
-     * says where it stopped, if nothing followed.
-     *
-     * Main-looper handler because the field it reads is touched from both the
-     * binder thread and this callback; it is a plain int read and only decides
-     * whether to write a log line, so a stale read costs a wrong sentence at
-     * worst.
-     */
     private void watchForStall() {
         try {
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
@@ -1113,7 +1045,6 @@ public class ShadowApduService extends HostApduService {
         } catch (Exception ignored) { }
     }
 
-    /** Kept for the replay path, no longer called. See AIP_CDA. */
     private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1319,11 +1250,6 @@ public class ShadowApduService extends HostApduService {
         return cat(tlv(0x77, body), SW_OK);
     }
 
-    /**
-     * FIX: the key gate here was a raw length check at 32 while haveKey() demands
-     * 32 or 48. A 40-character key passed this and reached DESede as 20 bytes,
-     * threw, and fell into the catch returning zeros. Same gate as haveKey() now.
-     */
     private byte[] computeAc(String atc, byte[] cdol) {
         if (!haveKey()) {
             tap("!! no valid MK-AC set - ARQC will be all zeros");
@@ -1353,10 +1279,6 @@ public class ShadowApduService extends HostApduService {
         }
     }
 
-    /**
-     * FIX: only 9F36, 9F13, 9F17 and 9F4F were served, so a kernel probing 9F4D
-     * got 6A88. 9F4D is now served too.
-     */
     private byte[] getData(byte[] apdu) {
         int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);
 
@@ -1383,8 +1305,6 @@ public class ShadowApduService extends HostApduService {
             return "TAP: MSD mode - terminal read " + nRecs + " record(s) and should have decided";
         }
 
-        // FIX: this blamed "the AC in the GPO" unconditionally, but with STRIP_AC
-        // on there is no AC in the GPO at all.
         if (nRecs == 0) {
             return "TAP: terminal took the GPO response and read NO records - "
                     + (STRIP_AC
@@ -1394,8 +1314,6 @@ public class ShadowApduService extends HostApduService {
                             : "it judged the AIP, AFL and CID " + gpoCid);
         }
 
-        // FIX: this said "it went online with it" unconditionally, so a clean
-        // offline approve with cid 40 read back as a failure.
         if (nGens == 0 && !gpoCid.isEmpty()) {
             return "TAP: terminal read " + nRecs + " record(s) and never asked for a cryptogram"
                     + " | GPO cid " + gpoCid
