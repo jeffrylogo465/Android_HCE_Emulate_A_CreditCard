@@ -94,11 +94,11 @@ public class ShadowApduService extends HostApduService {
      *         records and then ask for a cryptogram with GENERATE AC.
      * false - keep the AC tags and rewrite the CID instead.
      *
-     * Left FALSE on purpose. The tap that proved a real card works on the test
-     * till carried no AC in its GPO either - 771A 8202 5980 9414, AIP and AFL
-     * only - and it still got read. So the AC was never the reason for the stop.
-     * What the working tap had and this clone did not was FIVE AFL entries over
-     * four SFIs. That is what the default script now replays.
+     * Left FALSE on purpose, and the default script now puts the AC tags in the
+     * GPO itself. A bare AIP+AFL GPO - what the reference card sent - was
+     * tolerated by one till and refused by the next: that kernel read the AIP and
+     * AFL and quit without a single READ RECORD. qVSDC without a 9F27 gives a
+     * kernel nothing to decide on.
      *
      * Only reached when no script is armed - a script that serves the GPO bypasses
      * gpo() completely.
@@ -179,9 +179,15 @@ public class ShadowApduService extends HostApduService {
      * longest match wins. The 9000 belongs on the SAME line as the response; a
      * line with no '=' is discarded, so a 9000 on its own line is lost.
      *
-     * This is the reference card's whole tap, byte for byte, minus its AC: a
-     * two-applet directory, a label-only FCI with no 9F38, a GPO carrying AIP
-     * 5800 and a ONE-ENTRY AFL over SFI 1, and a GENERATE AC answering TC.
+     * The directory, both FCIs and the GPO are the reference card's, byte for
+     * byte. The GPO additionally carries 9F26/9F27/9F36 with CID 40 - the card
+     * itself sends a bare AIP+AFL and one kernel accepted that, but the next one
+     * read the AIP and AFL and quit without a single READ RECORD.
+     *
+     * WHY A LINE FOR MAESTRO: the reference directory advertises two applets and
+     * a terminal may select either. Without a 43060 line the second select falls
+     * through to the generated FCI, which carries 9F2A and a 9F38 PDOL - and then
+     * the tap is running a Maestro applet against a Mastercard-shaped GPO.
      *
      * WHY ONE AFL ENTRY AND NOT FIVE: readRecord() synthesizes SFI 1 and nothing
      * else, so the reference's five-entry AFL would draw 6A83 on SFI 2. Pointing
@@ -194,7 +200,8 @@ public class ShadowApduService extends HostApduService {
     private static final String DEFAULT_SCRIPT =
             "00A404000E325041592E5359532E4444463031=6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D61737465726361726487010161154F07A000000004306050074D41455354524F8701029000\n"
           + "00A4040007A0000000041010=6F1A8407A0000000041010A50F500D4348495020426173652030319000\n"
-          + "80A80000=770A820258009404080101009000\n"
+          + "00A4040007A0000000043060=6F1A8407A0000000043060A50F500D4348495020426173652030319000\n"
+          + "80A80000=771E820258009404080101009F260800000000000000009F2701409F3602001C9000\n"
           + "80AE=77299F2701409F36025B009F26086D14503D408943A19F10120110A000092400000102000000000000FF9000\n";
 
     private final StringBuilder tapLog = new StringBuilder();
