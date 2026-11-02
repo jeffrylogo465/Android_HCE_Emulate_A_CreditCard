@@ -350,8 +350,14 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    /** The card's profile pref, or AUTO. */
+    /** Whether the selector has been pinned away from AUTOMATICO. */
+    private boolean profilePinned() {
+        return prefs.getBoolean(key(current, "profilepin"), false);
+    }
+
+    /** AUTOMATICO unless the selector is pinned, in which case the pinned name. */
     private String profilePref() {
+        if (!profilePinned()) return Profiles.AUTO;
         String v = prefs.getString(key(current, "profile"), Profiles.AUTO);
         return v == null || v.isEmpty() ? Profiles.AUTO : v;
     }
@@ -380,11 +386,15 @@ public class MainActivity extends AppCompatActivity {
         new AlertDialog.Builder(this)
                 .setTitle("Script")
                 .setItems(labels, (d, which) -> {
-                    prefs.edit().putString(key(current, "profile"), names[which]).apply();
-                    if (Profiles.AUTO.equals(names[which])) {
-                        appliedProfile = "";
-                        maybeProfile();
+                    boolean auto = Profiles.AUTO.equals(names[which]);
+                    prefs.edit()
+                            .putString(key(current, "profile"), names[which])
+                            .putBoolean(key(current, "profilepin"), !auto)
+                            .apply();
+                    appliedProfile = "";
+                    if (auto) {
                         status("Script AUTOMATICO - the card number picks the network");
+                        maybeProfile();
                     } else {
                         appliedProfile = names[which];
                         applyProfile(digits(t(etPan)), names[which]);
@@ -396,6 +406,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void maybeProfile() {
         if (binding) return;
+        if (profilePinned()) return;
         String pan = digits(t(etPan));
         if (pan.length() < 4) {
             appliedProfile = "";
@@ -424,9 +435,7 @@ public class MainActivity extends AppCompatActivity {
         if (f == null) return;
 
         appliedProfile = net;
-        if (Profiles.AUTO.equalsIgnoreCase(profilePref())) {
-            prefs.edit().putString(key(current, "profile"), net).apply();
-        }
+        // no pref write - profilePref() derives from the PAN while unpinned
 
         binding = true;
         etLabel.setText(f[0]);
@@ -778,7 +787,7 @@ public class MainActivity extends AppCompatActivity {
 
         StringBuilder sb = new StringBuilder();
         sb.append("SCRIPT     : ").append(prof)
-                .append(Profiles.AUTO.equalsIgnoreCase(profilePref()) ? "  (AUTOMATICO)" : "  (PINNED)")
+                .append(profilePinned() ? "  (PINNED)" : "  (AUTOMATICO)")
                 .append('\n');
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - profile default is used)" : aid).append('\n');
