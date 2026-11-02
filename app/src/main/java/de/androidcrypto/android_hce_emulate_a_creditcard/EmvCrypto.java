@@ -21,9 +21,29 @@ public class EmvCrypto {
         return c.doFinal(d);
     }
 
+    /**
+     * Expand a two-key TDES key to three-key: K1|K2|K1.
+     *
+     * SunJCE's DESede only accepts 24 bytes and throws "Wrong key size" on a
+     * 16-byte key. An EMV AC key IS 16 bytes, so without this every des3 call
+     * threw and computeAc fell into its catch and returned zeros - a correct key
+     * looked exactly like a wrong one. DESede with K1|K2|K1 is mathematically
+     * identical to two-key 3DES, so no output changes.
+     */
+    private static byte[] to24(byte[] k) {
+        if (k.length == 24) return k;
+        if (k.length == 16) {
+            byte[] k24 = new byte[24];
+            System.arraycopy(k, 0, k24, 0, 16);
+            System.arraycopy(k, 0, k24, 16, 8);
+            return k24;
+        }
+        throw new IllegalArgumentException("key must be 16 or 24 bytes");
+    }
+
     static byte[] des3(byte[] k16or24, byte[] d) throws Exception {
         Cipher c = Cipher.getInstance("DESede/ECB/NoPadding");
-        c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(k16or24, "DESede"));
+        c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(to24(k16or24), "DESede"));
         return c.doFinal(d);
     }
 
@@ -48,6 +68,9 @@ public class EmvCrypto {
      */
     static String kcv(String keyHex) throws Exception {
         byte[] k = Hex.hex(keyHex);
+        if (k.length != 16 && k.length != 24) {
+            throw new IllegalArgumentException("key must be 16 or 24 bytes");
+        }
         byte[] e = des3(k, new byte[8]);
         return Hex.toHex(Arrays.copyOfRange(e, 0, 3));
     }
@@ -64,6 +87,9 @@ public class EmvCrypto {
     private static byte[] cardKey(String imkHex, String pan, String panSeq, int option)
             throws Exception {
         byte[] imk = Hex.hex(imkHex);
+        if (imk.length != 16 && imk.length != 24) {
+            throw new IllegalArgumentException("IMK must be 16 or 24 bytes");
+        }
 
         byte[] z = (option == 1)
                 ? Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq), Hex.bcd(pan))
@@ -114,7 +140,8 @@ public class EmvCrypto {
      * eight and no ISO 9797 padding is involved.
      *
      * Test vector: MK 0123456789ABCDEFFEDCBA9876543210, ATC 0001, UN 12345678
-     *   -> SK FB99AF71C5A2924D62E87E6643E6F1FD
+     *   -> rl 0001F00012345678, rr 00010F0012345678
+     *   -> sk FB99AF71C5A2924D62E87E6643E6F1FD
      */
     static byte[] sessionKeySkd(String imkHex, String pan, String panSeq,
                                 String atcHex, byte[] un, int option) throws Exception {
