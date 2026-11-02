@@ -7,15 +7,15 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
  *
  * The IAD is a real VIS shape: inner length 06, DKI 01, CVN 12, 4-byte CVR all
  * zero. It used to be the 17-byte M/Chip block with the institution digit
- * swapped, which was wrong on both the shape and the length.
+ * swapped, which was wrong on both shape and length.
  *
- * The GPO carries a CTQ, which qVSDC needs and Kernel 2 doesn't have.
+ * qVSDC folds the decision into the GPO, so this profile does carry the AC and
+ * the CTQ - unlike Mastercard.
  *
  * WHAT THIS CANNOT DO: a qVSDC kernel treats a TC from a card with no DDA bit
- * as a failed offline authentication - it has no TVR/TAC path to fall back on.
- * With a zero ARQC the CTQ's b6 goes online and the issuer declines. So a Visa
- * TC here can never approve until a real MK-AC exists; the profile is for
- * completeness and for reading logs, not for a receipt.
+ * as a failed offline authentication, and has no TVR/TAC path to fall back on.
+ * With a zero ARQC the CTQ's b6 goes online and the issuer declines. A Visa TC
+ * here can never approve until a real MK-AC exists.
  */
 public final class ProfileVisa implements CardProfile {
 
