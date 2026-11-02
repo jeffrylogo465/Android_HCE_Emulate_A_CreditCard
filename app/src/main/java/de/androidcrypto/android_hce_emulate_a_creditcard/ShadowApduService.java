@@ -641,6 +641,29 @@ public class ShadowApduService extends HostApduService {
         return hex(t);
     }
 
+    /**
+     * The synthetic SFI 1 record.
+     *
+     * THE CIACs ARE ALL ZERO, and that is deliberate.
+     *
+     * They used to be B450840000 / 0000000000 / B470848000, lifted off the
+     * sample card. But that sample is a CDA card, and byte 1 of both non-zero
+     * masks has bit 8 set - "offline data authentication was not performed".
+     * A clone advertises no ODA in its AIP, so the kernel sets that exact TVR
+     * bit, CIAC-Denial said deny, and CIAC-Online said go online - where the
+     * zero ARQC loses. The card was volunteering both a reason to be declined
+     * and a reason to be pushed online.
+     *
+     * Zeros mean the card contributes no trigger at all. The terminal ORs its
+     * own TAC on top regardless, so a card-side IAC can only ever ADD triggers,
+     * never remove them - which makes the most permissive value the right one
+     * here. If the till's TAC covers that bit you go online anyway, and no
+     * CIAC value can outvote it.
+     *
+     * 9F4A (SDA tag list) is still deliberately absent - a clone cannot satisfy
+     * it. 9F07 is FFC0, matching the real card; FF00 would also have blocked
+     * international use.
+     */
     private byte[] syntheticRecord() {
         String panS = pan();
         String expS = expiry6();
@@ -660,9 +683,9 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x8C, hex(CDOL1)),
                 tlv(0x8D, hex(CDOL2)),
                 tlv(0x8E, hex(CVMLIST)),
-                tlv(0x9F0D, hex("B450840000")),
+                tlv(0x9F0D, hex("0000000000")),
                 tlv(0x9F0E, hex("0000000000")),
-                tlv(0x9F0F, hex("B470848000")),
+                tlv(0x9F0F, hex("0000000000")),
                 tlv(0x5F28, hex("0840")),
                 tlv(0x57, track2())));
     }
