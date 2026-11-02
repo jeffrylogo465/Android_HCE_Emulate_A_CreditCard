@@ -45,6 +45,11 @@ public class ShadowApduService extends HostApduService {
      *
      * 5800 is the working value for the test terminal: EMV mode, CVM supported,
      * terminal risk management. No ODA bits - a clone cannot honour them.
+     *
+     * 5880 keeps qVSDC and adds mag-stripe back. The script app's card carried
+     * 5980 - qVSDC, CVM, TRM and CDA - and got a receipt, so a till that is
+     * happy with 5980 may also want the 0x80 bit present. Try 5880 if 5800
+     * stalls at the GPO.
      */
     private static final String DEFAULT_AIP = "5800";
 
@@ -84,16 +89,20 @@ public class ShadowApduService extends HostApduService {
      *
      * true  - strip 9F26/9F27/9F36/9F10/9F71, so the terminal MUST read the
      *         records and then ask for a cryptogram with GENERATE AC.
-     * false - keep the card's own AC tags and rewrite the CID to TC instead.
+     * false - keep the AC tags and rewrite the CID instead.
      *
-     * Was false, and only the capture replay path ever honoured it, so the built
-     * path could never stop sending an AC. A TC inside the GPO says "approved,
-     * done" and a kernel takes that literally: it finishes on the spot without a
-     * single READ RECORD, holding an AIP and an AFL but no PAN to print a
-     * receipt from. Verified against a real tap - GPO accepted, 7728 well formed,
-     * zero READ RECORD, no receipt.
+     * Left FALSE on purpose. The tap that proved a real card works on the test
+     * till carried no AC in its GPO either - 771A 8202 5980 9414, AIP and AFL
+     * only - and it still got read. So the AC was never the reason for the stop.
+     * What the working tap had and this clone did not was FIVE AFL entries over
+     * four SFIs, and an AIP with the mag-stripe bit set. Those are the live
+     * differences now.
+     *
+     * The strip machinery still works and the constant still gates it, both in
+     * the replay branch and in the built path - flip it back if a till ever
+     * complains about an AC it did not ask for.
      */
-    private static final boolean STRIP_AC = true;
+    private static final boolean STRIP_AC = false;
 
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
@@ -905,9 +914,9 @@ public class ShadowApduService extends HostApduService {
      * freshly computed ARQC and went online into a decline - the card would have
      * contradicted its own CID one APDU later.
      *
-     * STRIP_AC is ON, so by default the AC tags come back out. A TC sitting in
-     * the GPO tells a kernel the transaction is finished, and it finishes it -
-     * no READ RECORD, no PAN, no receipt.
+     * watchForStall() is armed on the built path. A terminal can drop us after
+     * the GPO without ever calling onDeactivated, and then the verdict was never
+     * written at all - the log just stopped and looked like a dead app.
      */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
@@ -1000,7 +1009,8 @@ public class ShadowApduService extends HostApduService {
 
         byte[] a = afl();
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
-                + " cid=" + gpoCid + " atc=" + atc + " arqc=" + bytesToHex(ac));
+                + " cid=" + gpoCid + (STRIP_AC ? " (not sent)" : "")
+                + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         if (msd) {
             // Format 1 is AIP, then 57, then 94.
@@ -1021,7 +1031,38 @@ public class ShadowApduService extends HostApduService {
                     tlv(0x9F36, hex(atc)));
         }
 
+        watchForStall();
         return cat(tlv(0x77, body), SW_OK);
+    }
+
+    /**
+     * The terminal can take the GPO and drop us without ever deactivating, in
+     * which case onDeactivated() never runs and no verdict is written - the log
+     * just stops and reads like a dead app. This fires 1.5 s after the GPO and
+     * says where it stopped, if nothing followed.
+     *
+     * Main-looper handler because the field it reads is touched from both the
+     * binder thread and this callback; it is a plain int read and only decides
+     * whether to write a log line, so a stale read costs a wrong sentence at
+     * worst.
+     */
+    private void watchForStall() {
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            if (nGpos > 0 && nRecs == 0 && nGens == 0) {
+                                tap("!! verdict: TAP: terminal took the GPO and read NO"
+                                        + " records - "
+                                        + (STRIP_AC
+                                            ? "no AC in the GPO, so it judged the AIP and AFL"
+                                            : "it judged the AIP, AFL and CID")
+                                        + " and quit");
+                            }
+                        }
+                    }, 1500L);
+        } catch (Exception ignored) { }
     }
 
     private static void weakenAip(byte[] tpl) {
@@ -1293,11 +1334,15 @@ public class ShadowApduService extends HostApduService {
             return "TAP: MSD mode - terminal read " + nRecs + " record(s) and should have decided";
         }
 
+        // FIX: this blamed "the AC in the GPO" unconditionally, but with STRIP_AC
+        // on there is no AC in the GPO at all.
         if (nRecs == 0) {
             return "TAP: terminal took the GPO response and read NO records - "
-                    + (gpoCid.isEmpty()
-                        ? "check the logged AFL"
-                        : "the AC in the GPO (cid " + gpoCid + ") did not satisfy it");
+                    + (STRIP_AC
+                        ? "no AC in the GPO, so it judged the AIP and AFL"
+                        : gpoCid.isEmpty()
+                            ? "check the logged AFL"
+                            : "it judged the AIP, AFL and CID " + gpoCid);
         }
 
         // FIX: this said "it went online with it" unconditionally, so a clean
