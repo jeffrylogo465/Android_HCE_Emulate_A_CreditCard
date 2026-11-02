@@ -1028,54 +1028,91 @@ public class MainActivity extends AppCompatActivity {
 
     private void scanForKey() { scanForKey(true); }
 
+    /**
+     * Search the candidate list for the issuer key.
+     *
+     * Two sources of reference: a real capture from READ CARD, or - for a card
+     * that was never read, i.e. a dump - the ARQC, CDOL data, AIP and ATC typed
+     * into the boxes. The typed route uses the REFERENCE card's AIP, not ours:
+     * the reference ARQC was MACed over that AIP, so 1880 can never match.
+     */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
         String pan = digits(t(etPan));
 
-        String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
-        if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
+        String typedArqc = t(etArqc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        String typedCdol = t(etCdol1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        String typedAip  = t(etPdol).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        String typedAtc  = t(etAtc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        boolean typedRef = cmdHex.isEmpty() && rspHex.isEmpty()
+                && typedArqc.length() == 16 && typedCdol.length() >= 16
+                && typedAip.length() == 4 && typedAtc.length() == 4;
 
-        if (cmdHex.isEmpty() || rspHex.isEmpty()) {
+        String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
+        if (typedRef) aipHex = typedAip;
+        else if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
+
+        if (!typedRef && (cmdHex.isEmpty() || rspHex.isEmpty())) {
             if (announce) {
-                Toast.makeText(this, "No reference - read the physical card with READ CARD first",
+                Toast.makeText(this, "No reference - fill the ARQC, CDOL1, PDOL and ATC boxes",
                         Toast.LENGTH_LONG).show();
             }
             return;
         }
         if (pan.isEmpty() || aipHex.length() < 4) {
             if (announce) {
-                Toast.makeText(this, "Need PAN and AIP set on the card", Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
-
-        byte[] cmd = hexToBytes(cmdHex);
-        byte[] rsp = hexToBytes(rspHex);
-        if (cmd.length < 6) return;
-        int lc = cmd[4] & 0xFF;
-        int off = 5;
-        if (lc == 0x00) {
-            if (cmd.length < 7) return;
-            lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
-            off = 7;
-        }
-        if (off + lc > cmd.length) return;
-
-        final byte[] cdol = Arrays.copyOfRange(cmd, off, off + lc);
-        final byte[] arqcRef = tagOf(rsp, 0x9F26);
-        final byte[] atcRef = tagOf(rsp, 0x9F36);
-        if (arqcRef == null || atcRef == null) {
-            if (announce) {
-                Toast.makeText(this, "Reference ARQC/ATC missing from the capture",
+                Toast.makeText(this, "Need PAN and reference AIP set on the card",
                         Toast.LENGTH_LONG).show();
             }
             return;
         }
+
+        final byte[] cdol;
+        final byte[] arqcRef;
+        final String atc;
+
+        if (typedRef) {
+            cdol = hexToBytes(typedCdol);
+            arqcRef = hexToBytes(typedArqc);
+            atc = typedAtc;
+        } else {
+            byte[] cmd = hexToBytes(cmdHex);
+            byte[] rsp = hexToBytes(rspHex);
+            if (cmd.length < 6) return;
+            int lc = cmd[4] & 0xFF;
+            int off = 5;
+            if (lc == 0x00) {
+                if (cmd.length < 7) return;
+                lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
+                off = 7;
+            }
+            if (off + lc > cmd.length) return;
+
+            cdol = Arrays.copyOfRange(cmd, off, off + lc);
+            arqcRef = tagOf(rsp, 0x9F26);
+            byte[] atcRef = tagOf(rsp, 0x9F36);
+            if (arqcRef == null || atcRef == null) {
+                if (announce) {
+                    Toast.makeText(this, "Reference ARQC/ATC missing from the capture",
+                            Toast.LENGTH_LONG).show();
+                }
+                return;
+            }
+            atc = bytesToHex(atcRef);
+        }
+
         final byte[] aip = hexToBytes(aipHex);
-        final String atc = bytesToHex(atcRef);
         final String psn = prefs.getString(key(current, "psn"), "01");
         final List<String> keys = candidateKeys();
+
+        if (keys.isEmpty()) {
+            status("No candidate keys - use 'Edit candidate list' first");
+            if (announce) {
+                Toast.makeText(this, "No candidate keys", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
 
         status("Scanning " + keys.size() + " keys x 4 variants...");
 
@@ -1545,6 +1582,11 @@ public class MainActivity extends AppCompatActivity {
 
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
         showPage(1);
+
+        if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
+                && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
+            scanForKey(false);
+        }
     }
 
     private int msdFromCapture(int index) {
