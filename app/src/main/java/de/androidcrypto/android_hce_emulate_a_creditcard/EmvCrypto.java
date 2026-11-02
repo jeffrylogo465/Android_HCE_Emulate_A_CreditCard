@@ -37,6 +37,22 @@ public class EmvCrypto {
     }
 
     /**
+     * 3DES KCV: the leftmost 3 bytes of E_K(00 x 8), as six hex characters.
+     *
+     * Test vector: 0123456789ABCDEFFEDCBA9876543210 -> 08D7B4
+     *
+     * Some older material quotes four hex characters instead, so compare the
+     * first four of ours against those. CMAC-over-zeros gives a different value
+     * for the same key - if a seller's KCV does not match, ask which method was
+     * used before deciding the key is wrong.
+     */
+    static String kcv(String keyHex) throws Exception {
+        byte[] k = Hex.hex(keyHex);
+        byte[] e = des3(k, new byte[8]);
+        return Hex.toHex(Arrays.copyOfRange(e, 0, 3));
+    }
+
+    /**
      * Stage 1: IMK-AC -> MK-AC, EMV Book 2 A1.4 Option A.
      *
      * D_L is the rightmost 16 digits of PAN||PSN as packed BCD, D_R is its
@@ -96,6 +112,9 @@ public class EmvCrypto {
      * unpredictable number replaces the zero padding of CSK. The UN is the
      * terminal's 9F37 from the CDOL data, four bytes, so each block is exactly
      * eight and no ISO 9797 padding is involved.
+     *
+     * Test vector: MK 0123456789ABCDEFFEDCBA9876543210, ATC 0001, UN 12345678
+     *   -> SK FB99AF71C5A2924D62E87E6643E6F1FD
      */
     static byte[] sessionKeySkd(String imkHex, String pan, String panSeq,
                                 String atcHex, byte[] un, int option) throws Exception {
