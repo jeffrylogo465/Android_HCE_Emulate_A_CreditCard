@@ -58,7 +58,28 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    private static final String CVMLIST = "00000000000000001F03";
+    /**
+     * CVM list. Eight bytes of zero Amount X and Amount Y, then two rules:
+     *
+     *   1F 03  "no CVM required, if the terminal supports it"  - applies below
+     *          the CVM-required limit and stops there. No PIN pad, no signature.
+     *   1E 03  "signature, if the terminal supports it"        - the fallback for
+     *          a basket over that limit, where the terminal clears its no-CVM
+     *          capability and rule 1's condition fails.
+     *
+     * WHY THE FALLBACK: with one rule the list runs out above the limit, 9F34
+     * becomes 3F 00 01 and TVR "cardholder verification was not successful" is
+     * set - a TVR bit that hands the terminal's TAC a reason to force the
+     * transaction online. Signature cannot fail, so the fallback records
+     * 1E 03 00 and sets no TVR bit.
+     *
+     * WHY NOT ONLINE PIN (42 03): it would put a PIN pad in front of every tap,
+     * and the host would then want a PIN we do not know.
+     *
+     * Ten bytes. The two four-byte amount fields are mandatory - a rule-only
+     * list is malformed and the kernel rejects it.
+     */
+    private static final String CVMLIST = "00000000000000001F031E03";
 
     /**
      * 9F34 CVM Results. NOT sent in the GENERATE AC response - the terminal
