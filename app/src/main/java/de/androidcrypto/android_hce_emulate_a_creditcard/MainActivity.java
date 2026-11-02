@@ -63,6 +63,10 @@ public class MainActivity extends AppCompatActivity {
      * Only the fields are here. The bytes the terminal actually sees live in
      * ProfileMastercard and ProfileVisa, one file each.
      *
+     * THE IADs ARE THE CARDS' OWN. The IAD goes into the MAC input, so a
+     * placeholder here makes a correct key produce a wrong ARQC. Byte 2 is the
+     * CVN in both - 10 for the Mastercard, 12 for the Visa VIS shape.
+     *
      * THE AIPs DIFFER and must: Mastercard numbers byte 1 by classic EMV, where
      * 0x40 is SDA and byte 2 b8 is "EMV mode supported" - 1880 turns EMV mode
      * on and leaves SDA off, because a clone cannot sign. Visa numbers byte 1
@@ -70,10 +74,10 @@ public class MainActivity extends AppCompatActivity {
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
-            "06010A03A00000", "001C" };
+            "0110A000092400000102000000000000FF", "001C" };
     private static final String[] PROFILE_VISA = {
             "VISA", "A0000000031010", "5800",
-            "06010A03A00000", "001C" };
+            "06011200000000", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -1017,7 +1021,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         try {
-            status("KCV " + EmvCrypto.kcv(hexToBytes(k)) + "  (compare with the seller's)");
+            status("KCV " + EmvCrypto.kcv(k) + "  (compare with the seller's)");
         } catch (Exception e) {
             status("KCV failed - " + e);
         }
@@ -1198,12 +1202,9 @@ public class MainActivity extends AppCompatActivity {
                                 ? new byte[4]
                                 : Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
 
-                        byte[] mk = hexToBytes(k);
-                        byte[] sk = csk
-                                ? EmvCrypto.sessionKeyCsk(EmvCrypto.cardKey(mk, pan, psn),
-                                        hexToBytes(atc))
-                                : EmvCrypto.sessionKeySkd(mk, hexToBytes(atc), un);
-                        byte[] ac = EmvCrypto.arqc(sk, macIn);
+                        byte[] ac = csk
+                                ? EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1)
+                                : EmvCrypto.arqcSkd(k, pan, psn, atc, un, macIn, variant & 1);
 
                         if (Arrays.equals(ac, arqcRef)) {
                             final String fk = k;
