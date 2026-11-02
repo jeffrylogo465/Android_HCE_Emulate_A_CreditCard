@@ -15,6 +15,11 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
  * before, which made the FCI one byte longer in its headers than in its content
  * and would desync a length-parsing kernel. The PPSE had the same fault one
  * level up. Both are now self-consistent.
+ *
+ * The GPO comes from Profiles.gpoMastercard, which builds AIP and AFL and
+ * nothing else - Kernel 2 does not carry the cryptogram in the GPO. The IAD
+ * below is therefore documentation of what the card declares, not an input to
+ * the builder; the service reads the IAD from the card record.
  */
 public final class ProfileMastercard implements CardProfile {
 
@@ -56,6 +61,6 @@ public final class ProfileMastercard implements CardProfile {
     }
 
     @Override public String gpo(String atc, String arqc) {
-        return Profiles.gpo(IAD, atc, arqc);
+        return Profiles.gpoMastercard(atc, arqc);
     }
 }
