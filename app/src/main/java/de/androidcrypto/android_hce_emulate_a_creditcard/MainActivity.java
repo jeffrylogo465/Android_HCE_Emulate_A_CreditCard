@@ -90,10 +90,6 @@ public class MainActivity extends AppCompatActivity {
     /** One-shot flag for the payment-role prompt. */
     private static final String ASKED_DEFAULT = "asked_default";
 
-    private static final String HINT =
-            "Paste a dump anywhere - it fills itself in.\n"
-          + "Long-press AID to pick a brand, the card count to see the capture.";
-
     private static final String[][] VARIANTS = {
             {"0", "CDOL, AIP, ATC  -  option 0"},
             {"1", "CDOL, AIP, ATC  -  option 1"},
@@ -306,7 +302,7 @@ public class MainActivity extends AppCompatActivity {
     private void showLastVerdict() {
         String v = prefs.getString("lastverdict", "");
         if (v.isEmpty()) {
-            status(HINT);
+            status("");
             return;
         }
 
