@@ -111,14 +111,31 @@ public final class Profiles {
      * The GPO line.
      *
      * AIP 5800, one AFL entry over SFI 1 rec 1, the ARQC, CID 40, the live ATC,
-     * and the network's IAD. The 77 length is computed from the body, so it can
-     * never disagree with the bytes it covers.
+     * the network's IAD, and a CTQ. Both lengths are computed from the body, so
+     * neither can ever disagree with the bytes it covers.
      *
      * CID 40 means approve offline, so the ARQC is never checked - which is why
      * eight zero bytes are fine when no issuer key is set.
      *
-     * 50 bytes of body, 0x32: 82/5800, 94/08010100, 9F26/8, 9F27/40,
-     * 9F36/<atc>, 9F10/17.
+     * WHY THE 9F10 LENGTH IS COMPUTED: it used to be the literal 0x11, which
+     * pinned every profile to a 17-byte IAD. Mastercard's IAD is 17 bytes and
+     * Visa's VIS IAD is 7, so the literal was wrong for one of them, and a
+     * wrong TLV length desynchronises the kernel's parser and kills the
+     * transaction outright.
+     *
+     * WHY 9F6C IS HERE AT ALL: with no CTQ the kernel treats every fallback bit
+     * as zero, and zero means "no permission to go online, no permission to
+     * switch interface" - so a failed authentication is a silent offline
+     * decline. 0x30 is b6 + b5: go online if ODA fails, switch interface if ODA
+     * fails. The 0x80 in byte 2 is Consumer Device CVM performed, which is
+     * correct for a phone and satisfies a CVM demand without PIN or signature.
+     *
+     * Neither fallback reaches an approval while the ARQC is zeros - b6 leads
+     * to an online decline and b5 to "insert card". They only convert a hard
+     * local decline into a classified one.
+     *
+     * 55 bytes of body, 0x37: 82/5800, 94/08010100, 9F26/8, 9F27/40,
+     * 9F36/<atc>, 9F10/<len>, 9F6C/3080.
      */
     static String gpo(String iad, String atc, String arqc) {
         String body = "82025800"
@@ -126,7 +143,8 @@ public final class Profiles {
                 + "9F2608" + arqc
                 + "9F270140"
                 + "9F3602" + atc
-                + "9F1011" + iad;
+                + "9F10" + String.format("%02X", iad.length() / 2) + iad
+                + "9F6C023080";
         return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
     }
 
