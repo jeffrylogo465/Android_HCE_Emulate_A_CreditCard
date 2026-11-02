@@ -1,195 +1,238 @@
-package de.androidcrypto.android_hce_emulate_a_creditcard;
+package com.jeffrylogo.android_hce_emulate_a_creditcard;
 
-import java.util.Arrays;
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
-public class EmvCrypto {
-
-    /** Kept so any existing caller of EmvCrypto.hex() still compiles. */
-    static byte[] hex(String s) { return Hex.hex(s); }
-
-    static byte[] des(byte[] k8, byte[] d) throws Exception {
-        Cipher c = Cipher.getInstance("DES/ECB/NoPadding");
-        c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(k8, "DES"));
-        return c.doFinal(d);
-    }
-
-    static byte[] desDec(byte[] k8, byte[] d) throws Exception {
-        Cipher c = Cipher.getInstance("DES/ECB/NoPadding");
-        c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(k8, "DES"));
-        return c.doFinal(d);
-    }
-
-    /**
-     * Expand a two-key TDES key to three-key: K1|K2|K1.
-     *
-     * SunJCE's DESede only accepts 24 bytes and throws "Wrong key size" on a
-     * 16-byte key. An EMV AC key IS 16 bytes, so without this every des3 call
-     * threw and computeAc fell into its catch and returned zeros - a correct key
-     * looked exactly like a wrong one. DESede with K1|K2|K1 is mathematically
-     * identical to two-key 3DES, so no output changes.
-     */
-    private static byte[] to24(byte[] k) {
-        if (k.length == 24) return k;
-        if (k.length == 16) {
-            byte[] k24 = new byte[24];
-            System.arraycopy(k, 0, k24, 0, 16);
-            System.arraycopy(k, 0, k24, 16, 8);
-            return k24;
-        }
-        throw new IllegalArgumentException("key must be 16 or 24 bytes");
-    }
-
-    static byte[] des3(byte[] k16or24, byte[] d) throws Exception {
-        Cipher c = Cipher.getInstance("DESede/ECB/NoPadding");
-        c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(to24(k16or24), "DESede"));
-        return c.doFinal(d);
-    }
-
-    /** Odd parity on every byte, as EMV requires of DES key material. */
-    private static void oddParity(byte[] k) {
-        for (int i = 0; i < k.length; i++) {
-            int b = k[i] & 0xFF;
-            int ones = Integer.bitCount(b & 0xFE);
-            k[i] = (byte) ((b & 0xFE) | ((ones & 1) == 0 ? 1 : 0));
-        }
-    }
-
-    /**
-     * 3DES KCV: the leftmost 3 bytes of E_K(00 x 8), as six hex characters.
-     *
-     * Test vector: 0123456789ABCDEFFEDCBA9876543210 -> 08D7B4
-     *
-     * Some older material quotes four hex characters instead, so compare the
-     * first four of ours against those. CMAC-over-zeros gives a different value
-     * for the same key - if a seller's KCV does not match, ask which method was
-     * used before deciding the key is wrong.
-     */
-    static String kcv(String keyHex) throws Exception {
-        byte[] k = Hex.hex(keyHex);
-        if (k.length != 16 && k.length != 24) {
-            throw new IllegalArgumentException("key must be 16 or 24 bytes");
-        }
-        byte[] e = des3(k, new byte[8]);
-        return Hex.toHex(Arrays.copyOfRange(e, 0, 3));
-    }
-
-    /**
-     * Stage 1: IMK-AC -> MK-AC, EMV Book 2 A1.4 Option A.
-     *
-     * D_L is the rightmost 16 digits of PAN||PSN as packed BCD, D_R is its
-     * bitwise inverse, and MK-AC is the two DES3 results concatenated.
-     *
-     * option 0 = derivation data PAN || PSN
-     * option 1 = derivation data PAN || PSN || PAN
-     */
-    private static byte[] cardKey(String imkHex, String pan, String panSeq, int option)
-            throws Exception {
-        byte[] imk = Hex.hex(imkHex);
-        if (imk.length != 16 && imk.length != 24) {
-            throw new IllegalArgumentException("IMK must be 16 or 24 bytes");
-        }
-
-        byte[] z = (option == 1)
-                ? Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq), Hex.bcd(pan))
-                : Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq));
-
-        byte[] dl = new byte[8];
-        int n = Math.min(8, z.length);
-        System.arraycopy(z, z.length - n, dl, 8 - n, n);
-
-        byte[] dr = new byte[8];
-        for (int i = 0; i < 8; i++) dr[i] = (byte) ~dl[i];
-
-        byte[] mk = Tlv.cat(des3(imk, dl), des3(imk, dr));
-        oddParity(mk);
-        return mk;
-    }
-
-    /**
-     * Stage 2, EMV CSK (Book 2 A1.3.1). Used by CVN 20 and 21.
-     *
-     * Blocks are ATC || F0 || five zeros and ATC || 0F || five zeros.
-     */
-    static byte[] sessionKeyCsk(String imkHex, String pan, String panSeq,
-                                String atcHex, int option) throws Exception {
-        byte[] mk = cardKey(imkHex, pan, panSeq, option);
-
-        byte[] atc = Hex.hex(atcHex);
-        byte[] bl = new byte[8];
-        byte[] br = new byte[8];
-        bl[0] = atc[0];
-        bl[1] = atc[1];
-        bl[2] = (byte) 0xF0;
-        br[0] = atc[0];
-        br[1] = atc[1];
-        br[2] = (byte) 0x0F;
-
-        byte[] sk = Tlv.cat(des3(mk, bl), des3(mk, br));
-        oddParity(sk);
-        return sk;
-    }
-
-    /**
-     * Stage 2, Mastercard Proprietary SKD. Used by CVN 16 and 17.
-     *
-     * Blocks are ATC || F0 || 00 || UN and ATC || 0F || 00 || UN - the
-     * unpredictable number replaces the zero padding of CSK. The UN is the
-     * terminal's 9F37 from the CDOL data, four bytes, so each block is exactly
-     * eight and no ISO 9797 padding is involved.
-     *
-     * Test vector: MK 0123456789ABCDEFFEDCBA9876543210, ATC 0001, UN 12345678
-     *   -> rl 0001F00012345678, rr 00010F0012345678
-     *   -> sk FB99AF71C5A2924D62E87E6643E6F1FD
-     */
-    static byte[] sessionKeySkd(String imkHex, String pan, String panSeq,
-                                String atcHex, byte[] un, int option) throws Exception {
-        if (un == null || un.length != 4) throw new IllegalArgumentException("UN must be 4 bytes");
-        byte[] mk = cardKey(imkHex, pan, panSeq, option);
-
-        byte[] atc = Hex.hex(atcHex);
-        byte[] rl = new byte[8];
-        byte[] rr = new byte[8];
-        rl[0] = atc[0];
-        rl[1] = atc[1];
-        rl[2] = (byte) 0xF0;
-        rr[0] = atc[0];
-        rr[1] = atc[1];
-        rr[2] = (byte) 0x0F;
-        System.arraycopy(un, 0, rl, 4, 4);
-        System.arraycopy(un, 0, rr, 4, 4);
-
-        byte[] sk = Tlv.cat(des3(mk, rl), des3(mk, rr));
-        oddParity(sk);
-        return sk;
-    }
-
-    /** ISO 9797-1 MAC Algorithm 3, padding method 2. This was already correct. */
-    static byte[] mac(byte[] k16, byte[] data) throws Exception {
-        int pad = 8 - (data.length % 8);
-        byte[] p = Arrays.copyOf(data, data.length + pad);
-        p[data.length] = (byte) 0x80;
-        byte[] k1 = Arrays.copyOfRange(k16, 0, 8);
-        byte[] k2 = Arrays.copyOfRange(k16, 8, 16);
-        byte[] x = new byte[8];
-        for (int i = 0; i < p.length; i += 8) {
-            for (int j = 0; j < 8; j++) x[j] ^= p[i + j];
-            x = des(k1, x);
-        }
-        x = desDec(k2, x);
-        return des(k1, x);
-    }
-
-    static byte[] arqc(String imkHex, String pan, String panSeq, String atcHex,
-                       byte[] macInput, int option) throws Exception {
-        return mac(sessionKeyCsk(imkHex, pan, panSeq, atcHex, option), macInput);
-    }
-
-    static byte[] arqcSkd(String imkHex, String pan, String panSeq, String atcHex,
-                          byte[] un, byte[] macInput, int option) throws Exception {
-        return mac(sessionKeySkd(imkHex, pan, panSeq, atcHex, un, option), macInput);
-    }
+/**
+ * Card-side cryptogram primitives.
+ *
+ * Two session-key schemes live here:
+ *   CSK  - EMV Common Session Key, CVN 20/21. ATC only.
+ *   SKD  - Mastercard Proprietary Session Key Derivation, CVN 16. ATC plus UN.
+ *
+ * Dispatch happens on CVN, which the caller reads out of IAD byte 2.
+ * CVN 16 is the scheme the reference card actually declares.
+ */
+public final class EmvCrypto {
 
     private EmvCrypto() {}
+
+    /* ---------------- byte helpers ---------------- */
+
+    public static byte[] hex(String s) {
+        if (s == null) return new byte[0];
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) {
+                sb.append(c);
+            }
+        }
+        if ((sb.length() & 1) == 1) sb.append('F');
+        byte[] out = new byte[sb.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(sb.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
+    }
+
+    public static String toHex(byte[] b) {
+        if (b == null) return "";
+        final char[] d = "0123456789ABCDEF".toCharArray();
+        char[] out = new char[b.length * 2];
+        for (int i = 0; i < b.length; i++) {
+            out[i * 2] = d[(b[i] >> 4) & 0x0F];
+            out[i * 2 + 1] = d[b[i] & 0x0F];
+        }
+        return new String(out);
+    }
+
+    public static byte[] concat(byte[]... parts) {
+        int n = 0;
+        for (byte[] p : parts) if (p != null) n += p.length;
+        byte[] out = new byte[n];
+        int o = 0;
+        for (byte[] p : parts) {
+            if (p == null) continue;
+            System.arraycopy(p, 0, out, o, p.length);
+            o += p.length;
+        }
+        return out;
+    }
+
+    public static byte[] xor(byte[] a, byte[] b) {
+        int n = Math.min(a.length, b.length);
+        byte[] out = new byte[n];
+        for (int i = 0; i < n; i++) out[i] = (byte) (a[i] ^ b[i]);
+        return out;
+    }
+
+    /* ---------------- primitives ---------------- */
+
+    static byte[] des(byte[] key8, byte[] data, boolean encrypt) throws Exception {
+        if (key8 == null || key8.length != 8) {
+            throw new IllegalArgumentException("DES key must be 8 bytes, got "
+                    + (key8 == null ? -1 : key8.length));
+        }
+        SecretKeySpec k = new SecretKeySpec(key8, "DES");
+        Cipher c = Cipher.getInstance("DES/ECB/NoPadding");
+        c.init(encrypt ? Cipher.ENCRYPT_MODE : Cipher.DECRYPT_MODE, k);
+        return c.doFinal(data);
+    }
+
+    static byte[] desDec(byte[] key8, byte[] data) throws Exception {
+        return des(key8, data, false);
+    }
+
+    /**
+     * SunJCE's DESede rejects 16-byte keys outright with InvalidKeyException
+     * "Wrong key size". Expand K1|K2 to K1|K2|K1, which is byte-identical to
+     * two-key 3DES, so output is unchanged and the exception stops.
+     */
+    static byte[] to24(byte[] key) {
+        if (key == null) return null;
+        if (key.length == 24) return key;
+        if (key.length == 16) {
+            byte[] out = new byte[24];
+            System.arraycopy(key, 0, out, 0, 16);
+            System.arraycopy(key, 0, out, 16, 8);
+            return out;
+        }
+        return key;
+    }
+
+    static byte[] des3(byte[] key, byte[] data, boolean encrypt) throws Exception {
+        byte[] k24 = to24(key);
+        if (k24 == null || k24.length != 24) {
+            throw new IllegalArgumentException("3DES key must be 16 or 24 bytes, got "
+                    + (key == null ? -1 : key.length));
+        }
+        SecretKeySpec k = new SecretKeySpec(k24, "DESede");
+        Cipher c = Cipher.getInstance("DESede/ECB/NoPadding");
+        c.init(encrypt ? Cipher.ENCRYPT_MODE : Cipher.DECRYPT_MODE, k);
+        return c.doFinal(data);
+    }
+
+    public static void oddParity(byte[] b) {
+        for (int i = 0; i < b.length; i++) {
+            int v = b[i] & 0xFE;
+            int ones = Integer.bitCount(v);
+            if ((ones & 1) == 0) v |= 1;
+            b[i] = (byte) v;
+        }
+    }
+
+    /* ---------------- key derivation ---------------- */
+
+    /** KCV = leftmost 3 bytes of E_K(00 x 8). */
+    public static String kcv(byte[] key) throws Exception {
+        if (key == null || (key.length != 16 && key.length != 24)) {
+            throw new IllegalArgumentException("KCV needs a 16 or 24 byte key, got "
+                    + (key == null ? -1 : key.length));
+        }
+        byte[] enc = des3(key, new byte[8], true);
+        return toHex(new byte[]{enc[0], enc[1], enc[2]});
+    }
+
+    /**
+     * EMV CSK Option A ICC master key from an issuer master key.
+     * A = (PAN || PSN), right padded with 00 to 16 bytes, left truncated to 16.
+     * A gets odd parity. K1 = 3DES(A), K2 = 3DES(A XOR FF).
+     */
+    public static byte[] cardKey(byte[] mk, String pan, String psn) throws Exception {
+        if (mk == null || (mk.length != 16 && mk.length != 24)) {
+            throw new IllegalArgumentException("IMK must be 16 or 24 bytes, got "
+                    + (mk == null ? -1 : mk.length));
+        }
+        if (pan == null || pan.length() < 10) {
+            throw new IllegalArgumentException("PAN too short");
+        }
+        String panHex = (pan.length() & 1) == 1 ? pan + "F" : pan;
+        String psnHex = psn == null ? "00" : ((psn.length() & 1) == 1 ? "0" + psn : psn);
+
+        byte[] raw = concat(hex(panHex), hex(psnHex));
+        byte[] a = new byte[16];
+        if (raw.length >= 16) {
+            System.arraycopy(raw, raw.length - 16, a, 0, 16);
+        } else {
+            System.arraycopy(raw, 0, a, 0, raw.length);
+        }
+        oddParity(a);
+
+        byte[] b = new byte[16];
+        for (int i = 0; i < 16; i++) b[i] = (byte) (a[i] ^ 0xFF);
+
+        byte[] k1 = des3(mk, a, true);
+        byte[] k2 = des3(mk, b, true);
+        byte[] k = new byte[16];
+        System.arraycopy(k1, 0, k, 0, 8);
+        System.arraycopy(k2, 0, k, 8, 8);
+        return k;
+    }
+
+    /* ---------------- session keys ---------------- */
+
+    /**
+     * EMV CSK session key, CVN 20/21.
+     * SK = 3DES_K[ATC || F0 || 0000000000] || 3DES_K[ATC || 0F || 0000000000]
+     */
+    public static byte[] sessionKeyCsk(byte[] iccMk, byte[] atc) throws Exception {
+        byte[] blkA = concat(atc, hex("F00000000000"));
+        byte[] blkB = concat(atc, hex("0F0000000000"));
+        return concat(des3(iccMk, blkA, true), des3(iccMk, blkB, true));
+    }
+
+    /**
+     * Mastercard Proprietary SKD session key, CVN 16.
+     * SK = 3DES_K[ATC || F0 || 00 || UN] || 3DES_K[ATC || 0F || 00 || UN]
+     * The UN is the 4-byte unpredictable number from the GENERATE AC command.
+     */
+    public static byte[] sessionKeySkd(byte[] iccMk, byte[] atc, byte[] un) throws Exception {
+        if (atc == null || atc.length != 2) {
+            throw new IllegalArgumentException("ATC must be 2 bytes");
+        }
+        if (un == null || un.length != 4) {
+            throw new IllegalArgumentException("UN must be 4 bytes, got "
+                    + (un == null ? -1 : un.length));
+        }
+        byte[] blkA = concat(atc, hex("F000"), un);
+        byte[] blkB = concat(atc, hex("0F00"), un);
+        return concat(des3(iccMk, blkA, true), des3(iccMk, blkB, true));
+    }
+
+    /* ---------------- MAC ---------------- */
+
+    /**
+     * ISO 9797-1 MAC Algorithm 3, 2-key TDES, padding method 2.
+     * CBC with K1, then D_K2, then E_K1 over the final block.
+     */
+    public static byte[] mac(byte[] sk, byte[] data) throws Exception {
+        if (sk == null || sk.length != 16) {
+            throw new IllegalArgumentException("MAC key must be 16 bytes, got "
+                    + (sk == null ? -1 : sk.length));
+        }
+        byte[] k1 = new byte[8];
+        byte[] k2 = new byte[8];
+        System.arraycopy(sk, 0, k1, 0, 8);
+        System.arraycopy(sk, 8, k2, 0, 8);
+
+        int padLen = 8 - (data.length % 8);
+        byte[] msg = new byte[data.length + padLen];
+        System.arraycopy(data, 0, msg, 0, data.length);
+        msg[data.length] = (byte) 0x80;
+
+        byte[] y = new byte[8];
+        for (int off = 0; off < msg.length; off += 8) {
+            byte[] blk = new byte[8];
+            System.arraycopy(msg, off, blk, 0, 8);
+            y = des(k1, xor(y, blk), true);
+        }
+        y = desDec(k2, y);
+        return des(k1, y, true);
+    }
+
+    /** ARQC over an arbitrary MAC input. */
+    public static byte[] arqc(byte[] sk, byte[] macIn) throws Exception {
+        return mac(sk, macIn);
+    }
 }
