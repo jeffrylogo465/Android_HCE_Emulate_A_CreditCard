@@ -47,7 +47,12 @@ public class MainActivity extends AppCompatActivity {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    private static final String CVMLIST = "00000000000000001F03";
+    /**
+     * Only used to render the preview line when the CVM box is empty. The bytes
+     * on the wire come from the same value in ShadowApduService; this copy has
+     * to agree with it or the preview lies.
+     */
+    private static final String CVMLIST = "00000000000000001F031E03";
 
     /** The one dump that matches the reference log. */
     private static final String KNOWN_PAN = "5287250568943496";
