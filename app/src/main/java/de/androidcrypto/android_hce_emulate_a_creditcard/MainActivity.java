@@ -977,10 +977,11 @@ public class MainActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
-                .setItems(new String[]{"Scan for the key", "Edit candidate list", label},
+                .setItems(new String[]{"Scan for the key", "Edit candidate list", label, "Show KCV"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
+                            else if (w == 3) showKcv();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -999,6 +1000,23 @@ public class MainActivity extends AppCompatActivity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /**
+     * Show the KCV of whatever is in the MK-AC box, so a seller's quoted value
+     * can be compared before the key is trusted. Six hex characters.
+     */
+    private void showKcv() {
+        String k = t(etMkac).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        if (k.length() != 32 && k.length() != 48) {
+            Toast.makeText(this, "MK-AC box needs 32 or 48 hex", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            status("KCV " + EmvCrypto.kcv(k) + "  (compare with the seller's)");
+        } catch (Exception e) {
+            status("KCV failed - " + e);
+        }
     }
 
     private void editKeyList() {
