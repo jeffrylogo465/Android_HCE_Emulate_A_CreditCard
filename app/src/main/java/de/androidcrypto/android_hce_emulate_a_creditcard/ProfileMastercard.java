@@ -3,29 +3,33 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 /**
  * Mastercard, replayed from the reference card.
  *
- * The directory, the FCI and the second applet are the plastic's own, lifted
- * off it in the reader log byte for byte. The Maestro entry stops a second
- * SELECT from falling through to a generated FCI that would carry 9F2A and a
- * 9F38 PDOL.
+ * The directory, the FCI and the second applet are the plastic's own, lifted off
+ * it in the reader log byte for byte. That pair is proven on a till and the
+ * Maestro entry stops a second SELECT from falling through to a generated FCI
+ * that would carry 9F2A and a 9F38 PDOL.
  *
  * The FCI deliberately has no 9F38, so the terminal sends a PDOL-free GPO.
- * The label is "CHIP Base 01", 13 characters, which is what the 500D, the A50F
- * and the 6F1A around it all agree with.
  *
- * The GPO is AIP + AFL only - see Profiles.gpoMastercard. The AC comes later,
- * in GENERATE AC.
+ * LENGTHS: every outer length is the byte count of what it covers, and the label
+ * is 12 bytes. "CHIP Base 01" is 12 characters - it was written against a 500D
+ * before, which made the FCI one byte longer in its headers than in its content
+ * and would desync a length-parsing kernel. The PPSE had the same fault one
+ * level up. Both are now self-consistent.
  */
 public final class ProfileMastercard implements CardProfile {
 
     private static final String PPSE =
-            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
+            "6F45840E325041592E5359532E4444463031A533BF0C3161184F07A0000000041010500A4D617374657263617264870101"
           + "61154F07A000000004306050074D41455354524F870102";
 
     private static final String FCI =
-            "6F1A8407A0000000041010A50F500D434849502042617365203031";
+            "6F198407A0000000041010A50E500C434849502042617365203031";
 
     private static final String MAESTRO_FCI =
-            "6F1A8407A0000000043060A50F500D434849502042617365203031";
+            "6F198407A0000000043060A50E500C434849502042617365203031";
+
+    /** The reference card's own IAD. Byte 2 is the CVN: 0x10 = 16, so SKD. */
+    private static final String IAD = "0110A000092400000102000000000000FF";
 
     @Override public String name() { return "MASTERCARD"; }
 
@@ -52,6 +56,6 @@ public final class ProfileMastercard implements CardProfile {
     }
 
     @Override public String gpo(String atc, String arqc) {
-        return Profiles.gpoMastercard(atc, arqc);
+        return Profiles.gpo(IAD, atc, arqc);
     }
 }
