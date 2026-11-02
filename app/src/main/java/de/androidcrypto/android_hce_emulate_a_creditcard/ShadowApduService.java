@@ -59,6 +59,14 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     private static final String CVMLIST = "00000000000000001F03";
+
+    /**
+     * 9F34 CVM Results. NOT sent in the GENERATE AC response - the terminal
+     * owns this tag, writes it during CVM processing and sends it to the card
+     * inside CDOL1. A card returning it is at best ignored and at worst a
+     * parse error, so it is kept here only as documentation of the value the
+     * terminal will hand over.
+     */
     private static final String CVM_RESULTS = "1F0302";
 
     private final StringBuilder tapLog = new StringBuilder();
@@ -328,14 +336,6 @@ public class ShadowApduService extends HostApduService {
 
     // ---------- the profile in force ----------
 
-    /**
-     * The profile a tap runs against.
-     *
-     * A named profile in the card's pref wins, so a manual pick from the
-     * selector sticks. AUTO - or an empty pref - reads the network off the PAN.
-     * An unrecognised prefix falls through to Mastercard rather than to nothing,
-     * because a tap with no profile has no script at all.
-     */
     private CardProfile activeProfile() {
         String name = p("profile", "").toUpperCase();
         if (!name.isEmpty() && !name.equals(Profiles.AUTO)) {
@@ -347,28 +347,12 @@ public class ShadowApduService extends HostApduService {
         return Profiles.byName("MASTERCARD");
     }
 
-    /**
-     * The AID to advertise. The card's own is kept when it belongs to the same
-     * network as the profile; otherwise the profile's default replaces it, so a
-     * Visa PAN can never be served a Mastercard directory.
-     */
     private String aidFor(CardProfile prof) {
         String a = p("aid", "").toUpperCase();
         if (!a.isEmpty() && prof.matchesAid(a)) return a;
         return prof.defaultAid();
     }
 
-    /**
-     * The whole transaction, from the profile.
-     *
-     * Each profile supplies its own directory, its own applet or applets, and
-     * its own GPO. The ATC and the ARQC are handed over rather than built here,
-     * so no network bytes live in this class.
-     *
-     * The record is NOT scripted - READ RECORD falls through to readRecord()
-     * and syntheticRecord(), driven by the fields on the card, so the PAN,
-     * expiry, track 2, CDOLs and CVM list can never drift from the script.
-     */
     private String profileScript() {
         CardProfile prof = activeProfile();
         String aid = aidFor(prof);
@@ -1101,6 +1085,21 @@ public class ShadowApduService extends HostApduService {
         return SW_NO_RECORD;
     }
 
+    /**
+     * GENERATE AC.
+     *
+     * The CID must not be "higher" than what was requested - a TC when the
+     * terminal asked for an ARQC is a card-data error and ends the transaction,
+     * and the same for an ARQC when it asked for an AAC. So the request is
+     * honoured: AAC for AAC, ARQC for ARQC, TC for anything else.
+     *
+     * The response carries 9F10, 9F26, 9F27 and 9F36 and nothing else. 9F34 is
+     * NOT a card tag - the terminal writes CVM Results and sends it in CDOL1,
+     * so returning it here is at best ignored.
+     *
+     * No 9F4B: CDA signature is only required when CDA is in play, and the AIP
+     * has no CDA bit.
+     */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
@@ -1109,7 +1108,9 @@ public class ShadowApduService extends HostApduService {
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
 
         if (cryptogramSent) {
-            cid = (requested == 0x00) ? CID_AAC : CID_TC;
+            if (requested == 0x00)      cid = CID_AAC;
+            else if (requested == 0x80) cid = CID_ARQC;
+            else                        cid = CID_TC;
         } else if (requested == 0x00) {
             cid = CID_AAC;
         } else if (forced.length() == 2) {
@@ -1154,11 +1155,10 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F10, hex(iad)),
                 tlv(0x9F26, ac),
                 tlv(0x9F27, new byte[]{cid}),
-                tlv(0x9F34, hex(CVM_RESULTS)),
                 tlv(0x9F36, hex(atc)));
 
         tap("-- genac body=" + body.length + "B iad=" + hex(iad).length
-                + "B arqc=" + ac.length + "B cvm=" + hex(CVM_RESULTS).length + "B");
+                + "B arqc=" + ac.length + "B");
 
         return cat(tlv(0x77, body), SW_OK);
     }
