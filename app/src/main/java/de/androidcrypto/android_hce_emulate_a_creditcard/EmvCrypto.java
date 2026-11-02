@@ -27,48 +27,72 @@ public class EmvCrypto {
         return c.doFinal(d);
     }
 
+    /** Odd parity on every byte, as EMV requires of DES key material. */
+    private static void oddParity(byte[] k) {
+        for (int i = 0; i < k.length; i++) {
+            int b = k[i] & 0xFF;
+            int ones = Integer.bitCount(b & 0xFE);
+            k[i] = (byte) ((b & 0xFE) | ((ones & 1) == 0 ? 1 : 0));
+        }
+    }
+
     /**
-     * EMV Book 2 A1.3.1 session key derivation.
+     * IMK-AC -> MK-AC -> SK-AC, BOTH stages, per EMV Book 2 A1.3.1 and A1.4.
      *
-     * option 0 = Option A, derivation data PAN || PSN
-     * option 1 = Option B, derivation data PAN || PSN || PAN
+     * The old version collapsed the two stages into one 16-byte DES3 under the
+     * IMK and put the ATC block where MK-AC's right half belongs, so MK-AC was
+     * never formed and the second half was encrypted under the wrong key. It
+     * also wrote F0 into all six trailing bytes instead of F0 then five zeros,
+     * and never emitted the 0F variant at all. The result was a plausible but
+     * wrong session key - invisible with no MK-AC set, fatal the moment one is.
      *
-     * SK = DES3(MK, Z || ATC || F0F0F0F0F0F0), with Z right-justified in 8 bytes.
+     * Stage 1 diversifies the IMK by the card: D_L is the rightmost 16 digits of
+     * PAN||PSN as packed BCD, D_R is its bitwise inverse, and MK-AC is the two
+     * DES3 results concatenated.
      *
-     * FIX 1: this is ONE DES3 over 16 bytes. The old code did two DES3 calls and
-     *        handed an 8-byte result back to des3(), which wants 16 or 24.
-     * FIX 2: derivation data is built by concatenating BCD BYTE ARRAYS, not by
-     *        joining strings and hex-decoding. Joining strings puts the odd-length
-     *        pad nibble after the PSN instead of inside the PAN:
-     *          broken: 01 14 99 43 20 07 70 40 1F
-     *          correct:01 14 99 43 20 07 70 4F 01
-     *        Different bytes -> different session key -> wrong ARQC.
+     * Stage 2 diversifies MK-AC by the ATC. The two blocks are
+     * ATC || F0 || five zeros and ATC || 0F || five zeros. The marker sits at
+     * byte 3, directly after the ATC - not at the end.
+     *
+     * option 0 = derivation data PAN || PSN
+     * option 1 = derivation data PAN || PSN || PAN
      */
-    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq,
+    static byte[] sessionKeyAc(String imkHex, String pan, String panSeq,
                                String atcHex, int option) throws Exception {
-        byte[] mk = Hex.hex(mkAcHex);
+        byte[] imk = Hex.hex(imkHex);
 
         byte[] z = (option == 1)
                 ? Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq), Hex.bcd(pan))
                 : Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq));
 
-        byte[] z8 = new byte[8];
+        byte[] dl = new byte[8];
         int n = Math.min(8, z.length);
-        System.arraycopy(z, z.length - n, z8, 8 - n, n);
+        System.arraycopy(z, z.length - n, dl, 8 - n, n);
+
+        byte[] dr = new byte[8];
+        for (int i = 0; i < 8; i++) dr[i] = (byte) ~dl[i];
+
+        byte[] mk = Tlv.cat(des3(imk, dl), des3(imk, dr));
+        oddParity(mk);
 
         byte[] atc = Hex.hex(atcHex);
-        byte[] input = new byte[16];
-        System.arraycopy(z8, 0, input, 0, 8);
-        input[8] = atc[0];
-        input[9] = atc[1];
-        Arrays.fill(input, 10, 16, (byte) 0xF0);
+        byte[] bl = new byte[8];
+        byte[] br = new byte[8];
+        bl[0] = atc[0];
+        bl[1] = atc[1];
+        bl[2] = (byte) 0xF0;
+        br[0] = atc[0];
+        br[1] = atc[1];
+        br[2] = (byte) 0x0F;
 
-        return des3(mk, input);
+        byte[] sk = Tlv.cat(des3(mk, bl), des3(mk, br));
+        oddParity(sk);
+        return sk;
     }
 
-    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq, String atcHex)
+    static byte[] sessionKeyAc(String imkHex, String pan, String panSeq, String atcHex)
             throws Exception {
-        return sessionKeyAc(mkAcHex, pan, panSeq, atcHex, 0);
+        return sessionKeyAc(imkHex, pan, panSeq, atcHex, 0);
     }
 
     /** ISO 9797-1 MAC Algorithm 3, padding method 2. This was already correct. */
@@ -87,14 +111,14 @@ public class EmvCrypto {
         return des(k1, x);
     }
 
-    static byte[] arqc(String mkAcHex, String pan, String panSeq, String atcHex,
+    static byte[] arqc(String imkHex, String pan, String panSeq, String atcHex,
                        byte[] macInput, int option) throws Exception {
-        return mac(sessionKeyAc(mkAcHex, pan, panSeq, atcHex, option), macInput);
+        return mac(sessionKeyAc(imkHex, pan, panSeq, atcHex, option), macInput);
     }
 
-    static byte[] arqc(String mkAcHex, String pan, String panSeq, String atcHex, byte[] macInput)
+    static byte[] arqc(String imkHex, String pan, String panSeq, String atcHex, byte[] macInput)
             throws Exception {
-        return arqc(mkAcHex, pan, panSeq, atcHex, macInput, 0);
+        return arqc(imkHex, pan, panSeq, atcHex, macInput, 0);
     }
 
     private EmvCrypto() {}
