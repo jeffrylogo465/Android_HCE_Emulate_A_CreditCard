@@ -1184,9 +1184,35 @@ public class ShadowApduService extends HostApduService {
         return cat(tlv(0x77, body), SW_OK);
     }
 
+    /**
+     * Cryptogram version from the IAD, or -1 when there is none.
+     *
+     * M/Chip IAD: byte 1 is the DKI, byte 2 is the CVN. 16/17 use Mastercard
+     * Proprietary SKD, 20/21 use EMV CSK. CCD IAD starts 0F, and there the
+     * version is the low nibble of byte 2 (5 = 3DES, 6 = AES).
+     */
+    private int cvn() {
+        String h = p("iad", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (h.length() < 4) return -1;
+        try {
+            int b1 = Integer.parseInt(h.substring(0, 2), 16);
+            int b2 = Integer.parseInt(h.substring(2, 4), 16);
+            if (b1 == 0x0F) return b2 & 0x0F;
+            return b2;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /** 9F37 is the last element of CDOL1, so the UN is the trailing four bytes. */
+    private static byte[] unOf(byte[] cdol) {
+        if (cdol.length < 4) return new byte[4];
+        return Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
+    }
+
     private byte[] computeAc(String atc, byte[] cdol) {
         if (!haveKey()) {
-            tap("!! no valid MK-AC set - ARQC will be all zeros");
+            tap("!! no valid IMK-AC set - ARQC will be all zeros");
             return new byte[8];
         }
         String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -1202,11 +1228,23 @@ public class ShadowApduService extends HostApduService {
         } catch (Exception ignored) { }
         variant &= 0x03;
 
+        int cvn = cvn();
+        boolean csk = (cvn == 20 || cvn == 21);
+
         try {
             byte[] macIn = ((variant & 2) != 0)
                     ? cat(aipForMac(), hex(atc), cdol)
                     : cat(cdol, aipForMac(), hex(atc));
-            return EmvCrypto.arqc(mk, pan(), psn(), atc, macIn, variant & 1);
+
+            byte[] sk = csk
+                    ? EmvCrypto.sessionKeyCsk(mk, pan(), psn(), atc, variant & 1)
+                    : EmvCrypto.sessionKeySkd(mk, pan(), psn(), atc, unOf(cdol), variant & 1);
+
+            tap("-- key cvn=" + (cvn < 0 ? "?" : String.valueOf(cvn))
+                    + (csk ? " CSK" : " SKD") + " variant=" + variant
+                    + " sk=" + bytesToHex(sk));
+
+            return EmvCrypto.mac(sk, macIn);
         } catch (Exception e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
