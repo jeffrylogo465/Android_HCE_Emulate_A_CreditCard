@@ -1028,6 +1028,20 @@ public class MainActivity extends AppCompatActivity {
 
     private void scanForKey() { scanForKey(true); }
 
+    /** CVN from the IAD: byte 2 of a DKI||CVN IAD, low nibble for CCD. -1 if none. */
+    private static int cvnFromIad(String iadHex) {
+        String h = (iadHex == null ? "" : iadHex).replaceAll("[^0-9A-Fa-f]", "");
+        if (h.length() < 4) return -1;
+        try {
+            int b1 = Integer.parseInt(h.substring(0, 2), 16);
+            int b2 = Integer.parseInt(h.substring(2, 4), 16);
+            if (b1 == 0x0F) return b2 & 0x0F;
+            return b2;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /**
      * Search the candidate list for the issuer key.
      *
@@ -1035,6 +1049,9 @@ public class MainActivity extends AppCompatActivity {
      * that was never read, i.e. a dump - the ARQC, CDOL data, AIP and ATC typed
      * into the boxes. The typed route uses the REFERENCE card's AIP, not ours:
      * the reference ARQC was MACed over that AIP, so 1880 can never match.
+     *
+     * The session key scheme follows the CVN in the IAD: 16/17 are SKD, 20/21
+     * are CSK. Using the wrong one produces a wrong ARQC from a right key.
      */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
@@ -1114,6 +1131,9 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        final int cvn = cvnFromIad(t(etIad));
+        final boolean csk = (cvn == 20 || cvn == 21);
+
         status("Scanning " + keys.size() + " keys x 4 variants...");
 
         new Thread(() -> {
@@ -1125,7 +1145,12 @@ public class MainActivity extends AppCompatActivity {
                         byte[] macIn = ((variant & 2) != 0)
                                 ? cat(aip, hexToBytes(atc), cdol)
                                 : cat(cdol, aip, hexToBytes(atc));
-                        byte[] ac = EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1);
+                        byte[] un = cdol.length < 4
+                                ? new byte[4]
+                                : Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
+                        byte[] ac = csk
+                                ? EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1)
+                                : EmvCrypto.arqcSkd(k, pan, psn, atc, un, macIn, variant & 1);
                         if (Arrays.equals(ac, arqcRef)) {
                             final String fk = k;
                             final int fv = variant;
