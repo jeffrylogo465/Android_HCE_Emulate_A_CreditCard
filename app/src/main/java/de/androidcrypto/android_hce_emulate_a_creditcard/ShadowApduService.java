@@ -44,14 +44,12 @@ public class ShadowApduService extends HostApduService {
      * was byte 1 that was wrong there, not byte 2.
      *
      * 5800 is the working value for the test terminal: EMV mode, CVM supported,
-     * terminal risk management.
+     * terminal risk management. No ODA bits - a clone cannot honour them.
      *
-     * CHANGED to 5980. The reference app's GPO is 771A 8202 5980 9414 - qVSDC,
-     * CVM, TRM and the CDA bit - and the terminal read all six of its records
-     * off the back of it. CDA is now kept rather than cleared; see AIP_KEEP_MASK
-     * and the gpo() built path. Revert to 5800 if a till stalls at the GPO.
+     * Only reached when no script is armed. DEFAULT_SCRIPT normally supplies the
+     * AIP instead, and that one is 5800 too.
      */
-    private static final String DEFAULT_AIP = "5980";
+    private static final String DEFAULT_AIP = "5800";
 
     /**
      * Keep-mask applied to byte 1 of whatever AIP is in force.
@@ -63,11 +61,6 @@ public class ShadowApduService extends HostApduService {
      * FIX: this used to be 0x18, which also cleared 0x40 - and 0x40 is the
      * Mastercard qVSDC bit, so a typed 1040 was MACed over as 1000. Mode bits are
      * not ODA bits; they stay.
-     *
-     * CHANGED from 0xD8 to 0xD9 so the AIP the ARQC is computed over is the same
-     * AIP that goes out. With 0xD8 the CDA bit was cleared in the MAC input while
-     * the built path cleared it from the response too, and the two only agreed by
-     * accident.
      */
     private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
@@ -75,9 +68,9 @@ public class ShadowApduService extends HostApduService {
      * AIP byte 1 bit 1 - CDA supported. A clone cannot honour it: CDA needs the
      * SDAD in 9F4B, signed with the ICC private key we do not have.
      *
-     * weakenAip() still clears it, and is kept for the replay path, but neither
-     * gpo() branch calls it any more - the reference card advertises 5980 with no
-     * 9F4B anywhere and the kernel tolerates it.
+     * weakenAip() still clears it, but neither gpo() branch calls it any more -
+     * the reference card advertises 5980 with no 9F4B anywhere and the kernel
+     * read every one of its records.
      *
      * VERIFIED against Sample_Mastercard_Reader_Logfile.md: that card's AIP is
      * 19 80, and 0x01 is the CDA bit. Byte 2's 0x80 is RFU and needs no clearing.
@@ -105,12 +98,10 @@ public class ShadowApduService extends HostApduService {
      * till carried no AC in its GPO either - 771A 8202 5980 9414, AIP and AFL
      * only - and it still got read. So the AC was never the reason for the stop.
      * What the working tap had and this clone did not was FIVE AFL entries over
-     * four SFIs, and an AIP with the mag-stripe bit set. Those are the live
-     * differences now.
+     * four SFIs. That is what the default script now replays.
      *
-     * The strip machinery still works and the constant still gates it, both in
-     * the replay branch and in the built path - flip it back if a till ever
-     * complains about an AC it did not ask for.
+     * Only reached when no script is armed - a script that serves the GPO bypasses
+     * gpo() completely.
      */
     private static final boolean STRIP_AC = false;
 
@@ -181,21 +172,30 @@ public class ShadowApduService extends HostApduService {
     private static final String CVM_RESULTS = "1F0302";
 
     /**
-     * Used when the selected card has no script of its own. One per line:
-     *   <match>=<response>
-     * '#' starts a comment, spaces are ignored, longest match wins.
+     * Default transaction script. Used when the selected card's own script box is
+     * EMPTY - see useScript().
      *
-     * INCLUDE THE 9000 ON THE SAME LINE. It is part of the response.
+     * One per line: <match>=<response>. '#' starts a comment, spaces are ignored,
+     * longest match wins. The 9000 belongs on the SAME line as the response; a
+     * line with no '=' is discarded, so a 9000 on its own line is lost.
      *
-     * GATED. The script is OFF unless the card's 'usescript' pref says otherwise.
+     * This is the reference card's whole tap, byte for byte, minus its AC: a
+     * two-applet directory, a label-only FCI with no 9F38, a GPO carrying AIP
+     * 5800 and a ONE-ENTRY AFL over SFI 1, and a GENERATE AC answering TC.
      *
-     * NOTE: a script that serves a GPO bypasses everything gpo() does - the CID
-     * rewrite and the MSD framing.
+     * WHY ONE AFL ENTRY AND NOT FIVE: readRecord() synthesizes SFI 1 and nothing
+     * else, so the reference's five-entry AFL would draw 6A83 on SFI 2. Pointing
+     * the AFL at SFI 1 rec 1 is self-consistent with what this build can serve.
+     * Put the five-entry AFL back the moment the real records are on the card.
+     *
+     * A script that serves the GPO bypasses everything gpo() does - the CID
+     * rewrite and the MSD framing - and a scripted SELECT bypasses patchFci().
      */
     private static final String DEFAULT_SCRIPT =
-            "# match=response, hex only. Longest match wins.\n"
-          + "# 80A80000=770A82021080940408010100 9000\n"
-          + "# 00B2010C=70265A0860114994320077045F24033112318C149F02069F03069F1A0295055F2A029A039C019F3704 9000\n";
+            "00A404000E325041592E5359532E4444463031=6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D61737465726361726487010161154F07A000000004306050074D41455354524F8701029000\n"
+          + "00A4040007A0000000041010=6F1A8407A0000000041010A50F500D4348495020426173652030319000\n"
+          + "80A80000=770A820258009404080101009000\n"
+          + "80AE=77299F2701409F36025B009F26086D14503D408943A19F10120110A000092400000102000000000000FF9000\n";
 
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
@@ -472,10 +472,23 @@ public class ShadowApduService extends HostApduService {
         return p("script", DEFAULT_SCRIPT);
     }
 
+    /**
+     * Whether the script is consulted.
+     *
+     * An EMPTY script box means "use DEFAULT_SCRIPT", so the default arms itself
+     * without the box having to carry a copy. A non-empty box is gated by the
+     * card's 'usescript' pref, which MainActivity writes from the armed-line
+     * count - a box full of comments alone is off, not armed.
+     *
+     * FIX: this used to return false on a null pref and nothing else, so an empty
+     * box silently disabled the default and dropped through to the built GPO path.
+     */
     private boolean useScript() {
+        if (p("script", "").trim().isEmpty()) return scriptLines() > 0;
+
         Object o = prefs().getAll().get(sel() + "usescript");
         if (o instanceof Number) return ((Number) o).intValue() != 0;
-        if (o == null) return false;
+        if (o == null) return true;
         String v = o.toString().trim();
         return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
     }
@@ -945,6 +958,8 @@ public class ShadowApduService extends HostApduService {
      * watchForStall() is armed on the built path. A terminal can drop us after
      * the GPO without ever calling onDeactivated, and then the verdict was never
      * written at all - the log just stopped and looked like a dead app.
+     *
+     * Not reached at all while a script serves the GPO.
      */
     private byte[] gpo(byte[] apdu) {
         byte[] raw = rawGpo();
@@ -1423,6 +1438,6 @@ public class ShadowApduService extends HostApduService {
             } catch (Exception ignored) { }
             popup(v);
         }
-        Log.d("HCE", "onDeactivated reason=" + reason + " | " + v);
+        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
 }
