@@ -31,11 +31,21 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    private static final String DEFAULT_AIP = "5800";
+    private static final String DEFAULT_AIP = "1880";
     private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
     private static final byte AIP_CDA = (byte) 0x01;
     private static final byte AIP_CVM = (byte) 0x10;
+
+    /**
+     * Default IAD when the card has none.
+     *
+     * Byte 1 is the DKI, byte 2 is the CVN. 0x10 is CVN 16 - Mastercard
+     * Proprietary SKD - which is what the reference card declares and what
+     * cvn() reads to pick the session-key scheme. A default of 01 would read
+     * as CVN 1 and silently change the derivation.
+     */
+    private static final String DEFAULT_IAD = "06010A03A00000";
 
     private static final boolean STRIP_AC = false;
 
@@ -314,6 +324,11 @@ public class ShadowApduService extends HostApduService {
         }
         if (a.length < 2) a = hex(DEFAULT_AIP);
         return a;
+    }
+
+    /** IAD in force, captured first, then typed, then the default. */
+    private String iadHex() {
+        return (capturedIad == null) ? p("iad", DEFAULT_IAD) : bytesToHex(capturedIad);
     }
 
     private boolean haveKey() {
@@ -913,9 +928,7 @@ public class ShadowApduService extends HostApduService {
         byte[] ac = computeAc(atc, pdolData);
         cryptogramSent = !STRIP_AC;
 
-        String iad = (capturedIad == null)
-                ? p("iad", "06010A03A0B800")
-                : bytesToHex(capturedIad);
+        String iad = iadHex();
 
         byte[] a = afl();
         tap("-- gpo msd=" + msd + " aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
@@ -1163,9 +1176,7 @@ public class ShadowApduService extends HostApduService {
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
 
-        String iad = (capturedIad == null)
-                ? p("iad", "06010A03A0B800")
-                : bytesToHex(capturedIad);
+        String iad = iadHex();
 
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
@@ -1210,12 +1221,21 @@ public class ShadowApduService extends HostApduService {
         return Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
     }
 
+    /**
+     * ARQC over cdol || AIP || ATC || IAD.
+     *
+     * The IAD carries the CVN, so it belongs in the input by construction -
+     * without it every MAC input was short by the whole IAD.
+     *
+     * SKD uses the key straight, so the vector (MK, ATC, UN) reproduces with
+     * only those three inputs. CSK goes through cardKey first, as EMV requires.
+     */
     private byte[] computeAc(String atc, byte[] cdol) {
         if (!haveKey()) {
             tap("!! no valid IMK-AC set - ARQC will be all zeros");
             return new byte[8];
         }
-        String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
+        byte[] mk = hex(p("mkac", ""));
 
         int variant = 0;
         try {
@@ -1232,19 +1252,21 @@ public class ShadowApduService extends HostApduService {
         boolean csk = (cvn == 20 || cvn == 21);
 
         try {
+            byte[] iad = hex(iadHex());
             byte[] macIn = ((variant & 2) != 0)
-                    ? cat(aipForMac(), hex(atc), cdol)
-                    : cat(cdol, aipForMac(), hex(atc));
+                    ? cat(aipForMac(), hex(atc), iad, cdol)
+                    : cat(cdol, aipForMac(), hex(atc), iad);
 
             byte[] sk = csk
-                    ? EmvCrypto.sessionKeyCsk(mk, pan(), psn(), atc, variant & 1)
-                    : EmvCrypto.sessionKeySkd(mk, pan(), psn(), atc, unOf(cdol), variant & 1);
+                    ? EmvCrypto.sessionKeyCsk(EmvCrypto.cardKey(mk, pan(), psn()), hex(atc))
+                    : EmvCrypto.sessionKeySkd(mk, hex(atc), unOf(cdol));
 
             tap("-- key cvn=" + (cvn < 0 ? "?" : String.valueOf(cvn))
                     + (csk ? " CSK" : " SKD") + " variant=" + variant
                     + " sk=" + bytesToHex(sk));
+            tap("-- macIn " + bytesToHex(macIn));
 
-            return EmvCrypto.mac(sk, macIn);
+            return EmvCrypto.arqc(sk, macIn);
         } catch (Exception e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
