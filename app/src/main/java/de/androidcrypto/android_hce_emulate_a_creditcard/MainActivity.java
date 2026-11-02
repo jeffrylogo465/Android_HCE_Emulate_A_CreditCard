@@ -56,11 +56,15 @@ public class MainActivity extends AppCompatActivity {
      * Per-network field defaults: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
      *
      * Only the fields are here. The bytes the terminal actually sees live in
-     * ProfileMastercard and ProfileVisa, one file each, so this table and those
-     * files cannot drift into each other's way.
+     * ProfileMastercard and ProfileVisa, one file each.
+     *
+     * THE AIPs DIFFER and must: Mastercard numbers byte 1 by classic EMV, where
+     * 0x40 is SDA and byte 2 b8 is "EMV mode supported" - 1880 turns EMV mode
+     * on and leaves SDA off, because a clone cannot sign. Visa numbers byte 1
+     * differently, where 0x40 is qVSDC - 5800 is right there.
      */
     private static final String[] PROFILE_MASTERCARD = {
-            "MASTERCARD", "A0000000041010", "5800",
+            "MASTERCARD", "A0000000041010", "1880",
             "0110A000092400000102000000000000FF", "001C" };
     private static final String[] PROFILE_VISA = {
             "VISA", "A0000000031010", "5800",
@@ -421,8 +425,7 @@ public class MainActivity extends AppCompatActivity {
      * Put the card in place from the number.
      *
      * Only the FIELDS are written here. The directory, the FCI and the GPO come
-     * from the profile file the service picks off the same number, so there is
-     * one copy of the bytes and it lives in ProfileMastercard or ProfileVisa.
+     * from the profile file the service picks off the same number.
      *
      * The script box is blanked so the profile runs instead of a stale replay,
      * and the capture is wiped so an old PPSE or GPO cannot get in front of it.
@@ -792,7 +795,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - profile default is used)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
+                .append(t(etAip).isEmpty() ? "1880" : t(etAip).toUpperCase()).append('\n');
         sb.append("CID        : ")
                 .append(t(etCid).isEmpty() ? "40 from the profile - TC, approve offline"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
