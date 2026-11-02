@@ -31,25 +31,7 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
-    /**
-     * Fallback AIP when the card has no captured GPO and no typed value.
-     *
-     * 5800 is the working value for a contactless till: EMV mode (0x40 on a
-     * Mastercard), CVM supported (0x10), terminal risk management (0x08). No ODA
-     * bits - a clone cannot honour them.
-     *
-     * Only reached when nothing else supplies an AIP. The profiles below supply
-     * 5800 too, and a scripted GPO carries it verbatim.
-     */
     private static final String DEFAULT_AIP = "5800";
-
-    /**
-     * Keep-mask applied to byte 1 of whatever AIP reaches the MAC.
-     *
-     * 0xD9 keeps the mode bits - mag-stripe (0x80), qVSDC (0x40), CV (0x10),
-     * TRM (0x08) - and the CDA bit (0x01). It clears only DDA (0x20) and issuer
-     * authentication (0x04).
-     */
     private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
     private static final byte AIP_CDA = (byte) 0x01;
@@ -78,88 +60,6 @@ public class ShadowApduService extends HostApduService {
 
     private static final String CVMLIST = "00000000000000001F03";
     private static final String CVM_RESULTS = "1F0302";
-
-    // ---------- profile material ----------
-
-    /**
-     * The reference Mastercard's own directory and FCI, lifted off the card in
-     * the reader log and replayed byte for byte.
-     *
-     * The PPSE carries TWO applets - Mastercard at priority 01 and Maestro at
-     * priority 02 - with their labels and no 9F2A. The FCI carries no 9F38 at
-     * all, so the terminal sends 8300 and then a PDOL-free GPO, and its label is
-     * "CHIP Base 01", 13 characters under the 500D it sits in.
-     */
-    private static final String REAL_PPSE =
-            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
-          + "61154F07A000000004306050074D41455354524F870102";
-
-    private static final String REAL_FCI =
-            "6F1A8407A0000000041010A50F500D434849502042617365203031";
-
-    private static final String MAESTRO_FCI =
-            "6F1A8407A0000000043060A50F500D434849502042617365203031";
-
-    /**
-     * The GPO response, built per tap.
-     *
-     * AIP 5800, one AFL entry, an ARQC, CID 40, the live ATC and the reference
-     * IAD. The ARQC and the ATC are no longer frozen, and the 77 length is
-     * computed instead of typed, so it can never drift from the bytes it covers.
-     *
-     * The ATC must climb: EMV expects it to, and a till holding the last ATC for
-     * this PAN treats an identical one as a possible replay. The ARQC is only
-     * ever looked at if the transaction goes online, which CID 40 prevents - so
-     * with no key it stays eight zero bytes and costs nothing.
-     *
-     * A bare AIP+AFL GPO - what the card itself sends - was tolerated by one
-     * till and refused by the next, which read the AIP and AFL and quit without
-     * a single READ RECORD. The AC tags are in the GPO here on purpose.
-     *
-     * WHY ONE AFL ENTRY AND NOT THE CARD'S FIVE: readRecord() synthesizes SFI 1
-     * and nothing else, so a five-entry AFL would draw 6A83 on SFI 2. Pointing
-     * the AFL at SFI 1 rec 1 is self-consistent with what this build can serve.
-     *
-     * 50 bytes of body, 0x32: 82/5800, 94/08010100, 9F26/8, 9F27/40,
-     * 9F36/<atc>, 9F10/17. The 9F10 is the reference card's own IAD, with the
-     * institution digit changed per network.
-     */
-    private String gpoLine(boolean visa) {
-        String atc = txnAtc();
-        String ac = txnAcHex();
-        String iad = visa
-                ? "0110A000032400000102000000000000FF"
-                : "0110A000092400000102000000000000FF";
-
-        String body = "82025800"
-                + "940408010100"
-                + "9F2608" + ac
-                + "9F270140"
-                + "9F3602" + atc
-                + "9F1011" + iad;
-
-        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
-    }
-
-    /**
-     * The cryptogram for this transaction, computed once and cached.
-     *
-     * Cached because profileScript() is rebuilt on every APDU - scriptLines()
-     * and scriptMatch() both call it, and verdict() calls scriptLines() again -
-     * and computeAc() logs a line, so an uncached call would print the same
-     * warning a dozen times a tap.
-     *
-     * No PDOL is sent (the FCIs carry no 9F38), so the MAC input is empty; the
-     * AIP and the ATC are folded in by computeAc() itself.
-     */
-    private String txnAcHex() {
-        if (txnAc == null) {
-            txnAc = haveKey()
-                    ? bytesToHex(computeAc(txnAtc(), new byte[0]))
-                    : "0000000000000000";
-        }
-        return txnAc;
-    }
 
     private final StringBuilder tapLog = new StringBuilder();
     private final Random rnd = new Random();
@@ -317,7 +217,7 @@ public class ShadowApduService extends HostApduService {
         return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
     }
 
-    // ---------- card fields, normalised once ----------
+    // ---------- card fields ----------
 
     private String pan() {
         String s = p("pan", "4111111111111111").replaceAll("[^0-9]", "");
@@ -352,6 +252,15 @@ public class ShadowApduService extends HostApduService {
     private String txnAtc() {
         if (txnAtc == null) txnAtc = nextAtc();
         return txnAtc;
+    }
+
+    private String txnAcHex() {
+        if (txnAc == null) {
+            txnAc = haveKey()
+                    ? bytesToHex(computeAc(txnAtc(), new byte[0]))
+                    : "0000000000000000";
+        }
+        return txnAc;
     }
 
     private void resetTransaction() {
@@ -417,83 +326,64 @@ public class ShadowApduService extends HostApduService {
         return h.getBytes(StandardCharsets.ISO_8859_1);
     }
 
-    // ---------- network profiles ----------
+    // ---------- the profile in force ----------
 
-    private boolean isVisa() {
-        return pan().startsWith("4");
-    }
-
-    private String profileName() {
-        String a = p("aid", "").toUpperCase();
-        if (a.startsWith("A0000000041010")) return "MASTERCARD";
-        if (a.startsWith("A000000003"))     return "VISA";
-        if (a.startsWith("A000000025"))     return "AMEX";
-        if (a.startsWith("A000000152"))     return "DISCOVER";
-        if (a.startsWith("A000000015"))     return "DISCOVER";
-        if (a.startsWith("A000000065"))     return "JCB";
-        if (a.startsWith("A000000333"))     return "UNIONPAY";
-        return "GENERIC";
-    }
-
-    /** A one-applet directory built around whatever AID the card carries. */
-    private byte[] oneAppPpse(String aidHex) {
-        byte[] entry = cat(tlv(0x4F, hex(aidHex)), tlv(0x87, new byte[]{0x01}));
-        byte[] dir = tlv(0xBF0C, tlv(0x61, entry));
-        return tlv(0x6F, cat(tlv(0x84, PPSE), tlv(0xA5, dir)));
-    }
-
-    /** A label-only FCI with no 9F38, so the terminal sends a PDOL-free GPO. */
-    private byte[] labelFci(String aidHex, String label) {
-        byte[] prop = cat(
-                tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
-                tlv(0x87, new byte[]{0x01}));
-        return tlv(0x6F, cat(tlv(0x84, hex(aidHex)), tlv(0xA5, prop)));
+    /**
+     * The profile a tap runs against.
+     *
+     * A named profile in the card's pref wins, so a manual pick from the
+     * selector sticks. AUTO - or an empty pref - reads the network off the PAN.
+     * An unrecognised prefix falls through to Mastercard rather than to nothing,
+     * because a tap with no profile has no script at all.
+     */
+    private CardProfile activeProfile() {
+        String name = p("profile", "").toUpperCase();
+        if (!name.isEmpty() && !name.equals(Profiles.AUTO)) {
+            CardProfile c = Profiles.byName(name);
+            if (c != null) return c;
+        }
+        CardProfile c = Profiles.forPan(pan());
+        if (c != null) return c;
+        return Profiles.byName("MASTERCARD");
     }
 
     /**
-     * The whole transaction, built from the card's own AID and network.
+     * The AID to advertise. The card's own is kept when it belongs to the same
+     * network as the profile; otherwise the profile's default replaces it, so a
+     * Visa PAN can never be served a Mastercard directory.
+     */
+    private String aidFor(CardProfile prof) {
+        String a = p("aid", "").toUpperCase();
+        if (!a.isEmpty() && prof.matchesAid(a)) return a;
+        return prof.defaultAid();
+    }
+
+    /**
+     * The whole transaction, from the profile.
      *
-     * Mastercard keeps the reference card's directory, FCI and Maestro applet
-     * verbatim - that pair is proven on a till and the second applet stops a
-     * Maestro select from falling through to a generated FCI. Everything else
-     * gets a directory and FCI built around its own AID, which is what a
-     * single-applet card looks like, and the GPO shaped for its network.
+     * Each profile supplies its own directory, its own applet or applets, and
+     * its own GPO. The ATC and the ARQC are handed over rather than built here,
+     * so no network bytes live in this class.
      *
      * The record is NOT scripted - READ RECORD falls through to readRecord()
-     * and syntheticRecord(), which is driven by the fields on the card, so the
-     * PAN, expiry, track 2, CDOLs and CVM list can never drift from the script.
-     *
-     * The GPO comes from gpoLine(), so its ATC and ARQC are live rather than
-     * frozen in a constant.
+     * and syntheticRecord(), driven by the fields on the card, so the PAN,
+     * expiry, track 2, CDOLs and CVM list can never drift from the script.
      */
     private String profileScript() {
-        String aid = p("aid", "").toUpperCase();
-        if (aid.isEmpty()) aid = "A0000000031010";
+        CardProfile prof = activeProfile();
+        String aid = aidFor(prof);
 
         StringBuilder sb = new StringBuilder();
-        String selPpse = "00A404000E" + bytesToHex(PPSE);
-
-        if (aid.equals("A0000000041010")) {
-            sb.append(selPpse).append('=').append(REAL_PPSE).append("9000\n");
-            sb.append("00A4040007A0000000041010=").append(REAL_FCI).append("9000\n");
-            sb.append("00A4040007A0000000043060=").append(MAESTRO_FCI).append("9000\n");
-            sb.append(gpoLine(false)).append('\n');
-            return sb.toString();
+        sb.append(prof.selectPpse(aid)).append('\n');
+        for (String line : prof.selectApp(aid, labelText())) {
+            if (line != null && !line.isEmpty()) sb.append(line).append('\n');
         }
-
-        sb.append(selPpse).append('=').append(bytesToHex(oneAppPpse(aid))).append("9000\n");
-        sb.append("00A4040007").append(aid).append('=')
-          .append(bytesToHex(labelFci(aid, labelText()))).append("9000\n");
-        sb.append(gpoLine(isVisa())).append('\n');
+        sb.append(prof.gpo(txnAtc(), txnAcHex())).append('\n');
         return sb.toString();
     }
 
     // ---------- script overrides ----------
 
-    /**
-     * The script in force. A non-empty box beats the profile, so a hand-tuned
-     * replay still wins; an empty box means the profile runs.
-     */
     private String scriptRaw() {
         String box = p("script", "").trim();
         return box.isEmpty() ? profileScript() : box;
@@ -803,7 +693,7 @@ public class ShadowApduService extends HostApduService {
                                         java.util.Locale.US).format(new java.util.Date())
                                 + " ===");
                         int n = scriptLines();
-                        tap("-- profile: " + profileName()
+                        tap("-- profile: " + activeProfile().name()
                                 + " | script " + n + " line(s), gate="
                                 + (useScript() ? "ON" : "OFF"));
                         popup(nameLine());
