@@ -48,43 +48,10 @@ public class MainActivity extends AppCompatActivity {
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
-    /**
-     * No CVM required - 1F 03. Must match the service.
-     *
-     * The card decides TC offline, so no online session exists and an online-PIN
-     * rule (1E 03) asks the kernel for a PIN block nothing can produce. The
-     * kernel then aborts with "error, insert card".
-     *
-     * This constant only applies when the CVM box is EMPTY. A card already
-     * carrying 1E031F00 keeps it - blank the box and seed again.
-     */
     private static final String CVMLIST = "00000000000000001F03";
 
     private static final String PPSE    = "325041592E5359532E4444463031";
 
-    /**
-     * The plastic's own directory and FCI, lifted off the card in the reader
-     * log. Replayed verbatim by seedRecords().
-     *
-     * The PPSE carries TWO applets - Mastercard A0000000041010 at priority 01
-     * and Maestro A0000000043060 at priority 02 - with their labels and no 9F2A.
-     * The FCI carries no 9F38 at all, so the terminal sends 8300 like it did on
-     * the real card, and its label is CHIP Base 01.
-     *
-     * The lengths are the ones the card and the log both carry, byte for byte.
-     * An earlier revision "corrected" them - A533/6F45 and 6F1B/A510/500E - and
-     * was wrong on all three. A working receipt off the same data is what settled
-     * it: the PPSE's A5 content is 52 bytes because the second 61 entry is
-     * counted twice over, and the FCI's label is 13 bytes, not 14.
-     *
-     * FIX: REAL_FCI carried "MCHIP Base 01" - 14 characters - under a 500D
-     * length, so the TLV was one byte long and the trailing '1' fell outside it.
-     * The card's label is "CHIP Base 01", 13 characters, which is what 500D and
-     * the enclosing A50F and 6F1A all agree with.
-     *
-     * NOTE: a captured PPSE is served verbatim, so this bypasses buildPpse()'s
-     * generated branch entirely - and PPSE_MINIMAL with it.
-     */
     private static final String REAL_PPSE =
             "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
           + "61154F07A000000004306050074D41455354524F870102";
@@ -92,7 +59,45 @@ public class MainActivity extends AppCompatActivity {
     private static final String REAL_FCI =
             "6F1A8407A0000000041010A50F500D434849502042617365203031";
 
-    /** One-shot flag for the payment-role prompt. */
+    // ---------- profiles ----------
+
+    /**
+     * The one dump that matches the reference log. Typing this PAN fills the
+     * expiry, service code and discretionary data straight out of the dump.
+     */
+    private static final String KNOWN_PAN = "5287250568943496";
+
+    /**
+     * Per-network profile: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
+     *
+     * AIP 5800 on every one - EMV mode, CVM supported, terminal risk management,
+     * no ODA bits. IAD is the reference card's own, 17 bytes, with only the
+     * institution digit changed per network. ATC 001C is only a starting point -
+     * the service climbs it per tap and owns it after that.
+     *
+     * This table is the MainActivity half. ShadowApduService holds the matching
+     * half - the directory, the FCI and the GPO - keyed on the same PAN prefix,
+     * so the two cannot be set independently.
+     */
+    private static final String[] PROFILE_MASTERCARD = {
+            "MASTERCARD", "A0000000041010", "5800",
+            "0110A000092400000102000000000000FF", "001C" };
+    private static final String[] PROFILE_VISA = {
+            "VISA", "A0000000031010", "5800",
+            "0110A000032400000102000000000000FF", "001C" };
+    private static final String[] PROFILE_AMEX = {
+            "AMEX", "A00000002501", "5800",
+            "0110A000252400000102000000000000FF", "001C" };
+    private static final String[] PROFILE_DISCOVER = {
+            "DISCOVER", "A0000001523010", "5800",
+            "0110A000152400000102000000000000FF", "001C" };
+    private static final String[] PROFILE_JCB = {
+            "JCB", "A0000000651010", "5800",
+            "0110A000652400000102000000000000FF", "001C" };
+    private static final String[] PROFILE_UNIONPAY = {
+            "UNIONPAY", "A000000333010101", "5800",
+            "0110A000332400000102000000000000FF", "001C" };
+
     private static final String ASKED_DEFAULT = "asked_default";
 
     private static final String[][] VARIANTS = {
@@ -156,6 +161,9 @@ public class MainActivity extends AppCompatActivity {
     private int current = 0;
     private boolean binding = false;
     private boolean suppressResumeStatus = false;
+
+    /** Network already applied, so the profile does not re-fire on every key. */
+    private String appliedProfile = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -281,7 +289,9 @@ public class MainActivity extends AppCompatActivity {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
             public void afterTextChanged(Editable s) {
-                if (!binding) autoFill();
+                if (binding) return;
+                autoFill();
+                maybeProfile();
             }
         };
         etTrack2.addTextChangedListener(filler);
@@ -355,6 +365,101 @@ public class MainActivity extends AppCompatActivity {
                 (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         if (im != null) im.hideSoftInputFromWindow(v.getWindowToken(), 0);
         v.clearFocus();
+    }
+
+    // ---------- network profiles ----------
+
+    /** Which network a PAN belongs to, from its prefix. Empty when too short. */
+    private static String profileFor(String pan) {
+        if (pan == null || pan.length() < 4) return "";
+        if (pan.startsWith("4")) return "VISA";
+        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
+        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
+        if (pan.startsWith("35")) return "JCB";
+        if (pan.startsWith("62")) return "UNIONPAY";
+        if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
+        return "";
+    }
+
+    private static String[] profileFields(String net) {
+        switch (net) {
+            case "VISA":       return PROFILE_VISA;
+            case "AMEX":       return PROFILE_AMEX;
+            case "DISCOVER":   return PROFILE_DISCOVER;
+            case "JCB":        return PROFILE_JCB;
+            case "UNIONPAY":   return PROFILE_UNIONPAY;
+            case "MASTERCARD": return PROFILE_MASTERCARD;
+            default:           return null;
+        }
+    }
+
+    /**
+     * Fire the profile once per network change.
+     *
+     * Guarded on appliedProfile so typing digit seven of a PAN does not wipe a
+     * capture six times, and reset in bindCard so switching cards re-arms it.
+     */
+    private void maybeProfile() {
+        if (binding) return;
+        String pan = digits(t(etPan));
+        if (pan.length() < 4) {
+            appliedProfile = "";
+            return;
+        }
+        String net = profileFor(pan);
+        if (net.isEmpty() || net.equals(appliedProfile)) return;
+        applyProfile(pan, net);
+    }
+
+    /**
+     * Put the whole card in place from the number alone.
+     *
+     * Every field the terminal reads comes from the profile, the script box is
+     * blanked so the service's matching profile runs instead of a stale replay,
+     * and the capture is wiped so an old PPSE or GPO cannot get in front of it.
+     *
+     * For the one dump that has a reference log, the expiry, service code and
+     * discretionary data come out of the dump itself rather than the profile.
+     *
+     * The ATC is only written when the box is empty. The service climbs it once
+     * per tap and owns it after that, so rewriting it here on every load would
+     * drop the counter back to 001C and send a lower ATC than the last tap.
+     */
+    private void applyProfile(String pan, String net) {
+        String[] f = profileFields(net);
+        if (f == null) return;
+
+        appliedProfile = net;
+
+        binding = true;
+        etLabel.setText(f[0]);
+        etAid.setText(f[1]);
+        etAip.setText(f[2]);
+        etIad.setText(f[3]);
+        if (t(etAtc).isEmpty()) etAtc.setText(f[4]);
+        etMsd.setText("0");
+        etAfl.setText("");
+        etCid.setText("");
+        etScript.setText("");
+
+        if (KNOWN_PAN.equals(pan)) {
+            etExpiry.setText("3105");
+            etService.setText("201");
+            etDiscretionary.setText("14129745");
+            etTrack2.setText(pan + "D310520114129745");
+        } else if (t(etExpiry).isEmpty()) {
+            etExpiry.setText("3112");
+            etService.setText("201");
+        }
+        binding = false;
+
+        wipeCapture(current);
+
+        collect();
+        adapter.notifyItemChanged(current);
+        status("Profile " + net + " loaded - directory, FCI, GPO and record all in place,"
+                + " script box blank so the profile runs");
+        Toast.makeText(this, net + " profile loaded", Toast.LENGTH_SHORT).show();
     }
 
     // ---------- BIN hints ----------
@@ -585,6 +690,7 @@ public class MainActivity extends AppCompatActivity {
     private void bindCard(int i) {
         binding = true;
         current = i;
+        appliedProfile = "";
         etLabel.setText(prefs.getString(key(i, "label"), ""));
         etName.setText(prefs.getString(key(i, "name"), ""));
         etPan.setText(prefs.getString(key(i, "pan"), ""));
@@ -620,6 +726,7 @@ public class MainActivity extends AppCompatActivity {
         updateCount();
         status("");
         autoFill();
+        maybeProfile();
     }
 
     private void updateCount() {
@@ -665,6 +772,7 @@ public class MainActivity extends AppCompatActivity {
         String disc = t(etDiscretionary).toUpperCase();
         String aid = t(etAid).toUpperCase();
         String msd = t(etMsd).isEmpty() ? "0" : t(etMsd);
+        String net = profileFor(pan);
 
         String track2 = normaliseTrack2(t(etTrack2));
         if (track2.isEmpty() && !pan.isEmpty()) {
@@ -672,13 +780,16 @@ public class MainActivity extends AppCompatActivity {
         }
 
         StringBuilder sb = new StringBuilder();
+        sb.append("profile    : ").append(net.isEmpty()
+                ? "(none - no network recognised)" : net + "  (directory, FCI and GPO)").append('\n');
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
                 .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
         sb.append("CID        : ")
-                .append(t(etCid).isEmpty() ? "(empty - logic decides: TC offline, ARQC only if a key)"
+                .append(t(etCid).isEmpty() ? "40 from the profile - TC, approve offline"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
+        sb.append("ATC        : live - climbs once per tap, script carries it\n");
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
         sb.append("MAC variant: ").append(prefs.getString(key(current, "keyvar"), "0")).append('\n');
@@ -718,21 +829,22 @@ public class MainActivity extends AppCompatActivity {
                         : t(etCvmlist).toUpperCase())
                 .append('\n');
         sb.append("CVM result : ")
-                .append(t(etCvmres).isEmpty() ? "1F0300" : t(etCvmres).toUpperCase())
+                .append(t(etCvmres).isEmpty() ? "1F0302" : t(etCvmres).toUpperCase())
                 .append('\n');
-        sb.append("9F07/9F08  : FFC0 / 0002  (written by SEED RECORDS)\n");
-        sb.append("PPSE / FCI : the plastic's own, replayed by SEED RECORDS\n");
+        sb.append("9F07/9F08  : FFC0 / 0002  (built into the record)\n");
+        sb.append("record     : synthetic SFI 1 rec 1, built from these fields\n");
 
         if (t(etCvmlist).toUpperCase().startsWith("1E")) {
             sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
                     + " so nothing can collect a PIN\n");
-            sb.append("   blank the CVM box and seed again\n");
+            sb.append("   blank the CVM box\n");
         }
 
         String script = t(etScript);
         int scriptLines = armedLines(script);
-        sb.append("script     : ").append(scriptLines == 0
-                ? "(none - service constant is used)" : scriptLines + " line(s) armed").append('\n');
+        sb.append("script box : ").append(scriptLines == 0
+                ? "blank - the " + (net.isEmpty() ? "default" : net) + " profile runs"
+                : scriptLines + " line(s) - these OVERRIDE the profile").append('\n');
 
         String trackPan = track2.contains("D")
                 ? track2.substring(0, track2.indexOf("D")) : "";
@@ -757,28 +869,26 @@ public class MainActivity extends AppCompatActivity {
         new AlertDialog.Builder(this)
                 .setTitle("What the terminal will see")
                 .setMessage(previewText())
-                .setPositiveButton("SEED RECORDS", (d, w) -> seedRecords())
-                .setNeutralButton("CLEAR CAPTURE", (d, w) -> clearCapture())
+                .setPositiveButton("CLEAR CAPTURE", (d, w) -> clearCapture())
                 .setNegativeButton("Close", null)
                 .show();
     }
 
-    // ---------- capture: clear and seed ----------
+    // ---------- capture: clear ----------
 
     private void clearCapture() {
         final int i = current;
         new AlertDialog.Builder(this)
                 .setTitle("Clear the capture for card " + (i + 1) + "?")
-                .setMessage("Removes the captured PPSE, FCI, GPO and records, plus the "
-                        + "captured AID and label, and resets MSD to 0.\n\n"
-                        + "The PAN, expiry, name and AID fields stay.")
+                .setMessage("Removes any captured PPSE, FCI, GPO and records. The profile"
+                        + " still serves the directory, FCI and GPO, so the card keeps working.")
                 .setPositiveButton("Clear", (d, w) -> {
                     wipeCapture(i);
                     binding = true;
                     etMsd.setText("0");
                     binding = false;
                     collect();
-                    status("Capture cleared - MSD reset to 0, re-read or seed before tapping");
+                    status("Capture cleared - the profile still runs");
                     Toast.makeText(this, "Capture cleared", Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("Cancel", null)
@@ -793,148 +903,6 @@ public class MainActivity extends AppCompatActivity {
         }
         e.putInt(key(i, "msd"), 0);
         e.apply();
-    }
-
-    /**
-     * Build a usable capture out of the typed fields, with no plastic and no
-     * reader.
-     *
-     * A card that only works after a successful read is a card that dies with
-     * the reader. This writes the two things select() and gpo() actually need -
-     * a directory and an SFI 1 record carrying the PAN, track 2 and the CDOLs -
-     * and clears any stale FCI and GPO so the built GPO path is the one that
-     * runs.
-     *
-     * The directory and the FCI are NOT invented: they are the plastic's own,
-     * taken off the card in the reader log and replayed verbatim from REAL_PPSE
-     * and REAL_FCI. That buys the real label, the second applet, the absence of
-     * 9F38, and a GPO payload shaped like the real card's. It also means
-     * buildPpse()'s generated branch never runs on a seeded card.
-     *
-     * The AFL is deliberately NOT the real one. The plastic lists six records
-     * over SFI 1-4 and readRecord() only synthesizes SFI 1, so a real AFL would
-     * draw 6A83 on SFI 2. The derived single-entry AFL is self-consistent.
-     *
-     * MSD is forced to 0 because the built path frames a 77 template; a leftover
-     * 1 would make gpo() look for an 80 framing that no longer exists.
-     *
-     * The record takes the CDOLs and CVM list from the boxes on screen when they
-     * are filled, so a seeded card and the service cannot drift apart.
-     *
-     * 9F07 (AUC), 9F08 (application version), 9F42 (currency), 5F28 (country)
-     * and the 9F0D/9F0E/9F0F CIAC triplet go in unconditionally, and the tag
-     * order mirrors syntheticRecord() in the service tag for tag. The CIACs are
-     * the values lifted off the sample Mastercard logfile; without them the
-     * kernel has nothing to compare the TVR against, which is the exact gap
-     * syntheticRecord() was once fixed to close. 9F07 is FFC0 - goods, services
-     * and cash, domestic and international. FF00 would have blocked
-     * international use.
-     */
-    private void seedRecords() {
-        final int i = current;
-        final String pan = digits(t(etPan));
-        final String aid = t(etAid).toUpperCase();
-
-        if (pan.length() < 12 || pan.length() > 19) {
-            Toast.makeText(this, "Fill a valid PAN first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        if (aid.isEmpty() || !routable(aid)) {
-            Toast.makeText(this, "Fill a routable AID first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        new AlertDialog.Builder(this)
-                .setTitle("Seed records for card " + (i + 1) + "?")
-                .setMessage("Builds a record and a directory from the fields on "
-                        + "screen, so this card can be tapped without reading a plastic.\n\n"
-                        + "The directory and FCI are the real card's, replayed. The record is "
-                        + "synthetic - the real card's records are not in it.")
-                .setPositiveButton("Seed", (d, w) -> {
-                    String exp = digits(t(etExpiry));
-                    if (exp.length() != 4) exp = "3112";
-                    String svc = digits(t(etService));
-                    if (svc.length() != 3) svc = "201";
-                    String disc = digits(t(etDiscretionary));
-                    String name = t(etName).toUpperCase()
-                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                    if (name.length() > 26) name = name.substring(0, 26);
-
-                    String track2 = pan + "D" + exp + svc + disc;
-
-                    String cdol1 = t(etCdol1).isEmpty() ? CDOL1 : t(etCdol1).toUpperCase();
-                    String cdol2 = t(etCdol2).isEmpty() ? CDOL2 : t(etCdol2).toUpperCase();
-                    String cvm = t(etCvmlist).isEmpty() ? CVMLIST : t(etCvmlist).toUpperCase();
-
-                    StringBuilder rec = new StringBuilder();
-                    rec.append(tlvHex(0x9F42, "0840"));
-                    rec.append(tlvHex(0x5F24, exp + "01"));
-                    rec.append(tlvHex(0x5A, pan));
-                    rec.append(tlvHex(0x5F34, "01"));
-                    if (name.length() >= 2) {
-                        rec.append(tlvHex(0x5F20, bytesToHex(name.getBytes(StandardCharsets.ISO_8859_1))));
-                    }
-                    rec.append(tlvHex(0x9F07, "FFC0"));
-                    rec.append(tlvHex(0x9F08, "0002"));
-                    rec.append(tlvHex(0x8C, cdol1));
-                    rec.append(tlvHex(0x8D, cdol2));
-                    rec.append(tlvHex(0x8E, cvm));
-                    rec.append(tlvHex(0x9F0D, "B450840000"));
-                    rec.append(tlvHex(0x9F0E, "0000000000"));
-                    rec.append(tlvHex(0x9F0F, "B470848000"));
-                    rec.append(tlvHex(0x5F28, "0840"));
-                    rec.append(tlvHex(0x57, track2));
-                    String record = tlvHex(0x70, rec.toString());
-
-                    String label = t(etLabel).toUpperCase()
-                            .replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                    if (label.length() < 2) label = "CARD";
-                    if (label.length() > 16) label = label.substring(0, 16);
-
-                    wipeCapture(i);
-
-                    SharedPreferences.Editor e = prefs.edit();
-                    e.putString(key(i, "cap_rawppse"), REAL_PPSE);
-                    e.putString(key(i, "cap_rawfci"), REAL_FCI);
-                    e.putString(key(i, "cap_rec1_1"), record);
-                    e.putString(key(i, "cap_aid"), aid);
-                    e.putString(key(i, "cap_label"), label);
-                    if (name.length() >= 2) e.putString(key(i, "cap_holder"), name);
-                    e.putInt(key(i, "msd"), 0);
-                    e.apply();
-
-                    binding = true;
-                    etMsd.setText("0");
-                    etAfl.setText("");
-                    etCid.setText("");
-                    binding = false;
-                    collect();
-
-                    if (cvm.startsWith("1E")) {
-                        status("Seeded - but the CVM list is still ONLINE PIN (" + cvm
-                                + "). Blank the CVM box and seed again.");
-                    } else {
-                        status("Seeded 1 record + real directory for " + aid
-                                + " - cvm " + cvm + ", MSD 0, tap it");
-                    }
-                    Toast.makeText(this, "Seeded - long-press the card count to inspect",
-                            Toast.LENGTH_LONG).show();
-                    showPage(0);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    /** TLV as hex, with proper long-form lengths. */
-    private static String tlvHex(int tag, String hexValue) {
-        byte[] v = hexToBytes(hexValue);
-        String tagH = tag > 0xFF ? String.format("%04X", tag) : String.format("%02X", tag);
-        int n = v.length;
-        String len;
-        if (n < 0x80) len = String.format("%02X", n);
-        else if (n <= 0xFF) len = "81" + String.format("%02X", n);
-        else len = "82" + String.format("%04X", n);
-        return tagH + len + bytesToHex(v);
     }
 
     private static String hexOf(String s) {
@@ -1299,6 +1267,8 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        maybeProfile();
+
         String[] hints = BankDirectory.hintsFor(digits(t(etPan)));
         if (hints != null) {
             if (t(etLabel).isEmpty()) etLabel.setText(hints[1]);
@@ -1476,15 +1446,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- payment role ----------
 
-    /**
-     * Foreground boost. While this activity is resumed our AIDs win the
-     * arbitration even if we are not the default payment app - which is what
-     * makes tapping with the app open work without touching settings.
-     *
-     * It is released in onPause, so it does NOT cover a tap with the app closed,
-     * the screen locked, or another app in front. That is what promptDefault()
-     * is for.
-     */
     private void claimPaymentRole() {
         try {
             NfcManager mgr = (NfcManager) getSystemService(NFC_SERVICE);
@@ -1519,7 +1480,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Ask the system to make us the default payment service. */
     private void promptDefault() {
         try {
             Intent i = new Intent(CardEmulation.ACTION_CHANGE_DEFAULT);
@@ -1534,11 +1494,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Show the banner whenever we are not the default, and fire the system
-     * dialog once. The banner stays after the one-shot so there is always a way
-     * back in.
-     */
     private void maybeAskDefault() {
         boolean isDefault = isDefaultPayment();
 
@@ -1647,6 +1602,8 @@ public class MainActivity extends AppCompatActivity {
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
         etAfl.setText("");
         etCid.setText("");
+        etScript.setText("");
+        appliedProfile = profileFor(pan);
         binding = false;
 
         collect();
