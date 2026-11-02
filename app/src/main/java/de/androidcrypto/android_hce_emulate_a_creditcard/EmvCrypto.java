@@ -39,20 +39,13 @@ public class EmvCrypto {
     /**
      * IMK-AC -> MK-AC -> SK-AC, BOTH stages, per EMV Book 2 A1.3.1 and A1.4.
      *
-     * The old version collapsed the two stages into one 16-byte DES3 under the
-     * IMK and put the ATC block where MK-AC's right half belongs, so MK-AC was
-     * never formed and the second half was encrypted under the wrong key. It
-     * also wrote F0 into all six trailing bytes instead of F0 then five zeros,
-     * and never emitted the 0F variant at all. The result was a plausible but
-     * wrong session key - invisible with no MK-AC set, fatal the moment one is.
-     *
      * Stage 1 diversifies the IMK by the card: D_L is the rightmost 16 digits of
      * PAN||PSN as packed BCD, D_R is its bitwise inverse, and MK-AC is the two
-     * DES3 results concatenated.
+     * DES3 results concatenated. Stage 2 diversifies MK-AC by the ATC, with the
+     * blocks ATC || F0 || five zeros and ATC || 0F || five zeros.
      *
-     * Stage 2 diversifies MK-AC by the ATC. The two blocks are
-     * ATC || F0 || five zeros and ATC || 0F || five zeros. The marker sits at
-     * byte 3, directly after the ATC - not at the end.
+     * The old version did one DES3 under the IMK and put the ATC block where
+     * MK-AC's right half belongs, so MK-AC was never formed.
      *
      * option 0 = derivation data PAN || PSN
      * option 1 = derivation data PAN || PSN || PAN
