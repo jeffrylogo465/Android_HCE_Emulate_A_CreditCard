@@ -3,18 +3,24 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 /**
  * Visa.
  *
- * CONSTRUCTED, not replayed - there is no Visa dump behind this. The directory
- * and FCI are built around the card's own AID, one applet, label only, no 9F38,
- * so the terminal sends a PDOL-free GPO. The GPO is the same shape as the
- * Mastercard one with the institution digit in the IAD changed to 03.
+ * CONSTRUCTED, not replayed - there is no Visa dump behind this.
  *
- * This is a first approximation and it will probably need the real Visa tags -
- * 9F66, 9F6E, 9F6D - adding once a tap shows where the kernel objects. Expect
- * to edit this file, not the service.
+ * The IAD is a real VIS shape: inner length 06, DKI 01, CVN 12, 4-byte CVR all
+ * zero. It used to be the 17-byte M/Chip block with the institution digit
+ * swapped, which was wrong on both the shape and the length.
+ *
+ * The GPO carries a CTQ, which qVSDC needs and Kernel 2 doesn't have.
+ *
+ * WHAT THIS CANNOT DO: a qVSDC kernel treats a TC from a card with no DDA bit
+ * as a failed offline authentication - it has no TVR/TAC path to fall back on.
+ * With a zero ARQC the CTQ's b6 goes online and the issuer declines. So a Visa
+ * TC here can never approve until a real MK-AC exists; the profile is for
+ * completeness and for reading logs, not for a receipt.
  */
 public final class ProfileVisa implements CardProfile {
 
-    private static final String IAD = "0110A000032400000102000000000000FF";
+    /** VIS IAD: inner length 06, DKI 01, CVN 12, CVR 00000000. */
+    private static final String IAD = "06011200000000";
 
     @Override public String name() { return "VISA"; }
 
@@ -39,6 +45,6 @@ public final class ProfileVisa implements CardProfile {
     }
 
     @Override public String gpo(String atc, String arqc) {
-        return Profiles.gpo(IAD, atc, arqc);
+        return Profiles.gpoVisa(IAD, atc, arqc);
     }
 }
