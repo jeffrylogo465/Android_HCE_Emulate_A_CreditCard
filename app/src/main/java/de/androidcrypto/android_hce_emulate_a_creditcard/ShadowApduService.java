@@ -42,8 +42,11 @@ public class ShadowApduService extends HostApduService {
      *
      * Byte 1 is the DKI, byte 2 is the CVN. 0x10 is CVN 16 - Mastercard
      * Proprietary SKD - which is what the reference card declares and what
-     * cvn() reads to pick the session-key scheme. A default of 01 would read
-     * as CVN 1 and silently change the derivation.
+     * cvn() reads to pick the session-key scheme. A default whose byte 2 was
+     * 01 read as CVN 1 and silently changed the derivation.
+     *
+     * The typed IAD from the card overrides this, and the MAC input uses
+     * whichever is in force, because the IAD is part of what the issuer MACs.
      */
     private static final String DEFAULT_IAD = "06010A03A00000";
 
@@ -326,7 +329,7 @@ public class ShadowApduService extends HostApduService {
         return a;
     }
 
-    /** IAD in force, captured first, then typed, then the default. */
+    /** IAD in force: captured first, then typed, then the default. */
     private String iadHex() {
         return (capturedIad == null) ? p("iad", DEFAULT_IAD) : bytesToHex(capturedIad);
     }
@@ -1227,15 +1230,16 @@ public class ShadowApduService extends HostApduService {
      * The IAD carries the CVN, so it belongs in the input by construction -
      * without it every MAC input was short by the whole IAD.
      *
-     * SKD uses the key straight, so the vector (MK, ATC, UN) reproduces with
-     * only those three inputs. CSK goes through cardKey first, as EMV requires.
+     * The session key scheme follows the CVN: 16/17 are SKD and take the UN,
+     * 20/21 are CSK and do not. Using the wrong one produces a wrong ARQC from
+     * a correct key, so the branch is on the value the card itself declares.
      */
     private byte[] computeAc(String atc, byte[] cdol) {
         if (!haveKey()) {
             tap("!! no valid IMK-AC set - ARQC will be all zeros");
             return new byte[8];
         }
-        byte[] mk = hex(p("mkac", ""));
+        String mk = p("mkac", "").replaceAll("[^0-9A-Fa-f]", "");
 
         int variant = 0;
         try {
@@ -1257,16 +1261,18 @@ public class ShadowApduService extends HostApduService {
                     ? cat(aipForMac(), hex(atc), iad, cdol)
                     : cat(cdol, aipForMac(), hex(atc), iad);
 
+            byte[] un = unOf(cdol);
+
             byte[] sk = csk
-                    ? EmvCrypto.sessionKeyCsk(EmvCrypto.cardKey(mk, pan(), psn()), hex(atc))
-                    : EmvCrypto.sessionKeySkd(mk, hex(atc), unOf(cdol));
+                    ? EmvCrypto.sessionKeyAc(mk, pan(), psn(), atc, variant & 1)
+                    : EmvCrypto.sessionKeySkd(mk, pan(), psn(), atc, un, variant & 1);
 
             tap("-- key cvn=" + (cvn < 0 ? "?" : String.valueOf(cvn))
                     + (csk ? " CSK" : " SKD") + " variant=" + variant
                     + " sk=" + bytesToHex(sk));
             tap("-- macIn " + bytesToHex(macIn));
 
-            return EmvCrypto.arqc(sk, macIn);
+            return EmvCrypto.mac(sk, macIn);
         } catch (Exception e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
