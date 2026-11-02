@@ -69,13 +69,18 @@ public class MainActivity extends AppCompatActivity {
      * The PPSE carries TWO applets - Mastercard A0000000041010 at priority 01
      * and Maestro A0000000043060 at priority 02 - with their labels and no 9F2A.
      * The FCI carries no 9F38 at all, so the terminal sends 8300 like it did on
-     * the real card, and its label is MCHIP Base 01.
+     * the real card, and its label is CHIP Base 01.
      *
      * The lengths are the ones the card and the log both carry, byte for byte.
      * An earlier revision "corrected" them - A533/6F45 and 6F1B/A510/500E - and
      * was wrong on all three. A working receipt off the same data is what settled
      * it: the PPSE's A5 content is 52 bytes because the second 61 entry is
      * counted twice over, and the FCI's label is 13 bytes, not 14.
+     *
+     * FIX: REAL_FCI carried "MCHIP Base 01" - 14 characters - under a 500D
+     * length, so the TLV was one byte long and the trailing '1' fell outside it.
+     * The card's label is "CHIP Base 01", 13 characters, which is what 500D and
+     * the enclosing A50F and 6F1A all agree with.
      *
      * NOTE: a captured PPSE is served verbatim, so this bypasses buildPpse()'s
      * generated branch entirely - and PPSE_MINIMAL with it.
@@ -85,7 +90,7 @@ public class MainActivity extends AppCompatActivity {
           + "61154F07A000000004306050074D41455354524F870102";
 
     private static final String REAL_FCI =
-            "6F1A8407A0000000041010A50F500D4D434849502042617365203031";
+            "6F1A8407A0000000041010A50F500D434849502042617365203031";
 
     /** One-shot flag for the payment-role prompt. */
     private static final String ASKED_DEFAULT = "asked_default";
@@ -588,7 +593,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "1080"));
+        etAip.setText(prefs.getString(key(i, "aip"), "5800"));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
         etCid.setText(prefs.getString(key(i, "cid"), ""));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
@@ -670,7 +675,7 @@ public class MainActivity extends AppCompatActivity {
         sb.append("AID  (4F)  : ")
                 .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
-                .append(t(etAip).isEmpty() ? "1080" : t(etAip).toUpperCase()).append('\n');
+                .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
         sb.append("CID        : ")
                 .append(t(etCid).isEmpty() ? "(empty - logic decides: TC offline, ARQC only if a key)"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
