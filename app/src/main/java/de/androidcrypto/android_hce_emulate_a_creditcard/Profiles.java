@@ -17,6 +17,29 @@ public final class Profiles {
 
     private static final String PPSE = "325041592E5359532E4444463031";
 
+    /**
+     * Visa CTQ (9F6C) as sent by the card.
+     *
+     * 30 = b6 + b5: go online if ODA fails, switch interface if ODA fails.
+     * 80 in byte 2 = Consumer Device CVM performed - correct for a phone, and
+     * it satisfies a CVM demand without PIN or signature.
+     *
+     * Why it matters: with no CTQ the kernel treats every bit as zero, and zero
+     * means no permission to go online and no permission to switch interface,
+     * so a failed authentication becomes a silent offline decline.
+     *
+     * Neither fallback reaches an approval while the ARQC is zeros - b6 leads
+     * to an online decline and b5 to "insert card". They only convert a hard
+     * local decline into a classified one.
+     *
+     * VISA ONLY. In Mastercard Kernel 2 the same tag is the Mag-stripe
+     * Application Version Number - a 2-byte version with no qualifier bits -
+     * so sending this value on a Mastercard GPO is nonsense. Kernel 2 has no
+     * CTQ at all: offline authentication is CDA tied to GENERATE AC and the
+     * TAC/IAC pair decides from the TVR.
+     */
+    private static final String CTQ_VISA = "9F6C023080";
+
     private static final CardProfile[] ALL = {
             new ProfileMastercard(),
             new ProfileVisa(),
@@ -108,11 +131,11 @@ public final class Profiles {
     }
 
     /**
-     * The GPO line.
+     * The GPO line, Kernel 2 shape: no 9F6C.
      *
-     * AIP 5800, one AFL entry over SFI 1 rec 1, the ARQC, CID 40, the live ATC,
-     * the network's IAD, and a CTQ. Both lengths are computed from the body, so
-     * neither can ever disagree with the bytes it covers.
+     * AIP 5800, one AFL entry over SFI 1 rec 1, the ARQC, CID 40, the live ATC
+     * and the network's IAD. The 77 length is computed from the body, so it can
+     * never disagree with the bytes it covers.
      *
      * CID 40 means approve offline, so the ARQC is never checked - which is why
      * eight zero bytes are fine when no issuer key is set.
@@ -123,28 +146,26 @@ public final class Profiles {
      * wrong TLV length desynchronises the kernel's parser and kills the
      * transaction outright.
      *
-     * WHY 9F6C IS HERE AT ALL: with no CTQ the kernel treats every fallback bit
-     * as zero, and zero means "no permission to go online, no permission to
-     * switch interface" - so a failed authentication is a silent offline
-     * decline. 0x30 is b6 + b5: go online if ODA fails, switch interface if ODA
-     * fails. The 0x80 in byte 2 is Consumer Device CVM performed, which is
-     * correct for a phone and satisfies a CVM demand without PIN or signature.
-     *
-     * Neither fallback reaches an approval while the ARQC is zeros - b6 leads
-     * to an online decline and b5 to "insert card". They only convert a hard
-     * local decline into a classified one.
-     *
-     * 55 bytes of body, 0x37: 82/5800, 94/08010100, 9F26/8, 9F27/40,
-     * 9F36/<atc>, 9F10/<len>, 9F6C/3080.
+     * 50 bytes of body, 0x32: 82/5800, 94/08010100, 9F26/8, 9F27/40,
+     * 9F36/<atc>, 9F10/<len>.
      */
     static String gpo(String iad, String atc, String arqc) {
+        return gpo(iad, atc, arqc, "");
+    }
+
+    /** The same body plus a Visa CTQ. See CTQ_VISA. */
+    static String gpoVisa(String iad, String atc, String arqc) {
+        return gpo(iad, atc, arqc, CTQ_VISA);
+    }
+
+    private static String gpo(String iad, String atc, String arqc, String extra) {
         String body = "82025800"
                 + "940408010100"
                 + "9F2608" + arqc
                 + "9F270140"
                 + "9F3602" + atc
                 + "9F10" + String.format("%02X", iad.length() / 2) + iad
-                + "9F6C023080";
+                + extra;
         return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
     }
 
