@@ -3,14 +3,17 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 /**
  * Mastercard, replayed from the reference card.
  *
- * The directory, the FCI and the second applet are the plastic's own, lifted off
- * it in the reader log byte for byte. That pair is proven on a till and the
- * Maestro entry stops a second SELECT from falling through to a generated FCI
- * that would carry 9F2A and a 9F38 PDOL.
+ * The directory, the FCI and the second applet are the plastic's own, lifted
+ * off it in the reader log byte for byte. The Maestro entry stops a second
+ * SELECT from falling through to a generated FCI that would carry 9F2A and a
+ * 9F38 PDOL.
  *
  * The FCI deliberately has no 9F38, so the terminal sends a PDOL-free GPO.
  * The label is "CHIP Base 01", 13 characters, which is what the 500D, the A50F
  * and the 6F1A around it all agree with.
+ *
+ * The GPO is AIP + AFL only - see Profiles.gpoMastercard. The AC comes later,
+ * in GENERATE AC.
  */
 public final class ProfileMastercard implements CardProfile {
 
@@ -23,9 +26,6 @@ public final class ProfileMastercard implements CardProfile {
 
     private static final String MAESTRO_FCI =
             "6F1A8407A0000000043060A50F500D434849502042617365203031";
-
-    /** The reference card's own IAD. */
-    private static final String IAD = "0110A000092400000102000000000000FF";
 
     @Override public String name() { return "MASTERCARD"; }
 
@@ -52,6 +52,6 @@ public final class ProfileMastercard implements CardProfile {
     }
 
     @Override public String gpo(String atc, String arqc) {
-        return Profiles.gpo(IAD, atc, arqc);
+        return Profiles.gpoMastercard(atc, arqc);
     }
 }
