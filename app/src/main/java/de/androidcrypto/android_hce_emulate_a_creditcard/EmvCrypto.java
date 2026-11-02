@@ -37,21 +37,16 @@ public class EmvCrypto {
     }
 
     /**
-     * IMK-AC -> MK-AC -> SK-AC, BOTH stages, per EMV Book 2 A1.3.1 and A1.4.
+     * Stage 1: IMK-AC -> MK-AC, EMV Book 2 A1.4 Option A.
      *
-     * Stage 1 diversifies the IMK by the card: D_L is the rightmost 16 digits of
-     * PAN||PSN as packed BCD, D_R is its bitwise inverse, and MK-AC is the two
-     * DES3 results concatenated. Stage 2 diversifies MK-AC by the ATC, with the
-     * blocks ATC || F0 || five zeros and ATC || 0F || five zeros.
-     *
-     * The old version did one DES3 under the IMK and put the ATC block where
-     * MK-AC's right half belongs, so MK-AC was never formed.
+     * D_L is the rightmost 16 digits of PAN||PSN as packed BCD, D_R is its
+     * bitwise inverse, and MK-AC is the two DES3 results concatenated.
      *
      * option 0 = derivation data PAN || PSN
      * option 1 = derivation data PAN || PSN || PAN
      */
-    static byte[] sessionKeyAc(String imkHex, String pan, String panSeq,
-                               String atcHex, int option) throws Exception {
+    private static byte[] cardKey(String imkHex, String pan, String panSeq, int option)
+            throws Exception {
         byte[] imk = Hex.hex(imkHex);
 
         byte[] z = (option == 1)
@@ -67,6 +62,17 @@ public class EmvCrypto {
 
         byte[] mk = Tlv.cat(des3(imk, dl), des3(imk, dr));
         oddParity(mk);
+        return mk;
+    }
+
+    /**
+     * Stage 2, EMV CSK (Book 2 A1.3.1). Used by CVN 20 and 21.
+     *
+     * Blocks are ATC || F0 || five zeros and ATC || 0F || five zeros.
+     */
+    static byte[] sessionKeyCsk(String imkHex, String pan, String panSeq,
+                                String atcHex, int option) throws Exception {
+        byte[] mk = cardKey(imkHex, pan, panSeq, option);
 
         byte[] atc = Hex.hex(atcHex);
         byte[] bl = new byte[8];
@@ -83,9 +89,34 @@ public class EmvCrypto {
         return sk;
     }
 
-    static byte[] sessionKeyAc(String imkHex, String pan, String panSeq, String atcHex)
-            throws Exception {
-        return sessionKeyAc(imkHex, pan, panSeq, atcHex, 0);
+    /**
+     * Stage 2, Mastercard Proprietary SKD. Used by CVN 16 and 17.
+     *
+     * Blocks are ATC || F0 || 00 || UN and ATC || 0F || 00 || UN - the
+     * unpredictable number replaces the zero padding of CSK. The UN is the
+     * terminal's 9F37 from the CDOL data, four bytes, so each block is exactly
+     * eight and no ISO 9797 padding is involved.
+     */
+    static byte[] sessionKeySkd(String imkHex, String pan, String panSeq,
+                                String atcHex, byte[] un, int option) throws Exception {
+        if (un == null || un.length != 4) throw new IllegalArgumentException("UN must be 4 bytes");
+        byte[] mk = cardKey(imkHex, pan, panSeq, option);
+
+        byte[] atc = Hex.hex(atcHex);
+        byte[] rl = new byte[8];
+        byte[] rr = new byte[8];
+        rl[0] = atc[0];
+        rl[1] = atc[1];
+        rl[2] = (byte) 0xF0;
+        rr[0] = atc[0];
+        rr[1] = atc[1];
+        rr[2] = (byte) 0x0F;
+        System.arraycopy(un, 0, rl, 4, 4);
+        System.arraycopy(un, 0, rr, 4, 4);
+
+        byte[] sk = Tlv.cat(des3(mk, rl), des3(mk, rr));
+        oddParity(sk);
+        return sk;
     }
 
     /** ISO 9797-1 MAC Algorithm 3, padding method 2. This was already correct. */
@@ -106,12 +137,12 @@ public class EmvCrypto {
 
     static byte[] arqc(String imkHex, String pan, String panSeq, String atcHex,
                        byte[] macInput, int option) throws Exception {
-        return mac(sessionKeyAc(imkHex, pan, panSeq, atcHex, option), macInput);
+        return mac(sessionKeyCsk(imkHex, pan, panSeq, atcHex, option), macInput);
     }
 
-    static byte[] arqc(String imkHex, String pan, String panSeq, String atcHex, byte[] macInput)
-            throws Exception {
-        return arqc(imkHex, pan, panSeq, atcHex, macInput, 0);
+    static byte[] arqcSkd(String imkHex, String pan, String panSeq, String atcHex,
+                          byte[] un, byte[] macInput, int option) throws Exception {
+        return mac(sessionKeySkd(imkHex, pan, panSeq, atcHex, un, option), macInput);
     }
 
     private EmvCrypto() {}
