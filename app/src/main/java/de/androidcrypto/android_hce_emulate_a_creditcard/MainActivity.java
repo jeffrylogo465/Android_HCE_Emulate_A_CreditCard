@@ -44,40 +44,20 @@ public class MainActivity extends AppCompatActivity {
     private static final int COL_WARM    = 0xFFF6C177;
     private static final int COL_STALE   = 0xFF6B7280;
 
-    /** Must match the service, or a seeded record and the ARQC MAC disagree. */
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     private static final String CVMLIST = "00000000000000001F03";
 
-    private static final String PPSE    = "325041592E5359532E4444463031";
-
-    private static final String REAL_PPSE =
-            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
-          + "61154F07A000000004306050074D41455354524F870102";
-
-    private static final String REAL_FCI =
-            "6F1A8407A0000000041010A50F500D434849502042617365203031";
-
-    // ---------- profiles ----------
-
-    /**
-     * The one dump that matches the reference log. Typing this PAN fills the
-     * expiry, service code and discretionary data straight out of the dump.
-     */
+    /** The one dump that matches the reference log. */
     private static final String KNOWN_PAN = "5287250568943496";
 
     /**
-     * Per-network profile: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
+     * Per-network field defaults: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
      *
-     * AIP 5800 on every one - EMV mode, CVM supported, terminal risk management,
-     * no ODA bits. IAD is the reference card's own, 17 bytes, with only the
-     * institution digit changed per network. ATC 001C is only a starting point -
-     * the service climbs it per tap and owns it after that.
-     *
-     * This table is the MainActivity half. ShadowApduService holds the matching
-     * half - the directory, the FCI and the GPO - keyed on the same PAN prefix,
-     * so the two cannot be set independently.
+     * Only the fields are here. The bytes the terminal actually sees live in
+     * ProfileMastercard and ProfileVisa, one file each, so this table and those
+     * files cannot drift into each other's way.
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "5800",
@@ -85,18 +65,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String[] PROFILE_VISA = {
             "VISA", "A0000000031010", "5800",
             "0110A000032400000102000000000000FF", "001C" };
-    private static final String[] PROFILE_AMEX = {
-            "AMEX", "A00000002501", "5800",
-            "0110A000252400000102000000000000FF", "001C" };
-    private static final String[] PROFILE_DISCOVER = {
-            "DISCOVER", "A0000001523010", "5800",
-            "0110A000152400000102000000000000FF", "001C" };
-    private static final String[] PROFILE_JCB = {
-            "JCB", "A0000000651010", "5800",
-            "0110A000652400000102000000000000FF", "001C" };
-    private static final String[] PROFILE_UNIONPAY = {
-            "UNIONPAY", "A000000333010101", "5800",
-            "0110A000332400000102000000000000FF", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -162,7 +130,6 @@ public class MainActivity extends AppCompatActivity {
     private boolean binding = false;
     private boolean suppressResumeStatus = false;
 
-    /** Network already applied, so the profile does not re-fire on every key. */
     private String appliedProfile = "";
 
     @Override
@@ -264,6 +231,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
+        etLabel.setOnLongClickListener(v -> { showProfilePicker(); return true; });
         etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
         navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
@@ -367,38 +335,65 @@ public class MainActivity extends AppCompatActivity {
         v.clearFocus();
     }
 
-    // ---------- network profiles ----------
+    // ---------- profiles ----------
 
-    /** Which network a PAN belongs to, from its prefix. Empty when too short. */
     private static String profileFor(String pan) {
         if (pan == null || pan.length() < 4) return "";
         if (pan.startsWith("4")) return "VISA";
-        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
-        if (pan.startsWith("6011") || pan.startsWith("65")) return "DISCOVER";
-        if (pan.startsWith("35")) return "JCB";
-        if (pan.startsWith("62")) return "UNIONPAY";
         if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
         return "";
     }
 
     private static String[] profileFields(String net) {
-        switch (net) {
-            case "VISA":       return PROFILE_VISA;
-            case "AMEX":       return PROFILE_AMEX;
-            case "DISCOVER":   return PROFILE_DISCOVER;
-            case "JCB":        return PROFILE_JCB;
-            case "UNIONPAY":   return PROFILE_UNIONPAY;
-            case "MASTERCARD": return PROFILE_MASTERCARD;
-            default:           return null;
-        }
+        if ("VISA".equals(net)) return PROFILE_VISA;
+        if ("MASTERCARD".equals(net)) return PROFILE_MASTERCARD;
+        return null;
+    }
+
+    /** The card's profile pref, or AUTO. */
+    private String profilePref() {
+        String v = prefs.getString(key(current, "profile"), Profiles.AUTO);
+        return v == null || v.isEmpty() ? Profiles.AUTO : v;
+    }
+
+    /** What the tap will actually run, resolved the same way the service does. */
+    private String effectiveProfile() {
+        String p = profilePref();
+        if (!Profiles.AUTO.equalsIgnoreCase(p)) return p.toUpperCase();
+        String net = profileFor(digits(t(etPan)));
+        return net.isEmpty() ? "MASTERCARD" : net;
     }
 
     /**
-     * Fire the profile once per network change.
-     *
-     * Guarded on appliedProfile so typing digit seven of a PAN does not wipe a
-     * capture six times, and reset in bindCard so switching cards re-arms it.
+     * The profile selector. AUTOMATICO is the default and reads the network off
+     * the PAN; picking a network pins it until you pick AUTOMATICO again.
      */
+    private void showProfilePicker() {
+        final String[] names = Profiles.names();
+        final String[] labels = new String[names.length];
+        for (int i = 0; i < names.length; i++) {
+            labels[i] = Profiles.AUTO.equals(names[i])
+                    ? "AUTOMATICO  (follow the card number)"
+                    : names[i];
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Script")
+                .setItems(labels, (d, which) -> {
+                    prefs.edit().putString(key(current, "profile"), names[which]).apply();
+                    if (Profiles.AUTO.equals(names[which])) {
+                        appliedProfile = "";
+                        maybeProfile();
+                        status("Script AUTOMATICO - the card number picks the network");
+                    } else {
+                        appliedProfile = names[which];
+                        applyProfile(digits(t(etPan)), names[which]);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void maybeProfile() {
         if (binding) return;
         String pan = digits(t(etPan));
@@ -412,24 +407,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Put the whole card in place from the number alone.
+     * Put the card in place from the number.
      *
-     * Every field the terminal reads comes from the profile, the script box is
-     * blanked so the service's matching profile runs instead of a stale replay,
+     * Only the FIELDS are written here. The directory, the FCI and the GPO come
+     * from the profile file the service picks off the same number, so there is
+     * one copy of the bytes and it lives in ProfileMastercard or ProfileVisa.
+     *
+     * The script box is blanked so the profile runs instead of a stale replay,
      * and the capture is wiped so an old PPSE or GPO cannot get in front of it.
      *
-     * For the one dump that has a reference log, the expiry, service code and
-     * discretionary data come out of the dump itself rather than the profile.
-     *
-     * The ATC is only written when the box is empty. The service climbs it once
-     * per tap and owns it after that, so rewriting it here on every load would
-     * drop the counter back to 001C and send a lower ATC than the last tap.
+     * The ATC is only written when the box is empty - the service climbs it once
+     * per tap and owns it after that.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
         if (f == null) return;
 
         appliedProfile = net;
+        if (Profiles.AUTO.equalsIgnoreCase(profilePref())) {
+            prefs.edit().putString(key(current, "profile"), net).apply();
+        }
 
         binding = true;
         etLabel.setText(f[0]);
@@ -457,8 +454,8 @@ public class MainActivity extends AppCompatActivity {
 
         collect();
         adapter.notifyItemChanged(current);
-        status("Profile " + net + " loaded - directory, FCI, GPO and record all in place,"
-                + " script box blank so the profile runs");
+        status("Script " + net + " - directory, FCI and GPO come from Profile" + net
+                + ", script box blank");
         Toast.makeText(this, net + " profile loaded", Toast.LENGTH_SHORT).show();
     }
 
@@ -772,7 +769,7 @@ public class MainActivity extends AppCompatActivity {
         String disc = t(etDiscretionary).toUpperCase();
         String aid = t(etAid).toUpperCase();
         String msd = t(etMsd).isEmpty() ? "0" : t(etMsd);
-        String net = profileFor(pan);
+        String prof = effectiveProfile();
 
         String track2 = normaliseTrack2(t(etTrack2));
         if (track2.isEmpty() && !pan.isEmpty()) {
@@ -780,10 +777,11 @@ public class MainActivity extends AppCompatActivity {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("profile    : ").append(net.isEmpty()
-                ? "(none - no network recognised)" : net + "  (directory, FCI and GPO)").append('\n');
+        sb.append("SCRIPT     : ").append(prof)
+                .append(Profiles.AUTO.equalsIgnoreCase(profilePref()) ? "  (AUTOMATICO)" : "  (PINNED)")
+                .append('\n');
         sb.append("AID  (4F)  : ")
-                .append(aid.isEmpty() ? "(EMPTY - PPSE falls back to VISA!)" : aid).append('\n');
+                .append(aid.isEmpty() ? "(EMPTY - profile default is used)" : aid).append('\n');
         sb.append("AIP  (82)  : ")
                 .append(t(etAip).isEmpty() ? "5800" : t(etAip).toUpperCase()).append('\n');
         sb.append("CID        : ")
@@ -792,7 +790,6 @@ public class MainActivity extends AppCompatActivity {
         sb.append("ATC        : live - climbs once per tap, script carries it\n");
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
-        sb.append("MAC variant: ").append(prefs.getString(key(current, "keyvar"), "0")).append('\n');
         sb.append('\n');
 
         sb.append("5A  PAN    : ")
@@ -808,11 +805,6 @@ public class MainActivity extends AppCompatActivity {
             String[] h = BankDirectory.hintsFor(pan);
             if (h != null) {
                 sb.append("   issuer : ").append(h[4]).append("  (").append(h[3]).append(')').append('\n');
-                if (!BankDirectory.knownBin(pan)) {
-                    sb.append("   note   : BIN not in the table - network range only\n");
-                }
-            } else {
-                sb.append("   issuer : unknown range, AID is a guess\n");
             }
         }
         String expOut = exp.isEmpty() ? "3112  <-- DEFAULT" : exp;
@@ -828,39 +820,19 @@ public class MainActivity extends AppCompatActivity {
                 .append(t(etCvmlist).isEmpty() ? "service constant (" + CVMLIST + ")"
                         : t(etCvmlist).toUpperCase())
                 .append('\n');
-        sb.append("CVM result : ")
-                .append(t(etCvmres).isEmpty() ? "1F0302" : t(etCvmres).toUpperCase())
-                .append('\n');
-        sb.append("9F07/9F08  : FFC0 / 0002  (built into the record)\n");
         sb.append("record     : synthetic SFI 1 rec 1, built from these fields\n");
-
-        if (t(etCvmlist).toUpperCase().startsWith("1E")) {
-            sb.append('\n').append("!! CVM list is ONLINE PIN - the card answers TC offline,"
-                    + " so nothing can collect a PIN\n");
-            sb.append("   blank the CVM box\n");
-        }
 
         String script = t(etScript);
         int scriptLines = armedLines(script);
         sb.append("script box : ").append(scriptLines == 0
-                ? "blank - the " + (net.isEmpty() ? "default" : net) + " profile runs"
+                ? "blank - the " + prof + " profile runs"
                 : scriptLines + " line(s) - these OVERRIDE the profile").append('\n');
 
-        String trackPan = track2.contains("D")
-                ? track2.substring(0, track2.indexOf("D")) : "";
-        if (!pan.isEmpty() && !trackPan.isEmpty() && !trackPan.equals(pan)) {
-            sb.append('\n').append("!! PAN and TRACK 2 are DIFFERENT cards\n");
-        }
         if (aid.isEmpty()) {
-            sb.append('\n').append("!! AID empty - terminal will pick Visa\n");
-        }
-        if (!aid.isEmpty() && !routable(aid)) {
+            sb.append('\n').append("AID empty - the profile default is used, that is fine\n");
+        } else if (!routable(aid)) {
             sb.append('\n').append("!! AID has no <aid-filter> in apduservice.xml\n");
             sb.append("   Android will not route the SELECT - tap dies with NO log line\n");
-            sb.append("   add: <aid-filter android:name=\"").append(aid).append("\" />\n");
-        }
-        if (pan.isEmpty() && track2.isEmpty()) {
-            sb.append('\n').append("nothing filled in yet\n");
         }
         return sb.toString();
     }
@@ -945,13 +917,6 @@ public class MainActivity extends AppCompatActivity {
 
         boolean isDefault = ce.isDefaultServiceForCategory(me, CardEmulation.CATEGORY_PAYMENT);
         sb.append("default payment app: ").append(isDefault ? "YES" : "NO").append('\n');
-        sb.append(isDefault
-                ? "  good - you outrank Google Wallet for the big-brand AIDs\n"
-                : "  NOT default - you only get AIDs no payment app claims\n");
-
-        String prefix = "?";
-        try { prefix = ce.supportsAidPrefixRegistration() ? "yes" : "no"; } catch (Throwable ignored) { }
-        sb.append("prefix AID matching : ").append(prefix).append("\n\n");
 
         String aid = t(etAid).toUpperCase();
         List<String> check = new ArrayList<>();
@@ -960,33 +925,21 @@ public class MainActivity extends AppCompatActivity {
         if (!"A0000000031010".equals(aid)) check.add("A0000000031010");
         if (!"A0000000041010".equals(aid)) check.add("A0000000041010");
 
-        sb.append("routing for every AID this card advertises:\n");
         int blocked = 0;
         for (String a : check) {
-            if (!routable(a)) {
-                sb.append("  NO FILTER ").append(a).append("  <- add to apduservice.xml\n");
-                blocked++;
-                continue;
-            }
+            if (!routable(a)) { blocked++; continue; }
             boolean routed;
             try {
                 routed = ce.isDefaultServiceForAid(me, a);
             } catch (Throwable ignored) {
                 routed = false;
             }
-            if (routed) {
-                sb.append("  ok        ").append(a).append('\n');
-            } else {
-                sb.append("  BLOCKED   ").append(a)
-                  .append("  <- another app wins this, or you are not the default\n");
-                blocked++;
-            }
+            if (!routed) blocked++;
         }
 
         sb.append('\n').append(blocked == 0
                 ? "Verdict: a tap should reach the emulator."
-                : "Verdict: " + blocked + " of " + check.size()
-                  + " AIDs will never reach us. Fix before a real till.");
+                : "Verdict: " + blocked + " of " + check.size() + " AIDs are blocked.");
 
         dialog("Can the terminal reach us?", sb.toString());
     }
@@ -1026,7 +979,6 @@ public class MainActivity extends AppCompatActivity {
                 .setItems(labels, (d, w) -> {
                     prefs.edit().putString(key(current, "keyvar"), VARIANTS[w][0]).apply();
                     status("MAC variant " + VARIANTS[w][0] + " - " + VARIANTS[w][1]);
-                    Toast.makeText(this, "Variant " + VARIANTS[w][0], Toast.LENGTH_SHORT).show();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -1145,8 +1097,7 @@ public class MainActivity extends AppCompatActivity {
             }
             final int total = tried;
             runOnUiThread(() -> {
-                status("Read OK - no key matched (" + total
-                        + " tries). Long-press MK-AC to add candidates.");
+                status("Read OK - no key matched (" + total + " tries).");
                 if (announce) {
                     Toast.makeText(this, "No match - " + total + " tries", Toast.LENGTH_LONG).show();
                 }
@@ -1154,7 +1105,7 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    // ---------- small helpers for the scan ----------
+    // ---------- small helpers ----------
 
     private static byte[] cat(byte[]... arrs) {
         int n = 0;
@@ -1292,16 +1243,8 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         if (!luhn(pan)) {
-            if (diff != null) {
-                status(diff);
-                Toast.makeText(this, diff, Toast.LENGTH_LONG).show();
-                showPage(0);
-                return;
-            }
             String want = String.valueOf(expectedCheckDigit(pan));
-            String msg = "Pasted line fails its own check digit. Either the last digit "
-                    + "should be " + want + ", or a digit earlier in the PAN is wrong. "
-                    + "Re-copy the line from the source.";
+            String msg = "PAN fails its check digit - the last digit should be " + want + ".";
             status(msg);
             Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
             showPage(0);
@@ -1311,54 +1254,13 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Expiry must be YYMM, e.g. 2803", Toast.LENGTH_LONG).show();
             return;
         }
-        try {
-            int expYy = Integer.parseInt(t(etExpiry).substring(0, 2));
-            int thisYy = Calendar.getInstance().get(Calendar.YEAR) % 100;
-            if (expYy < thisYy - 20 || expYy > thisYy + 30) {
-                String m = "Year " + expYy + " looks wrong - field is YYMM, not MMYY";
-                status(m);
-                Toast.makeText(this, m, Toast.LENGTH_LONG).show();
-                showPage(0);
-                return;
-            }
-        } catch (NumberFormatException ignored) { }
-        if (t(etService).length() != 3) {
-            Toast.makeText(this, "Service code must be 3 digits", Toast.LENGTH_LONG).show();
-            return;
-        }
         etPan.setText(pan);
         collect();
         adapter.notifyItemChanged(current);
 
-        String track2 = normaliseTrack2(t(etTrack2));
-        String trackPan2 = track2.contains("D")
-                ? track2.substring(0, track2.indexOf("D")) : track2;
-        if (track2.contains("D") && !trackPan2.isEmpty() && !trackPan2.equals(pan)) {
-            status("Saved - but PAN and TRACK 2 are different cards");
-            Toast.makeText(this, "PAN and TRACK 2 disagree - long-press SAVE", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-        if (t(etAid).isEmpty()) {
-            status("Saved - but AID is empty, terminal will pick Visa");
-            Toast.makeText(this, "AID is empty - long-press the AID field", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-
-        String aidNow = t(etAid).toUpperCase();
-        if (!routable(aidNow)) {
-            status("Saved - AID " + aidNow + " is not in apduservice.xml, tap will die silently");
-            Toast.makeText(this, "AID not routable - add an <aid-filter>", Toast.LENGTH_LONG).show();
-            showPage(0);
-            return;
-        }
-
-        status(diff == null
-                ? "Saved card " + (current + 1) + " of " + cards.size()
-                : "Saved - " + diff);
-        Toast.makeText(this, diff == null ? "Card saved" : "Saved using the TRACK 2 value",
-                Toast.LENGTH_SHORT).show();
+        status("Saved card " + (current + 1) + " of " + cards.size()
+                + " - script " + effectiveProfile());
+        Toast.makeText(this, "Card saved", Toast.LENGTH_SHORT).show();
         showPage(0);
     }
 
@@ -1376,8 +1278,6 @@ public class MainActivity extends AppCompatActivity {
         bindCard(current);
         prefs.edit().putInt("selected", current).apply();
     }
-
-    // ---------- delete ----------
 
     private void onDelete() {
         if (cards.isEmpty()) return;
@@ -1621,35 +1521,13 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putInt("selected", current).apply();
 
         int recs = recordCountOnCard();
-        String st = recs == 0
-                ? "Cloned - no records captured, terminal will get a synthetic one"
-                : "Cloned " + recs + " records - check it, then SAVE";
-
-        if (t(etName).isEmpty()) {
-            String h = holderFromCapture(current);
-            if (!h.isEmpty()) {
-                binding = true;
-                etName.setText(h);
-                binding = false;
-                collect();
-                st = st + " | name: " + h;
-                Toast.makeText(this, "Name read off the card: " + h, Toast.LENGTH_LONG).show();
-            } else {
-                st = st + " | no 5F20 in those " + recs + " records";
-                Toast.makeText(this, "No 5F20 name in the " + recs
-                        + " captured records - type it", Toast.LENGTH_LONG).show();
-            }
-        }
-        status(st);
+        status(recs == 0
+                ? "Cloned - no records, terminal will get a synthetic one"
+                : "Cloned " + recs + " records - check it, then SAVE");
         suppressResumeStatus = true;
 
         Toast.makeText(this, "Card cloned - review, then hit SAVE", Toast.LENGTH_LONG).show();
         showPage(1);
-
-        if (!prefs.getString(key(current, "cap_genaccmd"), "").isEmpty()
-                && !prefs.getString(key(current, "cap_rawgenac"), "").isEmpty()) {
-            scanForKey(false);
-        }
     }
 
     private int msdFromCapture(int index) {
@@ -1670,23 +1548,6 @@ public class MainActivity extends AppCompatActivity {
             if (k.startsWith(p)) n++;
         }
         return n;
-    }
-
-    private String holderFromCapture(int index) {
-        String prefix = key(index, "cap_rec");
-        for (String k : prefs.getAll().keySet()) {
-            if (!k.startsWith(prefix)) continue;
-            String hex = prefs.getString(k, "");
-            if (hex == null || hex.isEmpty()) continue;
-            try {
-                byte[] v = tagOf(hexToBytes(hex), 0x5F20);
-                if (v == null || v.length < 2) continue;
-                String n = new String(v, StandardCharsets.ISO_8859_1);
-                n = n.toUpperCase().replaceAll("[^A-Z0-9 ./'-]", "").trim();
-                if (n.length() >= 2) return n.length() > 26 ? n.substring(0, 26) : n;
-            } catch (Exception ignored) { }
-        }
-        return "";
     }
 
     private static String nameFromTrack1(String raw) {
