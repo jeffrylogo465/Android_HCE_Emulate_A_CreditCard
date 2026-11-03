@@ -64,7 +64,24 @@ public class ShadowApduService extends HostApduService {
     private static final byte GPO_CID = CID_TC;
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
-    private static final boolean FORCE_ONLINE_ARQC = true;
+
+    /**
+     * FORCE_ONLINE_ARQC used to be true, and because it is tested ABOVE
+     * FORCE_OFFLINE_TC, any card with a key in the MK-AC box answered ARQC and
+     * went online no matter what the terminal asked for or what was typed in
+     * the CID box. That is the wrong default for a clone: the ARQC is computed
+     * with a key the issuer does not hold, so going online is a guaranteed
+     * decline unless the key is real.
+     *
+     * With this false, a keyed card returns TC like a keyless one. The CID box
+     * still wins over both - it is tested above this flag - so typing 80 in it
+     * gets ARQC back for the case where an online decline IS what you want to
+     * demonstrate.
+     *
+     * Nothing here can outvote a terminal TAC that forces online. It only
+     * stops the CARD volunteering to go.
+     */
+    private static final boolean FORCE_ONLINE_ARQC = false;
     private static final boolean FORCE_OFFLINE_TC = true;
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -684,8 +701,12 @@ public class ShadowApduService extends HostApduService {
      * CIAC value can outvote it.
      *
      * 9F4A (SDA tag list) is still deliberately absent - a clone cannot satisfy
-     * it. 9F07 is FFC0, matching the real card; FF00 would also have blocked
-     * international use.
+     * it, and Kernel 2 is CDA-only anyway. 9F07 is FFC0: byte 1 FF allows
+     * domestic and international cash, goods and services and both terminal
+     * classes, byte 2 C0 allows both cashback cases. 9F08 is the application
+     * version the terminal compares against its own 9F09 - matching it stops
+     * the "different application versions" TVR bit, which is another
+     * forced-online.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
