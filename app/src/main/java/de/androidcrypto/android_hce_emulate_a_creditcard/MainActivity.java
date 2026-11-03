@@ -73,10 +73,10 @@ public class MainActivity extends AppCompatActivity {
      * THE AMEX IAD IS EMPTY on purpose. Amex does not use the M/Chip CVN shape,
      * so an invented IAD would be worse than none.
      *
-     * THE AMEX AIP IS 1800, NOT 1880: byte 2 is 00 so the kernel takes the
-     * mag-stripe path and runs the CVC3 exchange. 1880 would keep it in EMV
-     * mode and ask for an ARQC no keyless card can produce. 0x04 is absent
-     * because the MSD mask keeps it and nothing here satisfies issuer auth.
+     * THE AMEX AIP IS 1880: byte 1 0x18 is CV + TRM, byte 2 0x80 is the MSD
+     * bit. Byte 1 b8 is RFU under Visa and ExpressPay both - it is not a rung
+     * on the ladder. If 1880 is refused the only live bits left to vary are
+     * 0x10 and 0x08: 1080, then 0080.
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
@@ -85,7 +85,7 @@ public class MainActivity extends AppCompatActivity {
             "VISA", "A0000000031010", "5800",
             "06011200000000", "001C" };
     private static final String[] PROFILE_AMEX = {
-            "AMEX", "A00000002501", "1800", "", "001C" };
+            "AMEX", "A00000002501", "1880", "", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -1021,7 +1021,7 @@ public class MainActivity extends AppCompatActivity {
                                     "4 hex. From the dump, usually tag DD.", 4);
                             else if (w == 11) buildMsdRecord();
                             else if (w == 12) setHexPref("msdrec", "MSD record",
-                                    "The personalised 9F6B record, verbatim, no status word.", 8);
+                                    "The personalised 57 record, verbatim, no status word.", 8);
                             else if (w == 13) setHexPref("msdloc", "MSD record location",
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else pickKeyVariant();
@@ -1035,10 +1035,9 @@ public class MainActivity extends AppCompatActivity {
      *
      * These four are the MSD inputs and none of them has a box: IMKCVC3 is a
      * second master key that the MK-AC box does not hold, IVCVC3 is a
-     * personalisation value, the record has to be the dump's skeleton verbatim
-     * because IVCVC3 is a MAC over the static track, and the location says which
-     * record carries it. Putting them here rather than in the layout keeps
-     * activity_main.xml untouched.
+     * personalisation value, the record has to be the dump's skeleton verbatim,
+     * and the location says which record carries it. Putting them here rather
+     * than in the layout keeps activity_main.xml untouched.
      */
     private void setHexPref(String name, String title, String hint, int minLen) {
         final EditText e = new EditText(this);
@@ -1066,17 +1065,15 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Build a skeleton with the bitmaps over the right spans, at SFI 1 rec 1.
+     * Build the MSD skeleton, at SFI 1 rec 1.
      *
-     * 9F65 and 9F66 are bitmaps, both counted from the FIRST NIBBLE OF THE
-     * TRACK - not from the discretionary data. 9F67 is not a bitmap: it is the
-     * count of ATC digits among the 9F66 positions, so DD[0..1] stay UN and
-     * DD[2..3] are ATC with NATC = 2.
+     * Under Visa and ExpressPay there are NO bitmaps - 9F65/9F66/9F67 are
+     * Mastercard Kernel 2 only. The CSC's position in the DD is fixed by the
+     * spec, so the record is a bare 70 [ 57 <track> ] and the terminal patches
+     * the CSC into its own copy when it comes back in 9F61.
      *
-     * The DD is written as eight zeros, so the track differs from the 57 track
-     * by construction - the placeholder positions have to be carved out.
-     *
-     * Tlv's builder is t(), not tlv().
+     * The DD is written as eight zeros: that is the space the CSC and ATC land
+     * in, and it makes the 57 differ from the plain track by construction.
      */
     private void buildMsdRecord() {
         String pan = prefs.getString(key(current, "pan"), "").replaceAll("[^0-9]", "");
@@ -1086,28 +1083,15 @@ public class MainActivity extends AppCompatActivity {
         String svc = prefs.getString(key(current, "service"), "").replaceAll("[^0-9]", "");
         while (svc.length() < 3) svc = "0" + svc;
 
-        int dd = pan.length() + 1 + 4 + 3;
-
-        byte[] rec = Tlv.t(0x70, Tlv.cat(
-                Tlv.t(0x9F6B, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
-                        svc.substring(0, 3), 8)),
-                Tlv.t(0x9F65, bits(0, pan.length())),
-                Tlv.t(0x9F66, bits(dd, 4)),
-                Tlv.t(0x9F67, new byte[]{0x02}),
-                Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
+        byte[] rec = Tlv.t(0x70,
+                Tlv.t(0x57, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
+                        svc.substring(0, 3), 8)));
 
         prefs.edit()
                 .putString(key(current, "msdrec"), Hex.toHex(rec))
                 .putString(key(current, "msdloc"), "0101")
                 .apply();
-        status("skeleton built, " + rec.length + "B - set IVCVC3 next");
-    }
-
-    /** A bitmap with `count` bits set starting at bit `from`. */
-    private static byte[] bits(int from, int count) {
-        byte[] b = new byte[(from + count + 7) / 8];
-        for (int i = from; i < from + count; i++) b[i / 8] |= (byte) (0x80 >> (i % 8));
-        return b;
+        status("skeleton built, " + rec.length + "B - no bitmaps, CSC position is spec-fixed");
     }
 
     private void pickKeyVariant() {
