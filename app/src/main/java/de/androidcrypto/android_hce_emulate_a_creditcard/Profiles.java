@@ -35,18 +35,17 @@ public final class Profiles {
     /** Visa: 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM. */
     private static final String AIP_VISA = "5800";
 
-    /**
-     * AIP for Amex: 1C 00.
-     *
-     * Classic numbering. 0x1C = CV + TRM + issuer auth, every ODA bit clear.
-     * BYTE 2 is 00 deliberately: no EMV-mode bit, so the kernel takes the
-     * mag-stripe path and runs the CVC3 exchange - the one offline decision a
-     * card can make without the issuer's key.
-     */
-    private static final String AIP_AMEX = "1C00";
-
-    /** One AFL entry: SFI 1, rec 1 to 1, none for offline auth. */
+    /** One AFL entry, TLV-wrapped: SFI 1, rec 1 to 1, none for offline auth. */
     private static final String AFL_ONE = "940408010100";
+
+    /**
+     * The same AFL entry RAW, for format 1.
+     *
+     * A tag 80 body is AIP || AFL with no inner TLVs - the 94 wrapper is
+     * format 2 shape and belongs only inside a 77. SFI 1, rec 1 to 1, none for
+     * offline auth.
+     */
+    private static final String AFL_RAW = "08010100";
 
     /**
      * Visa CTQ (9F6C): 30 = go online and switch interface if ODA fails.
@@ -146,11 +145,11 @@ public final class Profiles {
     }
 
     /**
-     * Kernel 2 GPO with a caller-supplied AIP: AIP and AFL and nothing else.
+     * Kernel 2 GPO in format 2, with a caller-supplied AIP: AIP and AFL only.
      *
      * The AIP is a parameter because the MSD path cannot use the profile
-     * constant - reaching mag-stripe mode means the EMV-mode bit has to go, so
-     * the service masks the AIP on the way in. Everything else is identical.
+     * constant - reaching mag-stripe mode means the ODA bits have to go, so the
+     * service masks the AIP on the way in. Everything else is identical.
      *
      * The AC is NOT here. Kernel 2 puts the cryptogram in GENERATE AC in both
      * modes. 10 bytes of body, 0x0A.
@@ -165,9 +164,19 @@ public final class Profiles {
         return gpoWithAip(AIP_MC, atc);
     }
 
-    /** Amex GPO on the profile AIP. Same shape, same unused ARQC. */
-    static String gpoAmex(String atc, String arqc) {
-        return gpoWithAip(AIP_AMEX, atc);
+    /**
+     * Amex MSD GPO: FORMAT 1.
+     *
+     * A tag 80 body is raw AIP || AFL, no 82, no 94. A 77 carrying only 82 and
+     * 94 is format 2 shape, and a mag-stripe kernel rejects it - the tap dies
+     * before the CCC. 6 bytes of body, 0x06.
+     *
+     * The AIP is a parameter because it lives on the profile. A copy here was a
+     * second source of truth and silently won.
+     */
+    static String gpoAmex(String aip, String atc) {
+        String body = aip + AFL_RAW;
+        return "80A80000=80" + String.format("%02X", body.length() / 2) + body + "9000";
     }
 
     /**
