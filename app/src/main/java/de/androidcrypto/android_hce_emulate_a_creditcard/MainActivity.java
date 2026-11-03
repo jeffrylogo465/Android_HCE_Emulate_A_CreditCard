@@ -457,10 +457,11 @@ public class MainActivity extends AppCompatActivity {
      * The ATC is only written when the box is empty - the service climbs it once
      * per tap and owns it after that.
      *
-     * MSD follows the network: 1 for Amex, which is the only profile that runs
-     * mag-stripe, 0 otherwise. It is set here rather than only in the dump
-     * loader because bindCard re-applies the profile on every rebind, so a flag
-     * set once is wiped the next time the screen comes back.
+     * MSD follows the network: 1 for Amex and Mastercard, both of which have a
+     * mag-stripe mode worth walking, 0 for Visa where the profile AIP has no
+     * byte-2 bit. It is set here rather than only in the dump loader because
+     * bindCard re-applies the profile on every rebind, so a flag set once is
+     * wiped the next time the screen comes back.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
@@ -475,7 +476,7 @@ public class MainActivity extends AppCompatActivity {
         etAip.setText(f[2]);
         etIad.setText(f[3]);
         if (t(etAtc).isEmpty()) etAtc.setText(f[4]);
-        etMsd.setText("AMEX".equals(net) ? "1" : "0");
+        etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
         etAfl.setText("");
         etCid.setText("");
         etScript.setText("");
@@ -543,10 +544,10 @@ public class MainActivity extends AppCompatActivity {
 
         if (!sc.matches("[0-9]{3}")) throw new IllegalArgumentException("service code");
         char a = sc.charAt(0);
-        if (a != '1' && a != '2' && a != '5' && a != '6')
+        if (a != '1' && a != '2' && a != '5' && a != '6' && a != '7')
             throw new IllegalArgumentException("service code");
 
-        if (dd.length() > 12) throw new IllegalArgumentException("DD too long");
+        if (dd.length() > 14) throw new IllegalArgumentException("DD too long");
         if (!dd.matches("[0-9A-F]*")) throw new IllegalArgumentException("DD not hex");
 
         return new String[]{pan, expiry, sc, dd};
@@ -1183,16 +1184,25 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /** Bitmap of `len` bits starting at `from`, MSB first. */
+    private static byte[] bits(int from, int len) {
+        byte[] b = new byte[(from + len + 7) / 8];
+        for (int i = 0; i < len; i++) {
+            int p = from + i;
+            b[p / 8] |= (byte) (0x80 >> (p % 8));
+        }
+        return b;
+    }
+
     /**
      * Build the MSD skeleton, at SFI 1 rec 1.
      *
-     * Under Visa and ExpressPay there are NO bitmaps - 9F65/9F66/9F67 are
-     * Mastercard Kernel 2 only. The CSC's position in the DD is fixed by the
-     * spec, so the record is a bare 70 [ 57 <track> ] and the terminal patches
-     * the CSC into its own copy when it comes back in 9F61.
+     * TWO SHAPES. Mastercard Kernel 2 marks where the terminal patches CSC, ATC
+     * and nUN with bitmaps: 9F65 over the PAN, 9F66 over the DD region, 9F67 for
+     * nUN, and a 9F69 UDOL naming 9F6A. Visa and ExpressPay define none of that
+     * - the CSC position is fixed by the spec - so they get a bare 57.
      *
-     * The DD is written as eight zeros: that is the space the CSC and ATC land
-     * in, and it makes the 57 differ from the plain track by construction.
+     * The DD is eight zeros in both: CSC 2, ATC 2, nUN 2, two spare.
      */
     private void buildMsdRecord() {
         String pan = prefs.getString(key(current, "pan"), "").replaceAll("[^0-9]", "");
@@ -1202,15 +1212,28 @@ public class MainActivity extends AppCompatActivity {
         String svc = prefs.getString(key(current, "service"), "").replaceAll("[^0-9]", "");
         while (svc.length() < 3) svc = "0" + svc;
 
-        byte[] rec = Tlv.t(0x70,
-                Tlv.t(0x57, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
-                        svc.substring(0, 3), 8)));
+        byte[] track = EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
+                svc.substring(0, 3), 8);
+
+        byte[] rec;
+        if ("MASTERCARD".equals(profileFor(pan))) {
+            int ddOff = pan.length() + 1 + 4 + 3;
+            rec = Tlv.t(0x70, Tlv.cat(
+                    Tlv.t(0x9F6B, track),
+                    Tlv.t(0x9F65, bits(0, pan.length())),
+                    Tlv.t(0x9F66, bits(ddOff, 4)),
+                    Tlv.t(0x9F67, new byte[]{0x02}),
+                    Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
+        } else {
+            rec = Tlv.t(0x70, Tlv.t(0x57, track));
+        }
 
         prefs.edit()
                 .putString(key(current, "msdrec"), Hex.toHex(rec))
                 .putString(key(current, "msdloc"), "0101")
                 .apply();
-        status("skeleton built, " + rec.length + "B - no bitmaps, CSC position is spec-fixed");
+        status("skeleton built, " + rec.length + "B - "
+                + ("MASTERCARD".equals(profileFor(pan)) ? "bitmaps + UDOL" : "bare 57"));
     }
 
     private void pickKeyVariant() {
