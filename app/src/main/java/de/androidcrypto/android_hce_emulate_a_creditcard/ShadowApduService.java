@@ -545,7 +545,6 @@ public class ShadowApduService extends HostApduService {
             tap("-- ppse source: captured " + captured.length + "B");
             return captured;
         }
-        tap("-- ppse source: generated");
 
         String realAid = p("cap_aid", "");
         if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
@@ -571,7 +570,9 @@ public class ShadowApduService extends HostApduService {
 
         byte[] fci = tlv(0xBF0C, dir.toByteArray());
         byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
-        return tlv(0x6F, inner);
+        byte[] built = tlv(0x6F, inner);
+        tap("-- ppse source: generated, " + built.length + "B");
+        return built;
     }
 
     private byte[] patchFci(byte[] fci, byte[] aid) {
