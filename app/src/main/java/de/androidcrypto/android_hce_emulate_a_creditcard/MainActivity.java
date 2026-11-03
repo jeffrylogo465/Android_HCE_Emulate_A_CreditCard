@@ -498,12 +498,57 @@ public class MainActivity extends AppCompatActivity {
     // ---------- track 2 dump ----------
 
     /**
-     * One-shot loader: paste a track 2 dump and everything downstream derives.
+     * Parse and validate a track 2 dump. Returns {pan, expiry, service, dd}.
      *
-     * Validate-then-commit - the parse finishes before a single field is
-     * written, so a bad dump cannot leave the card half-populated. The fields
-     * are then set and the skeleton rebuilt from them, so the 57 and the boxes
-     * agree instead of carrying two versions of the same track.
+     * Lives here rather than in its own class so there is no second file to get
+     * wrong. Throws with a short reason, which the caller shows on the status
+     * line - the parse finishes before any field is written.
+     */
+    private static String[] parseDump(String raw) {
+        if (raw == null) throw new IllegalArgumentException("empty");
+        String s = raw.trim().toUpperCase(java.util.Locale.US);
+        s = s.replace(";", "").replace("?", "").replace(" ", "")
+             .replace("\n", "").replace("\r", "");
+        if (s.startsWith("B")) s = s.substring(1);
+
+        int eq = s.indexOf('=');
+        if (eq < 0) {
+            int dsep = s.indexOf('D');                 // some dumps use D as the separator
+            if (dsep < 0) throw new IllegalArgumentException("no separator");
+            s = s.substring(0, dsep) + "=" + s.substring(dsep + 1);
+            eq = dsep;
+        }
+        if (s.indexOf('=', eq + 1) >= 0) throw new IllegalArgumentException("two separators");
+
+        String pan = s.substring(0, eq);
+        String rest = s.substring(eq + 1);
+
+        if (pan.length() < 13 || pan.length() > 19) throw new IllegalArgumentException("PAN length");
+        if (!pan.matches("[0-9]+")) throw new IllegalArgumentException("PAN not digits");
+        if (!luhn(pan)) throw new IllegalArgumentException("PAN Luhn");
+
+        if (rest.length() < 7) throw new IllegalArgumentException("truncated");
+        String expiry = rest.substring(0, 4);
+        String sc = rest.substring(4, 7);
+        String dd = rest.substring(7);
+
+        if (!expiry.matches("[0-9]{4}")) throw new IllegalArgumentException("expiry not digits");
+        int mm = Integer.parseInt(expiry.substring(2, 4));
+        if (mm < 1 || mm > 12) throw new IllegalArgumentException("expiry month");
+
+        if (!sc.matches("[0-9]{3}")) throw new IllegalArgumentException("service code");
+        char a = sc.charAt(0);
+        if (a != '1' && a != '2' && a != '5' && a != '6')
+            throw new IllegalArgumentException("service code");
+
+        if (dd.length() > 12) throw new IllegalArgumentException("DD too long");
+        if (!dd.matches("[0-9A-F]*")) throw new IllegalArgumentException("DD not hex");
+
+        return new String[]{pan, expiry, sc, dd};
+    }
+
+    /**
+     * One-shot loader: paste a track 2 dump and everything downstream derives.
      *
      * MSD is switched on here because that is the only reason to paste a dump.
      *
@@ -512,20 +557,20 @@ public class MainActivity extends AppCompatActivity {
      * points the terminal at a record the skeleton is not in.
      */
     private void applyDump(String raw) {
-        Track2Dump d;
+        String[] d;
         try {
-            d = Track2Dump.parse(raw);
+            d = parseDump(raw);
         } catch (IllegalArgumentException e) {
             status("dump: " + e.getMessage(), COL_STALE);
             return;
         }
 
         binding = true;
-        etPan.setText(d.pan);
-        etExpiry.setText(d.expiry);
-        etService.setText(d.serviceCode);
-        etDiscretionary.setText(d.dd);
-        etTrack2.setText(d.pan + "=" + d.expiry + d.serviceCode + d.dd);
+        etPan.setText(d[0]);
+        etExpiry.setText(d[1]);
+        etService.setText(d[2]);
+        etDiscretionary.setText(d[3]);
+        etTrack2.setText(d[0] + "=" + d[1] + d[2] + d[3]);
         binding = false;
 
         collect();
@@ -545,8 +590,8 @@ public class MainActivity extends AppCompatActivity {
             status("dump parsed, but the skeleton failed - check the PAN", COL_STALE);
             return;
         }
-        status("dump loaded " + d.pan + " exp " + d.expiry + " svc " + d.serviceCode
-                + " dd " + (d.dd.isEmpty() ? "none" : d.dd.length() + "d")
+        status("dump loaded " + d[0] + " exp " + d[1] + " svc " + d[2]
+                + " dd " + (d[3].isEmpty() ? "none" : d[3].length() + "d")
                 + " - harness next", COL_WARM);
     }
 
