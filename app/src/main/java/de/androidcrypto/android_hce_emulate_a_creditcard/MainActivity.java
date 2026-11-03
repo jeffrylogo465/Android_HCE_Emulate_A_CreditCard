@@ -61,7 +61,7 @@ public class MainActivity extends AppCompatActivity {
      * Per-network field defaults: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
      *
      * Only the fields are here. The bytes the terminal actually sees live in
-     * ProfileMastercard and ProfileVisa, one file each.
+     * ProfileMastercard, ProfileVisa and ProfileAmex, one file each.
      *
      * THE IADs ARE THE CARDS' OWN. The IAD goes into the MAC input, so a
      * placeholder here makes a correct key produce a wrong ARQC. Byte 2 is the
@@ -71,6 +71,10 @@ public class MainActivity extends AppCompatActivity {
      * 0x40 is SDA and byte 2 b8 is "EMV mode supported" - 1880 turns EMV mode
      * on and leaves SDA off, because a clone cannot sign. Visa numbers byte 1
      * differently, where 0x40 is qVSDC - 5800 is right there.
+     *
+     * THE AMEX IAD IS EMPTY on purpose. Amex does not use the M/Chip CVN shape,
+     * so an invented IAD would be worse than none: empty reads as CVN -1 and
+     * the service falls to CSK, which is the right default there.
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
@@ -78,6 +82,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String[] PROFILE_VISA = {
             "VISA", "A0000000031010", "5800",
             "06011200000000", "001C" };
+    private static final String[] PROFILE_AMEX = {
+            "AMEX", "A00000002501", "1880", "", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -350,14 +356,21 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- profiles ----------
 
+    /**
+     * 34/37 is tested first: it is the longest prefix of the three and nothing
+     * else starts with 3, so the order is cosmetic but reads better specific
+     * before broad.
+     */
     private static String profileFor(String pan) {
         if (pan == null || pan.length() < 4) return "";
+        if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
         if (pan.startsWith("4")) return "VISA";
         if (pan.startsWith("5") || pan.startsWith("2")) return "MASTERCARD";
         return "";
     }
 
     private static String[] profileFields(String net) {
+        if ("AMEX".equals(net)) return PROFILE_AMEX;
         if ("VISA".equals(net)) return PROFILE_VISA;
         if ("MASTERCARD".equals(net)) return PROFILE_MASTERCARD;
         return null;
