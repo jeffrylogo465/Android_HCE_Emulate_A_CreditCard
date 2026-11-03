@@ -456,6 +456,11 @@ public class MainActivity extends AppCompatActivity {
      *
      * The ATC is only written when the box is empty - the service climbs it once
      * per tap and owns it after that.
+     *
+     * MSD follows the network: 1 for Amex, which is the only profile that runs
+     * mag-stripe, 0 otherwise. It is set here rather than only in the dump
+     * loader because bindCard re-applies the profile on every rebind, so a flag
+     * set once is wiped the next time the screen comes back.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
@@ -470,7 +475,7 @@ public class MainActivity extends AppCompatActivity {
         etAip.setText(f[2]);
         etIad.setText(f[3]);
         if (t(etAtc).isEmpty()) etAtc.setText(f[4]);
-        etMsd.setText("0");
+        etMsd.setText("AMEX".equals(net) ? "1" : "0");
         etAfl.setText("");
         etCid.setText("");
         etScript.setText("");
@@ -2083,6 +2088,7 @@ public class MainActivity extends AppCompatActivity {
     private static String normaliseTrack2(String raw) {
         if (raw == null) return "";
         String s = raw.trim().toUpperCase().replace('=', 'D');
+        while (s.startsWith("B")) s = s.substring(1);
         while (s.endsWith("F")) s = s.substring(0, s.length() - 1);
         return s;
     }
