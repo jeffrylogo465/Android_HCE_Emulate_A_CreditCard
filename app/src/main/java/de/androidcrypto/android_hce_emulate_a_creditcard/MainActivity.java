@@ -987,7 +987,8 @@ public class MainActivity extends AppCompatActivity {
                 .setTitle("Issuer master key")
                 .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
                                 "Show KCV", "Run SKD vector", "Run CSK vector",
-                                "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: set record"},
+                                "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: set record",
+                                "MSD: set location"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1000,6 +1001,8 @@ public class MainActivity extends AppCompatActivity {
                                     "4 hex. From the personalisation dump, usually tag DD.", 4);
                             else if (w == 8) setHexPref("msdrec", "MSD record",
                                     "The personalised 9F6B record, verbatim, no status word.", 8);
+                            else if (w == 9) setHexPref("msdloc", "MSD record location",
+                                    "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1009,11 +1012,12 @@ public class MainActivity extends AppCompatActivity {
     /**
      * One hex value into a card-scoped pref, with the length checked.
      *
-     * These three are the MSD inputs and none of them has a box: IMKCVC3 is a
+     * These four are the MSD inputs and none of them has a box: IMKCVC3 is a
      * second master key that the MK-AC box does not hold, IVCVC3 is a
-     * personalisation value, and the record has to be the dump's skeleton
-     * verbatim because IVCVC3 is a MAC over the static track. Putting them here
-     * rather than in the layout keeps activity_main.xml untouched.
+     * personalisation value, the record has to be the dump's skeleton verbatim
+     * because IVCVC3 is a MAC over the static track, and the location says which
+     * record carries it. Putting them here rather than in the layout keeps
+     * activity_main.xml untouched.
      */
     private void setHexPref(String name, String title, String hint, int minLen) {
         final EditText e = new EditText(this);
