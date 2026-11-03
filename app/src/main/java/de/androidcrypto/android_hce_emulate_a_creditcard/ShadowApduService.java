@@ -774,8 +774,21 @@ public class ShadowApduService extends HostApduService {
                     }
                     byte[] siad = findTag(out, 0x9F10);
                     if (siad != null) capturedIad = siad;
-                    cryptogramSent = true;
-                    tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card");
+
+                    // FIX: cryptogramSent means "an AC has already gone to the
+                    // terminal", and genac() trusts it over the CID box. A
+                    // scripted Kernel 2 GPO carries no AC, so setting it
+                    // unconditionally made the CID box and both force flags
+                    // dead. gpoCid is populated here too, or the verdict can
+                    // never report the GPO CID.
+                    byte[] scid = findTag(out, 0x9F27);
+                    gpoCid = (scid == null || scid.length < 1) ? "" : bytesToHex(scid);
+                    lastCid = gpoCid;
+                    cryptogramSent = findTag(out, 0x9F26) != null;
+
+                    tap("-- script served the GPO - MSD/AIP/AFL come from the script, not the card"
+                            + " | ac in gpo: "
+                            + (cryptogramSent ? "yes cid " + gpoCid : "no, it comes in GENERATE AC"));
                 }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
@@ -1199,14 +1212,19 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * Cryptogram version from the IAD, or -1 when there is none.
+     * Cryptogram version from the IAD in force, or -1 when there is none.
+     *
+     * FIX: this used to read the typed box only. computeAc() MACs over
+     * iadHex(), which prefers a CAPTURED IAD, so a capture with an empty box
+     * read as CVN -1 and quietly assumed SKD while the MAC carried the captured
+     * IAD. Reading the same source keeps the two in step.
      *
      * M/Chip IAD: byte 1 is the DKI, byte 2 is the CVN. 16/17 use Mastercard
      * Proprietary SKD, 20/21 use EMV CSK. CCD IAD starts 0F, and there the
      * version is the low nibble of byte 2 (5 = 3DES, 6 = AES).
      */
     private int cvn() {
-        String h = p("iad", "").replaceAll("[^0-9A-Fa-f]", "");
+        String h = iadHex().replaceAll("[^0-9A-Fa-f]", "");
         if (h.length() < 4) return -1;
         try {
             int b1 = Integer.parseInt(h.substring(0, 2), 16);
