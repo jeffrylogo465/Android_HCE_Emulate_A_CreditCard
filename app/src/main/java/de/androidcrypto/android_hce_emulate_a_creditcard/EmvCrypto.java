@@ -57,41 +57,6 @@ public class EmvCrypto {
     }
 
     /**
-     * CSK, CVN 20/21. option 0 = Option A (PAN||PSN), option 1 = Option B
-     * (PAN||PSN||PAN). SK = DES3(MK, Z || ATC || F0 x 6), Z right-justified.
-     *
-     * NOTE: this still takes the key raw, so like SKD it only works when the
-     * box holds an ICC master key. CVN 16/17 is the path in use; this one needs
-     * iccMasterKeys() applied too before a CSK card will verify.
-     */
-    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq,
-                               String atcHex, int option) throws Exception {
-        byte[] mk = Hex.hex(mkAcHex);
-
-        byte[] z = (option == 1)
-                ? Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq), Hex.bcd(pan))
-                : Tlv.cat(Hex.bcd(pan), Hex.bcd(panSeq));
-
-        byte[] z8 = new byte[8];
-        int n = Math.min(8, z.length);
-        System.arraycopy(z, z.length - n, z8, 8 - n, n);
-
-        byte[] atc = Hex.hex(atcHex);
-        byte[] input = new byte[16];
-        System.arraycopy(z8, 0, input, 0, 8);
-        input[8] = atc[0];
-        input[9] = atc[1];
-        Arrays.fill(input, 10, 16, (byte) 0xF0);
-
-        return des3(mk, input);
-    }
-
-    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq, String atcHex)
-            throws Exception {
-        return sessionKeyAc(mkAcHex, pan, panSeq, atcHex, 0);
-    }
-
-    /**
      * ICC master key pair, Option A.
      *
      * X = the rightmost 16 digits of PAN||PSN, left-padded with zero nibbles to
@@ -102,6 +67,8 @@ public class EmvCrypto {
      * reach the SK derivation, they only shape the ICC key. That is why the box
      * has to hold the issuer MK, and why feeding it straight to the SK gave a
      * wrong ARQC from a right key.
+     *
+     * Both CSK and SKD start here. They differ only in the session-key block.
      */
     static byte[][] iccMasterKeys(String mkissHex, String pan, String panSeq) throws Exception {
         String d = ((pan == null ? "" : pan) + (panSeq == null ? "" : panSeq))
@@ -137,6 +104,18 @@ public class EmvCrypto {
         return b;
     }
 
+    /** One 8-byte CSK input block: ATC || marker || 00 x 5. No UN. */
+    private static byte[] cskBlock(String atcHex, byte marker) throws Exception {
+        byte[] atc = Hex.hex(atcHex);
+        if (atc.length != 2) throw new IllegalArgumentException("ATC must be 2 bytes");
+
+        byte[] b = new byte[8];
+        b[0] = atc[0];
+        b[1] = atc[1];
+        b[2] = marker;
+        return b;
+    }
+
     /**
      * SKD from an ICC master key pair. SK_L uses MK_L over the F0 block, SK_R
      * uses MK_R over the 0F block. F0 and 0F are the complementary markers.
@@ -149,6 +128,19 @@ public class EmvCrypto {
     }
 
     /**
+     * CSK from an ICC master key pair, Book 2 A1.3.
+     *
+     * The UN is NOT part of a CSK session key - it goes into the MAC input
+     * instead, which is the whole reason the two schemes cannot share a
+     * builder. The block is ATC || marker || 00 x 5.
+     */
+    static byte[] sessionKeyCskRaw(byte[] mkL, byte[] mkR, String atcHex) throws Exception {
+        return Tlv.cat(
+                oddParity(des3(mkL, cskBlock(atcHex, (byte) 0xF0))),
+                oddParity(des3(mkR, cskBlock(atcHex, (byte) 0x0F))));
+    }
+
+    /**
      * SKD, CVN 16/17, full chain: issuer MK -> ICC master key pair -> SK.
      *
      * option is carried for signature compatibility and unused - PAN/PSN are
@@ -158,6 +150,24 @@ public class EmvCrypto {
                                 String atcHex, byte[] un, int option) throws Exception {
         byte[][] k = iccMasterKeys(mkissHex, pan, panSeq);
         return sessionKeySkdRaw(k[0], k[1], atcHex, un);
+    }
+
+    /**
+     * CSK, CVN 20/21, full chain. option is carried and unused, as for SKD.
+     *
+     * This used to build a right-justified PAN||PSN and encrypt 16 bytes with
+     * one key in a single pass, which is neither scheme: no ICC derivation, and
+     * the Z block belonged in the ICC key, not the SK.
+     */
+    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq,
+                               String atcHex, int option) throws Exception {
+        byte[][] k = iccMasterKeys(mkAcHex, pan, panSeq);
+        return sessionKeyCskRaw(k[0], k[1], atcHex);
+    }
+
+    static byte[] sessionKeyAc(String mkAcHex, String pan, String panSeq, String atcHex)
+            throws Exception {
+        return sessionKeyAc(mkAcHex, pan, panSeq, atcHex, 0);
     }
 
     /** ISO 9797-1 MAC Algorithm 3, padding method 2. */
