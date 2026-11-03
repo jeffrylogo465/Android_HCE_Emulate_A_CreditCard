@@ -16,6 +16,11 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
  * and would desync a length-parsing kernel. The PPSE had the same fault one
  * level up. Both are now self-consistent.
  *
+ * The PPSE closes at 6F46 / A534 / BF0C31 / 6118 / 6115 - 70, 52, 49, 24 and 21
+ * bytes of content. It was 6F45 / A533, one short at two levels, which truncated
+ * the final 02 of the Maestro 87 01 02 and made a length-validating kernel drop
+ * the field after the directory SELECT.
+ *
  * The GPO comes from Profiles.gpoMastercard, which builds AIP and AFL and
  * nothing else - Kernel 2 does not carry the cryptogram in the GPO. The IAD
  * below is therefore documentation of what the card declares, not an input to
@@ -24,7 +29,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 public final class ProfileMastercard implements CardProfile {
 
     private static final String PPSE =
-            "6F45840E325041592E5359532E4444463031A533BF0C3161184F07A0000000041010500A4D617374657263617264870101"
+            "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
           + "61154F07A000000004306050074D41455354524F870102";
 
     private static final String FCI =
