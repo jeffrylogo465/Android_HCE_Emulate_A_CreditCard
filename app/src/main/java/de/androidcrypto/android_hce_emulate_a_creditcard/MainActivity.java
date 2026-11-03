@@ -1031,23 +1031,36 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * FIX: fixed SKD vector, so the session-key derivation is checkable without
-     * a terminal. MK-AC 0123456789ABCDEFFEDCBA9876543210, ATC 0001, UN 12345678
-     * must give FB99AF71C5A2924D62E87E6643E6F1FD.
+     * Two-stage vector, so a failure names its own cause.
      *
-     * The key goes in raw - sessionKeySkd does not apply the PAN/PSN block, so
-     * this exercises the ICC-master-key level only, not a real issuer IMK. The
-     * PAN and PSN arguments are carried for signature compatibility and unused.
+     * Stage 1 pins the ICC master key derivation: MKiss 0123456789ABCDEFFEDCB
+     * A9876543210 with PAN 5287250568943496 and PSN 01 must give X 8725056894
+     * 349601, MK_L 57B3F7D3DC526123 and MK_R 4C75D998135DCD0B. If that stage
+     * mismatches, the derivation is wrong and stage 2 is not reached.
+     *
+     * Stage 2 pins the SK layout: ATC 0001, UN 12345678 must give AB8373B63D1F
+     * FD9EE3F8EFA71A2F61FD. F0 goes through MK_L, 0F through MK_R.
+     *
+     * The old single-stage value FB99AF71C5A2924D62E87E6643E6F1FD was the code's
+     * own output with no ICC step, not a spec vector.
      */
     private void runSkdVector() {
-        final String mk = "0123456789ABCDEFFEDCBA9876543210";
-        final String want = "FB99AF71C5A2924D62E87E6643E6F1FD";
         try {
-            byte[] sk = EmvCrypto.sessionKeySkd(mk, "5287250568943496", "01", "0001",
-                    hexToBytes("12345678"), 0);
-            String got = bytesToHex(sk);
-            status((want.equals(got) ? "SKD vector OK " : "SKD vector MISMATCH ")
-                    + got + (want.equals(got) ? "" : "  want " + want));
+            byte[][] k = EmvCrypto.iccMasterKeys(
+                    "0123456789ABCDEFFEDCBA9876543210", "5287250568943496", "01");
+            String l = bytesToHex(k[0]);
+            String r = bytesToHex(k[1]);
+            if (!"57B3F7D3DC526123".equals(l) || !"4C75D998135DCD0B".equals(r)) {
+                status("ICC MK MISMATCH  L " + l + " R " + r
+                        + "  want L 57B3F7D3DC526123 R 4C75D998135DCD0B");
+                return;
+            }
+
+            String sk = bytesToHex(EmvCrypto.sessionKeySkdRaw(k[0], k[1], "0001",
+                    hexToBytes("12345678")));
+            String want = "AB8373B63D1FFD9EE3F8EFA71A2F61FD";
+            status((want.equals(sk) ? "SKD vector OK " : "SKD vector MISMATCH ")
+                    + sk + (want.equals(sk) ? "" : "  want " + want));
         } catch (Exception e) {
             status("SKD vector failed - " + e);
         }
