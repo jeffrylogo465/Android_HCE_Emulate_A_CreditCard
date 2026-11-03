@@ -1,27 +1,29 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 /**
- * American Express, mag-stripe mode with CVC3.
+ * American Express, mag-stripe mode.
  *
- * CVC3 is the one offline decision a card makes without the issuer's key: a
- * 3DES checksum over a static track. EMV mode would need an ARQC, which needs
- * IMK-AC. So AIP byte 2 is 00 (no EMV-mode bit) and msd() is true.
+ * Mag-stripe mode is one COMPUTE CRYPTOGRAPHIC CHECKSUM exchange yielding a
+ * dynamic CSC. There is no second GENERATE AC and no ARPC, which is why the
+ * AIP claims nothing online: CV and TRM only.
  *
- * AIP 1800 is CV (0x10) + TRM (0x08). No issuer-auth bit: nothing here can
- * satisfy one, and the service mask keeps 0x04, so it has to go from the
- * source. Every ODA bit is clear for the same reason.
+ * AIP 1880: byte 1 0x18 is CV (0x10) + TRM (0x08), byte 2 0x80 is the MSD bit.
+ * Byte 1 b8 is RFU under Visa and ExpressPay both - it is not a rung on the
+ * ladder, whatever the older notes said. If 1880 is refused, the only live
+ * bits left to vary are 0x10 and 0x08: 1080, then 0080.
  *
- * The value is still a guess - nothing in the dump provided one. 1800 sets no
- * mode bit in either byte, so if a kernel still refuses to take the mag-stripe
- * path the ladder is 8000 (byte-1 bit) then 0080 (byte-2 bit), one change per
- * tap.
+ * There are NO bitmaps. 9F65/9F66/9F67 are Mastercard Kernel 2 only; under
+ * Visa and ExpressPay the CSC's position in the DD is fixed by the spec, so
+ * the record is 70 [ 57 <track> ] and nothing else. There is no UDOL either -
+ * 9F69 is Card Authentication Related Data here, and the CCC data field is
+ * the UN alone.
  *
- * 9F2A 04 goes in both the directory and the FCI so the kernel is picked by
+ * 9F2A 04 goes in the directory and the FCI so kernel 4 is picked by
  * identifier. No IAD: Amex has no CVN block, so defaultIad() is empty.
  *
- * The GPO goes through Profiles.gpoAmex, which emits FORMAT 1 - a raw 80 with
+ * gpo() goes through Profiles.gpoAmex, which emits FORMAT 1 - a raw 80 with
  * AIP and AFL and no inner tags. gpoWithAip would emit a 77, and a mag-stripe
- * kernel rejects a format 2 body that carries no 5A and no 57.
+ * kernel rejects a format 2 body carrying no 5A and no 57.
  */
 public final class ProfileAmex implements CardProfile {
 
@@ -29,7 +31,7 @@ public final class ProfileAmex implements CardProfile {
 
     private static final String FCI = "6F228409A00000002501A515500C414D455820426173652030318701019F2A0104";
 
-    private static final String AIP = "1800";
+    private static final String AIP = "1880";
 
     @Override public String name() { return "AMEX"; }
 
@@ -44,6 +46,8 @@ public final class ProfileAmex implements CardProfile {
     }
 
     @Override public boolean msd() { return true; }
+
+    @Override public String msdAip() { return AIP; }
 
     @Override public String defaultIad() { return ""; }
 
