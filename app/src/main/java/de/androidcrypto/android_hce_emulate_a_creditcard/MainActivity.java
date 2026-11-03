@@ -73,8 +73,11 @@ public class MainActivity extends AppCompatActivity {
      * differently, where 0x40 is qVSDC - 5800 is right there.
      *
      * THE AMEX IAD IS EMPTY on purpose. Amex does not use the M/Chip CVN shape,
-     * so an invented IAD would be worse than none: empty reads as CVN -1 and
-     * the service falls to CSK, which is the right default there.
+     * so an invented IAD would be worse than none.
+     *
+     * THE AMEX AIP IS 1C00, NOT 1880: byte 2 is 00 so the kernel takes the
+     * mag-stripe path and runs the CVC3 exchange. 1880 would keep it in EMV
+     * mode and ask for an ARQC no keyless card can produce.
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
@@ -83,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
             "VISA", "A0000000031010", "5800",
             "06011200000000", "001C" };
     private static final String[] PROFILE_AMEX = {
-            "AMEX", "A00000002501", "1880", "", "001C" };
+            "AMEX", "A00000002501", "1C00", "", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -1000,21 +1003,24 @@ public class MainActivity extends AppCompatActivity {
                 .setTitle("Issuer master key")
                 .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
                                 "Show KCV", "Run SKD vector", "Run CSK vector",
-                                "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: set record",
-                                "MSD: set location"},
+                                "Run CVC3 vector",
+                                "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
+                                "MSD: set record", "MSD: set location"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
                             else if (w == 3) showKcv();
                             else if (w == 4) runSkdVector();
                             else if (w == 5) runCskVector();
-                            else if (w == 6) setHexPref("imkcvc3", "IMKCVC3",
+                            else if (w == 6) runCvc3Vector();
+                            else if (w == 7) setHexPref("imkcvc3", "IMKCVC3",
                                     "32 or 48 hex. A different key from IMK-AC.", 32);
-                            else if (w == 7) setHexPref("ivcvc3", "IVCVC3",
-                                    "4 hex. From the personalisation dump, usually tag DD.", 4);
-                            else if (w == 8) setHexPref("msdrec", "MSD record",
+                            else if (w == 8) setHexPref("ivcvc3", "IVCVC3",
+                                    "4 hex. From the dump, usually tag DD.", 4);
+                            else if (w == 9) buildMsdRecord();
+                            else if (w == 10) setHexPref("msdrec", "MSD record",
                                     "The personalised 9F6B record, verbatim, no status word.", 8);
-                            else if (w == 9) setHexPref("msdloc", "MSD record location",
+                            else if (w == 11) setHexPref("msdloc", "MSD record location",
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else pickKeyVariant();
                         })
@@ -1055,6 +1061,49 @@ public class MainActivity extends AppCompatActivity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /**
+     * Build a skeleton with the bitmaps over the right spans, at SFI 1 rec 1.
+     *
+     * 9F65 and 9F66 are bitmaps, both counted from the FIRST NIBBLE OF THE
+     * TRACK - not from the discretionary data. 9F67 is not a bitmap: it is the
+     * count of ATC digits among the 9F66 positions, so DD[0..1] stay UN and
+     * DD[2..3] are ATC with NATC = 2.
+     *
+     * The DD is written as eight zeros, so the track differs from the 57 track
+     * by construction - the placeholder positions have to be carved out.
+     */
+    private void buildMsdRecord() {
+        String pan = prefs.getString(key(current, "pan"), "").replaceAll("[^0-9]", "");
+        if (pan.length() < 12) { status("PAN too short for a skeleton"); return; }
+        String exp = prefs.getString(key(current, "expiry"), "").replaceAll("[^0-9]", "");
+        if (exp.length() < 4) exp = "3112";
+        String svc = prefs.getString(key(current, "service"), "").replaceAll("[^0-9]", "");
+        while (svc.length() < 3) svc = "0" + svc;
+
+        int dd = pan.length() + 1 + 4 + 3;
+
+        byte[] rec = Tlv.tlv(0x70, Tlv.cat(
+                Tlv.tlv(0x9F6B, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
+                        svc.substring(0, 3), 8)),
+                Tlv.tlv(0x9F65, bits(0, pan.length())),
+                Tlv.tlv(0x9F66, bits(dd, 4)),
+                Tlv.tlv(0x9F67, new byte[]{0x02}),
+                Tlv.tlv(0x9F69, Tlv.tlv(0x9F6A, new byte[]{0x04}))));
+
+        prefs.edit()
+                .putString(key(current, "msdrec"), Hex.toHex(rec))
+                .putString(key(current, "msdloc"), "0101")
+                .apply();
+        status("skeleton built, " + rec.length + "B - set IVCVC3 next");
+    }
+
+    /** A bitmap with `count` bits set starting at bit `from`. */
+    private static byte[] bits(int from, int count) {
+        byte[] b = new byte[(from + count + 7) / 8];
+        for (int i = from; i < from + count; i++) b[i / 8] |= (byte) (0x80 >> (i % 8));
+        return b;
     }
 
     private void pickKeyVariant() {
@@ -1157,6 +1206,82 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             status("CSK vector failed - " + e);
         }
+    }
+
+    /**
+     * CVC3 vector. Staged, so a failure names its own cause.
+     *
+     * Stage 0 DES KAT. Stage 1 pins KDCVC3 from IMKCVC3 over PAN and PSN - the
+     * same Option A derivation the ARQC path uses, so a mismatch here breaks
+     * both. Stage 2 pins block order and truncation. Stage 3 is the negative,
+     * changing only the IV. Stage 4 runs the integer 26 through the production
+     * ATC encoder, because at 0001 binary and BCD are the same two bytes and the
+     * encoding goes untested.
+     *
+     * Stages 2 and 3 compare the WHOLE cipher and the tail - a bug confined to
+     * the first six bytes must fail, not pass on the tail alone.
+     */
+    private void runCvc3Vector() {
+        try {
+            String kat = bytesToHex(EmvCrypto.des(hexToBytes("133457799BBCDFF1"),
+                    hexToBytes("0123456789ABCDEF")));
+            if (!"85E813540F0AB405".equals(kat)) {
+                status("stage 0 DES KAT MISMATCH  " + kat + "  want 85E813540F0AB405");
+                return;
+            }
+
+            String imk = "0123456789ABCDEFFEDCBA9876543210";
+            byte[][] k = EmvCrypto.iccMasterKeys(imk, "5413330089600010", "01");
+            String kd = bytesToHex(k[0]) + bytesToHex(k[1]);
+            String wantKd = "438F4A976EC80DB3F4D31C0DCB32A226";
+            if (!wantKd.equals(kd)) {
+                status("stage 1 KDCVC3 MISMATCH  " + kd + "  want " + wantKd);
+                return;
+            }
+
+            byte[] key = hexToBytes(kd);
+
+            String c2 = cipherOf(key, "3E01", "12345678", "0001");
+            if (!"979B5DBF35CFCF70".equals(c2) || !"CF70".equals(tail2(c2))) {
+                status("stage 2 MISMATCH  " + c2 + "  want 979B5DBF35CFCF70 / CF70");
+                return;
+            }
+
+            String c3 = cipherOf(key, "3E02", "12345678", "0001");
+            if (!"95CB55DAAAFE0275".equals(c3) || !"0275".equals(tail2(c3))) {
+                status("stage 3 negative MISMATCH  " + c3 + "  want 95CB55DAAAFE0275 / 0275");
+                return;
+            }
+
+            String atcHex = bytesToHex(EmvCrypto.atcField(26));
+            if ("0026".equals(atcHex)) {
+                status("stage 4 ATC encoded as BCD (0026), want binary 001A");
+                return;
+            }
+            if (!"001A".equals(atcHex)) {
+                status("stage 4 ATC field " + atcHex + "  want 001A");
+                return;
+            }
+            String c4 = cipherOf(key, "3E01", "12345678", atcHex);
+            if (!"47E6367D1F95533A".equals(c4) || !"533A".equals(tail2(c4))) {
+                status("stage 4 MISMATCH  " + c4 + "  want 47E6367D1F95533A / 533A"
+                        + " (E03B = BCD)");
+                return;
+            }
+
+            status("CVC3 vector OK - CF70, neg 0275, atc 26 -> 001A -> 533A");
+        } catch (Exception e) {
+            status("CVC3 vector failed - " + e);
+        }
+    }
+
+    /** Whole 3DES output for IV || UN || ATC. */
+    private String cipherOf(byte[] kd, String iv, String un, String atc) throws Exception {
+        return bytesToHex(EmvCrypto.des3(kd, hexToBytes(iv + un + atc)));
+    }
+
+    private static String tail2(String cipherHex) {
+        return cipherHex.substring(cipherHex.length() - 4);
     }
 
     private void editKeyList() {
