@@ -69,6 +69,9 @@ public class EmvCrypto {
      * wrong ARQC from a right key.
      *
      * Both CSK and SKD start here. They differ only in the session-key block.
+     *
+     * NOTE the key is 16 bytes here, so this is the one place that legitimately
+     * uses des3. The SK halves below are 8 bytes each and use single des.
      */
     static byte[][] iccMasterKeys(String mkissHex, String pan, String panSeq) throws Exception {
         String d = ((pan == null ? "" : pan) + (panSeq == null ? "" : panSeq))
@@ -119,12 +122,15 @@ public class EmvCrypto {
     /**
      * SKD from an ICC master key pair. SK_L uses MK_L over the F0 block, SK_R
      * uses MK_R over the 0F block. F0 and 0F are the complementary markers.
+     *
+     * SINGLE DES per half - MK_L and MK_R are 8 bytes each, so des3 here throws
+     * "3DES key must be 16 or 24 bytes". That was the crash at stage 2.
      */
     static byte[] sessionKeySkdRaw(byte[] mkL, byte[] mkR, String atcHex, byte[] un)
             throws Exception {
         return Tlv.cat(
-                oddParity(des3(mkL, skBlock(atcHex, (byte) 0xF0, un))),
-                oddParity(des3(mkR, skBlock(atcHex, (byte) 0x0F, un))));
+                oddParity(des(mkL, skBlock(atcHex, (byte) 0xF0, un))),
+                oddParity(des(mkR, skBlock(atcHex, (byte) 0x0F, un))));
     }
 
     /**
@@ -133,11 +139,13 @@ public class EmvCrypto {
      * The UN is NOT part of a CSK session key - it goes into the MAC input
      * instead, which is the whole reason the two schemes cannot share a
      * builder. The block is ATC || marker || 00 x 5.
+     *
+     * Single DES per half, same as SKD.
      */
     static byte[] sessionKeyCskRaw(byte[] mkL, byte[] mkR, String atcHex) throws Exception {
         return Tlv.cat(
-                oddParity(des3(mkL, cskBlock(atcHex, (byte) 0xF0))),
-                oddParity(des3(mkR, cskBlock(atcHex, (byte) 0x0F))));
+                oddParity(des(mkL, cskBlock(atcHex, (byte) 0xF0))),
+                oddParity(des(mkR, cskBlock(atcHex, (byte) 0x0F))));
     }
 
     /**
