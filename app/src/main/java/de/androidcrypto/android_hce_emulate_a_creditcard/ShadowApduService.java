@@ -37,6 +37,11 @@ public class ShadowApduService extends HostApduService {
     private static final byte AIP_CDA = (byte) 0x01;
     private static final byte AIP_CVM = (byte) 0x10;
 
+    /** Track 2 CVC3 tag in the CCC response. 9F60 is the Track 1 twin. */
+    private static final int TAG_CVC3_T2 = 0x9F61;
+    private static final int TAG_IVCVC3   = 0x9F62; // name clash below - see kdCvc3()
+    private static final int TAG_UN_MSD   = 0x9F6A;
+
     /**
      * Default IAD when the card has none.
      *
@@ -134,7 +139,7 @@ public class ShadowApduService extends HostApduService {
     private String gpoCid = "";
 
     private boolean sawPpse;
-    private int nSelects, nGpos, nRecs, nGens;
+    private int nSelects, nGpos, nRecs, nGens, nCccs;
     private String lastCid = "";
 
     private boolean sawError;
@@ -329,7 +334,7 @@ public class ShadowApduService extends HostApduService {
         cryptogramSent = false;
         scriptHits = 0;
         sawPpse = false;
-        nSelects = nGpos = nRecs = nGens = 0;
+        nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
         sawError = false;
         capturedIad = null;
@@ -388,6 +393,34 @@ public class ShadowApduService extends HostApduService {
         if (h.length() < 2) return null;
         if (h.length() > 26) h = h.substring(0, 26);
         return h.getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    // ---------- MSD key material ----------
+
+    /**
+     * KDCVC3.
+     *
+     * CVC3 is NOT session-keyed and does NOT use the AC key. It uses a
+     * card-specific key derived from IMKCVC3 - a different master key from the
+     * IMK-AC in the MK-AC box - over PAN and PSN, exactly like an ICC master
+     * key. There is no per-transaction derivation on top.
+     *
+     * WHICH HALF IS UNVERIFIED. MK_L is used because it is the primary; if
+     * CVC3 comes back consistently wrong with a real IMKCVC3, flipping to
+     * iccMasterKeys(...)[1] is the first thing to try.
+     *
+     * Returns null when IMKCVC3 is absent or malformed, so the caller can say
+     * so instead of quietly MACing with garbage.
+     */
+    private byte[] kdCvc3() {
+        String mk = p("imkcvc3", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (mk.length() != 32 && mk.length() != 48) return null;
+        try {
+            return EmvCrypto.iccMasterKeys(mk, pan(), psn())[0];
+        } catch (Exception e) {
+            tap("!! KDCVC3 derivation failed: " + e);
+            return null;
+        }
     }
 
     // ---------- the profile in force ----------
@@ -707,6 +740,11 @@ public class ShadowApduService extends HostApduService {
      * version the terminal compares against its own 9F09 - matching it stops
      * the "different application versions" TVR bit, which is another
      * forced-online.
+     *
+     * MSD DOES NOT USE THIS RECORD for its track. The magstripe skeleton is a
+     * personalised 9F6B served verbatim (see msdRecord()), because IVCVC3 is a
+     * MAC over the static track and any edit outside the marked positions
+     * breaks the host's recomputation. This builder is the EMV record.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -732,6 +770,21 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F0F, hex("0000000000")),
                 tlv(0x5F28, hex("0840")),
                 tlv(0x57, track2())));
+    }
+
+    /**
+     * The MSD record, served verbatim.
+     *
+     * This is the personalised skeleton: 9F6B with the CVC3/UN/ATC positions as
+     * personalised, plus the bitmaps and the UDOL. The terminal's kernel writes
+     * CVC3, UN, ATC and nUN into it on every tap - the CARD writes nothing. So
+     * it must not be regenerated, only echoed.
+     *
+     * Empty means "not set", and the caller falls back to captured or synthetic.
+     */
+    private byte[] msdRecord() {
+        String h = p("msdrec", "").replaceAll("[^0-9A-Fa-f]", "");
+        return h.isEmpty() ? null : hex(h);
     }
 
     @Override
@@ -762,7 +815,8 @@ public class ShadowApduService extends HostApduService {
                         int n = scriptLines();
                         tap("-- profile: " + activeProfile().name()
                                 + " | script " + n + " line(s), gate="
-                                + (useScript() ? "ON" : "OFF"));
+                                + (useScript() ? "ON" : "OFF")
+                                + " | msd=" + isMsd());
                         popup(nameLine());
                     }
                 }
@@ -774,6 +828,7 @@ public class ShadowApduService extends HostApduService {
             else if (ins == 0xA8) nGpos++;
             else if (ins == 0xB2) nRecs++;
             else if (ins == 0xAE) nGens++;
+            else if (ins == 0x2A) nCccs++;
 
             String hit = useScript() ? scriptMatch(apdu) : null;
             if (hit != null) {
@@ -826,6 +881,8 @@ public class ShadowApduService extends HostApduService {
                 out = readRecord(p1, p2);
             } else if (ins == 0xAE) {
                 out = genac(apdu);
+            } else if (ins == 0x2A) {
+                out = ccc(apdu);
             } else if (ins == 0xCA) {
                 out = getData(apdu);
             } else if (ins == 0x20) {
@@ -937,6 +994,12 @@ public class ShadowApduService extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
+
+        // MSD: force the magstripe bit on and the EMV-mode bit off, so a typed
+        // 1880 still yields a valid magstripe AIP. EMV mode in byte 2 b8 would
+        // make the kernel send GENERATE AC and ignore the CCC entirely.
+        if (msd) used = new byte[]{(byte) ((used[0] | 0x01) & 0x7F), 0x00};
+
         txnAip = used;
 
         byte[] pdolData = new byte[0];
@@ -972,8 +1035,10 @@ public class ShadowApduService extends HostApduService {
                 + " cid=" + gpoCid + (STRIP_AC ? " (not sent)" : "")
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
+        // MSD: 80 carries AIP and AFL only. The track and the bitmaps come from
+        // the record, and the cryptogram from the CCC - never from here.
         if (msd) {
-            byte[] payload = cat(used, tlv(0x57, track2()), tlv(0x94, a));
+            byte[] payload = cat(used, tlv(0x94, a));
             tap("-- msd payload: 80" + String.format("%02X", payload.length) + bytesToHex(payload));
             return cat(tlv(0x80, payload), SW_OK);
         }
@@ -1141,6 +1206,15 @@ public class ShadowApduService extends HostApduService {
         int sfi = (p2 & 0xFF) >> 3;
         int rec = p1 & 0xFF;
 
+        if (isMsd() && sfi == 1) {
+            byte[] msd = msdRecord();
+            if (msd != null) {
+                tap("-- rec sfi=1 rec=" + rec + " (msd skeleton, verbatim " + msd.length + "B)");
+                return cat(msd, SW_OK);
+            }
+            tap("-- rec sfi=1 rec=" + rec + " (msd but no skeleton set)");
+        }
+
         byte[] captured = rawRec(sfi, rec);
         if (captured != null) {
             tap("-- rec sfi=" + sfi + " rec=" + rec + " (captured)");
@@ -1154,6 +1228,76 @@ public class ShadowApduService extends HostApduService {
 
         tap("-- rec miss sfi=" + sfi + " rec=" + rec);
         return SW_NO_RECORD;
+    }
+
+    /**
+     * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CVC3.
+     *
+     * The card increments the ATC for this command, MACs it, and returns that
+     * same ATC in 9F36. The terminal writes the returned ATC and the returned
+     * CVC3 into the track, so the value MACed and the value on the wire cannot
+     * diverge. The terminal sends only the UDOL data (9F6A by default), never
+     * an ATC.
+     *
+     * Block is IVCVC3 || UN || ATC, 8 bytes, 3DES under KDCVC3, and the LOW two
+     * bytes are the CVC3. No session key and no per-transaction derivation.
+     *
+     * Every failure mode here is silent - a wrong key or a wrong derivation half
+     * produces a well-formed CVC3 that the host rejects. So both the key and the
+     * result are logged, and a missing input is named in the response text.
+     */
+    private byte[] ccc(byte[] apdu) {
+        String atc = nextAtc();
+        byte[] atcB = hex(atc);
+
+        byte[] un = null;
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc > 0 && apdu.length >= off + lc) {
+            byte[] d = Arrays.copyOfRange(apdu, off, off + lc);
+            int i = 0;
+            while (i < d.length) {
+                int[] q = new int[]{i};
+                int t = readTag(d, q);
+                int l = readLen(d, q);
+                if (q[0] + l > d.length) break;
+                if (t == TAG_UN_MSD) { un = Arrays.copyOfRange(d, q[0], q[0] + l); break; }
+                i = q[0] + l;
+            }
+        }
+        if (un == null || un.length != 4) {
+            tap("-- ccc: no 9F6A UN in the command, using 00000000");
+            un = new byte[4];
+        }
+
+        byte[] iv = hex(p("ivcvc3", "").replaceAll("[^0-9A-Fa-f]", ""));
+        byte[] kd = kdCvc3();
+
+        byte[] cvc3;
+        if (iv.length != 2) {
+            tap("!! ccc: IVCVC3 not set (needs 4 hex) - CVC3 will be 0000");
+            cvc3 = new byte[2];
+        } else if (kd == null) {
+            tap("!! ccc: IMKCVC3 not set (needs 32 or 48 hex) - CVC3 will be 0000");
+            cvc3 = new byte[2];
+        } else {
+            try {
+                byte[] block = cat(iv, un, atcB);
+                byte[] e = EmvCrypto.des3(kd, block);
+                cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
+                tap("-- ccc atc=" + atc + " un=" + bytesToHex(un)
+                        + " iv=" + bytesToHex(iv) + " kd=" + bytesToHex(kd)
+                        + " cvc3=" + bytesToHex(cvc3));
+            } catch (Exception ex) {
+                tap("!! ccc failed: " + ex);
+                cvc3 = new byte[2];
+            }
+        }
+
+        byte[] body = cat(
+                tlv(0x9F36, atcB),
+                tlv(TAG_CVC3_T2, cvc3));
+        return cat(tlv(0x77, body), SW_OK);
     }
 
     /**
@@ -1339,9 +1483,12 @@ public class ShadowApduService extends HostApduService {
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
-            if (nGens > 0)           return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";
-            if (nRecs == 0)          return "TAP: MSD mode - terminal took the track 2 and read no record";
-            return "TAP: MSD mode - terminal read " + nRecs + " record(s) and should have decided";
+            if (nGens > 0)  return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";
+            if (nCccs == 0) return "TAP: MSD - terminal took " + nRecs
+                    + " record(s) and never sent the CCC, so it judged the track without CVC3";
+            if (nRecs == 0) return "TAP: MSD - terminal sent the CCC without reading the track";
+            return "TAP: MSD - terminal read " + nRecs + " record(s) and sent the CCC "
+                    + nCccs + "x; CVC3 was " + (kdCvc3() == null ? "NOT computable - key missing" : "computed");
         }
 
         if (nRecs == 0) {
