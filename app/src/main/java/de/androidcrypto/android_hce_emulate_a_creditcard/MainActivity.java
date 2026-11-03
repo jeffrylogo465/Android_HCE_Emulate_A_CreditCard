@@ -1032,7 +1032,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Two-stage vector, so a failure names its own cause.
+     * Three-stage vector, so a failure names its own cause.
+     *
+     * Stage 0 is a DES known-answer test: key 133457799BBCDFF1 over the block
+     * 0123456789ABCDEF must give 85E813540F0AB405. It touches no key material
+     * at all, so a broken cipher stops the run here instead of dressing up as a
+     * wrong key further down.
      *
      * Stage 1 pins the ICC master key derivation: MKiss 0123456789ABCDEFFEDCB
      * A9876543210 with PAN 5287250568943496 and PSN 01 must give X 8725056894
@@ -1047,12 +1052,19 @@ public class MainActivity extends AppCompatActivity {
      */
     private void runSkdVector() {
         try {
+            String kat = bytesToHex(EmvCrypto.des(hexToBytes("133457799BBCDFF1"),
+                    hexToBytes("0123456789ABCDEF")));
+            if (!"85E813540F0AB405".equals(kat)) {
+                status("stage 0 DES KAT MISMATCH  " + kat + "  want 85E813540F0AB405");
+                return;
+            }
+
             byte[][] k = EmvCrypto.iccMasterKeys(
                     "0123456789ABCDEFFEDCBA9876543210", "5287250568943496", "01");
             String l = bytesToHex(k[0]);
             String r = bytesToHex(k[1]);
             if (!"57B3F7D3DC526123".equals(l) || !"4C75D998135DCD0B".equals(r)) {
-                status("ICC MK MISMATCH  L " + l + " R " + r
+                status("stage 1 ICC MK MISMATCH  L " + l + " R " + r
                         + "  want L 57B3F7D3DC526123 R 4C75D998135DCD0B");
                 return;
             }
@@ -1060,7 +1072,7 @@ public class MainActivity extends AppCompatActivity {
             String sk = bytesToHex(EmvCrypto.sessionKeySkdRaw(k[0], k[1], "0001",
                     hexToBytes("12345678")));
             String want = "AB8373B63D1FFD9EE3F8EFA71A2F61FD";
-            status((want.equals(sk) ? "SKD vector OK " : "SKD vector MISMATCH ")
+            status((want.equals(sk) ? "stage 2 SKD vector OK " : "stage 2 SKD vector MISMATCH ")
                     + sk + (want.equals(sk) ? "" : "  want " + want));
         } catch (Exception e) {
             status("SKD vector failed - " + e);
