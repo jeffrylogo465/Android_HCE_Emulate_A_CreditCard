@@ -57,7 +57,7 @@ public class EmvCrypto {
     }
 
     /**
-     * ICC master key pair, Option A.
+     * ICC master key pair, Book 2 Annex A1.4, Option A.
      *
      * X = the rightmost 16 digits of PAN||PSN, left-padded with zero nibbles to
      * 16 digits when the pair is shorter. MK_L = DES3(MKiss, X),
@@ -217,5 +217,57 @@ public class EmvCrypto {
         }
         byte[] e = des3(k, new byte[8]);
         return Hex.toHex(Arrays.copyOfRange(e, 0, 3));
+    }
+
+    // ---------- MSD / CVC3 helpers ----------
+
+    /**
+     * The ATC as its two wire bytes, big-endian binary.
+     *
+     * Packed BCD is the trap: 26 decimal is 0x00 0x1A, not 0x00 0x26. The two
+     * agree at 0x0001 and diverge from 0x000A up, which is why the CVC3 vector
+     * checks ATC 26 rather than ATC 1.
+     */
+    static byte[] atcField(int atc) {
+        return new byte[]{(byte) ((atc >> 8) & 0xFF), (byte) (atc & 0xFF)};
+    }
+
+    /**
+     * Skeleton Track 2: PAN D YYMM SVC DD, packed nibbles.
+     *
+     * Track 2 is packed, not ASCII - D is the separator nibble. The PAN is the
+     * FULL PAN; a tail-only track leaves the issuer unable to find the account.
+     *
+     * DD must exist even when it holds no real data: the CVC3, UN and ATC
+     * digits land at the positions the bitmaps point to, and with no DD there
+     * is nowhere to point. Personalise those positions as zeros.
+     *
+     * F is appended only when the digit count is odd, and is the same nibble
+     * the verifier leaves out of the bitmap range.
+     */
+    static byte[] msdTrack2(String pan, String exp, String svc, int ddDigits) {
+        StringBuilder sb = new StringBuilder(pan == null ? "" : pan);
+        sb.append('D').append(exp).append(svc);
+        for (int i = 0; i < ddDigits; i++) sb.append('0');
+        if (sb.length() % 2 != 0) sb.append('F');
+        return Hex.hex(sb.toString());
+    }
+
+    /**
+     * IVCVC3 for a track: the rightmost 2 bytes of the MAC over that track's
+     * own bytes under KDCVC3.
+     *
+     * Each track gets its own - Track 1 over its 56 data, Track 2 over its 9F6B
+     * data. There is no shared IV, and two bytes off the front of the key are
+     * not an IV.
+     *
+     * PADDING IS UNCONFIRMED. mac() applies padding method 2 unconditionally,
+     * so a track already 8-aligned gains a full block. Whether personalisation
+     * does that is still open - if the IV never matches, this is the first
+     * thing to change.
+     */
+    static byte[] ivcvc3(String kdHex, byte[] track) throws Exception {
+        byte[] m = mac(Hex.hex(kdHex), track);
+        return Arrays.copyOfRange(m, m.length - 2, m.length);
     }
 }
