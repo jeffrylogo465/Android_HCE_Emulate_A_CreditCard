@@ -35,21 +35,24 @@ public class ShadowApduService extends HostApduService {
     private static final String DEFAULT_AIP = "1880";
     private static final byte AIP_KEEP_MASK = (byte) 0xD9;
 
-    private static final byte AIP_CDA = (byte) 0x01;
-    private static final byte AIP_CVM = (byte) 0x10;
-
     /**
-     * MSD AIP mask. Byte 1 keeps 0x80 (Amex mag-stripe), 0x10 CV, 0x08 TRM and
-     * 0x04 issuer auth; clears SDA 0x40, DDA 0x20 and CDA 0x01. Byte 2 keeps
-     * everything but 0x80 (EMV mode) and 0x40.
+     * MSD AIP mask, MASTERCARD PATH ONLY.
      *
-     * 0x80 has to survive byte 1 or the AIP ladder collapses - 8000 masked to
-     * 0000 under the old 0x1C, the same value as 0080.
+     * Byte 1 keeps 0x10 CV, 0x08 TRM and 0x80 (RFU under both Visa and
+     * ExpressPay, kept so nothing surprises a picky kernel). Clears SDA 0x40,
+     * DDA 0x20, CDA 0x01 and issuer auth 0x04 - none is answerable in a
+     * mag-stripe flow, and issuer auth is an online capability with no ARPC
+     * to follow it.
+     *
+     * Byte 2 keeps everything but 0x80. Under Mastercard 0x80 means EMV mode,
+     * so MSD is selected by clearing it - the opposite of Visa, where 0x80 IS
+     * the MSD bit. That asymmetry is why a profile with an msdAip() override
+     * never reaches this mask at all.
      */
-    private static final byte AIP_MSD_KEEP_1 = (byte) 0x9C;
-    private static final byte AIP_MSD_KEEP_2 = (byte) 0x3F;
+    private static final byte AIP_MSD_KEEP_1 = (byte) 0x98;
+    private static final byte AIP_MSD_KEEP_2 = (byte) 0x7F;
 
-    /** Track 2 CVC3 tag in the CCC response. 9F60 is the Track 1 twin. */
+    /** Track 2 CSC tag in the CCC response. 9F60 is the Track 1 twin. */
     private static final int TAG_CVC3_T2 = 0x9F61;
     private static final int TAG_CVC3_T1 = 0x9F60;
     private static final int TAG_UN_MSD   = 0x9F6A;
@@ -83,11 +86,9 @@ public class ShadowApduService extends HostApduService {
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
 
     /**
-     * FORCE_ONLINE_ARQC used to be true, and because it is tested ABOVE
-     * FORCE_OFFLINE_TC, any card with a key in the MK-AC box answered ARQC and
-     * went online no matter what the terminal asked for. That is the wrong
-     * default for a clone: the ARQC is computed with a key the issuer does not
-     * hold, so going online is a guaranteed decline unless the key is real.
+     * Both flags are GENERATE AC only, so neither is reachable in MSD - that
+     * flow is a single CCC exchange and never sends GENERATE AC. Kept for the
+     * EMV path.
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
     private static final boolean FORCE_OFFLINE_TC = true;
@@ -404,7 +405,7 @@ public class ShadowApduService extends HostApduService {
     /**
      * KDCVC3.
      *
-     * CVC3 is NOT session-keyed and does NOT use the AC key. It uses a
+     * The CSC is NOT session-keyed and does NOT use the AC key. It uses a
      * card-specific key derived from IMKCVC3 over PAN and PSN, exactly like an
      * ICC master key. The key is static per card; all variation enters through
      * the UN and ATC in the block.
@@ -739,7 +740,7 @@ public class ShadowApduService extends HostApduService {
      * the terminal's own TAC ORs on top anyway.
      *
      * MSD does not use this record for its track - the magstripe skeleton is a
-     * personalised 9F6B served verbatim.
+     * personalised 57 served verbatim.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -770,8 +771,10 @@ public class ShadowApduService extends HostApduService {
     /**
      * The MSD record, served verbatim.
      *
-     * The terminal's kernel writes CVC3, UN, ATC and nUN into it on every tap -
-     * the CARD writes nothing, so it must not be regenerated, only echoed.
+     * Under Visa and ExpressPay the CSC's position in the DD is fixed by the
+     * spec rather than by bitmaps, so there is nothing to regenerate and
+     * nothing to point at - the track is served as personalised and the
+     * terminal patches the CSC into its own copy when it comes back in 9F61.
      *
      * A 70 wrapper is added when the skeleton arrives bare. Without it the
      * record is not a record and the parser has nothing to read.
@@ -1017,10 +1020,16 @@ public class ShadowApduService extends HostApduService {
 
         byte[] used = new byte[]{aip[0], aip[1]};
 
-        // MSD: drop the ODA bits but keep 0x80 in byte 1 - Amex uses it as the
-        // mag-stripe bit and clearing it collapses the AIP ladder.
-        if (msd) used = new byte[]{(byte) (used[0] & AIP_MSD_KEEP_1),
-                                  (byte) (used[1] & AIP_MSD_KEEP_2)};
+        // MSD: a profile that declares its own MSD AIP wins outright. Under
+        // Visa the MSD bit is byte 2 0x80 and has to be SET, the opposite of
+        // Mastercard, so a single mask cannot serve both.
+        if (msd) {
+            String m = activeProfile().msdAip();
+            used = (m != null && m.length() >= 4)
+                    ? hex(m)
+                    : new byte[]{(byte) (used[0] & AIP_MSD_KEEP_1),
+                                 (byte) (used[1] & AIP_MSD_KEEP_2)};
+        }
 
         txnAip = used;
 
@@ -1058,8 +1067,7 @@ public class ShadowApduService extends HostApduService {
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         // Format 1: flat, AIP then AFL, no inner tags. MSD has no cryptogram
-        // here - the track and bitmaps come from the record, the cryptogram
-        // from the CCC.
+        // here - the track comes from the record, the CSC from the CCC.
         if (msd) {
             byte[] payload = cat(used, a);
             tap("-- msd: gpo format 1 aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
@@ -1102,41 +1110,21 @@ public class ShadowApduService extends HostApduService {
         } catch (Exception ignored) { }
     }
 
-    private static void weakenAip(byte[] tpl) {
-        int[] pos = new int[1];
-        int outer = readTag(tpl, pos);
-        readLen(tpl, pos);
-
-        if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~AIP_CDA;
-            return;
-        }
-
-        int i = pos[0];
-        while (i < tpl.length) {
-            int[] q = new int[]{i};
-            int t = readTag(tpl, q);
-            int l = readLen(tpl, q);
-            if (q[0] + l > tpl.length) return;
-            if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~AIP_CDA;
-                return;
-            }
-            i = q[0] + l;
-        }
-    }
-
     /**
      * Force the AIP of a scripted GPO to the MSD shape.
      *
      * The script path returns before gpo() runs, so the mask inside gpo() never
-     * applied while a script was armed. Same mask, applied to the served bytes.
+     * applied while a script was armed. Same rule, applied to the served bytes.
      */
     private byte[] msdAip(byte[] tpl) {
         byte[] aip = capturedAip(tpl);
         if (aip == null || aip.length < 2) return tpl;
-        return setAip(tpl, new byte[]{(byte) (aip[0] & AIP_MSD_KEEP_1),
-                                      (byte) (aip[1] & AIP_MSD_KEEP_2)});
+        String m = activeProfile().msdAip();
+        byte[] set = (m != null && m.length() >= 4)
+                ? hex(m)
+                : new byte[]{(byte) (aip[0] & AIP_MSD_KEEP_1),
+                             (byte) (aip[1] & AIP_MSD_KEEP_2)};
+        return setAip(tpl, set);
     }
 
     /** Overwrite the AIP in either framing, in place. */
@@ -1173,50 +1161,32 @@ public class ShadowApduService extends HostApduService {
     /**
      * Name what MSD needs that is not set, at tap time.
      *
-     * Every MSD failure is silent: a missing bitmap or a skeleton without 9F6B
-     * still produces a well-formed CCC and the terminal just computes a CVC3
-     * that cannot match. Saying it up front is the only cheap signal.
+     * Every MSD failure is silent, so saying it up front is the only cheap
+     * signal. Under Visa and ExpressPay there are no bitmaps to check - the
+     * one structural thing left is that the track exists and differs from the
+     * 57 record, which means the DD is carved out.
      */
     private void msdSanity() {
         byte[] rec = msdRecord();
         if (rec == null) {
-            tap("!! msd: no skeleton set - the synthetic EMV record has no 9F6B"
-                    + " and no bitmaps, so there is nothing to MAC");
+            tap("!! msd: no skeleton set - no track to MAC");
             return;
         }
 
-        byte[] t6b = findTag(rec, 0x9F6B);
-        if (t6b == null) {
-            tap("!! msd: skeleton has no 9F6B - no track to MAC");
-        } else if (Arrays.equals(t6b, track2())) {
-            tap("-- msd: 9F6B is byte-identical to the 57 track - no placeholder"
-                    + " positions carved out, and no iCVV on the 57 either");
+        byte[] t57 = findTag(rec, 0x57);
+        if (t57 == null) {
+            tap("!! msd: skeleton has no 57 - no track to MAC");
+        } else if (Arrays.equals(t57, track2())) {
+            tap("-- msd: 57 is byte-identical to the track - DD not carved out");
         }
 
-        if (findTag(rec, TAG_UDOL) == null) {
-            tap("-- msd: no 9F69 descriptor - the default UDOL (9F6A at offset 0) applies");
-        } else if (findTag(rec, TAG_UN_MSD) == null) {
-            tap("!! msd: descriptor has no 9F6A - no UN to MAC");
-        }
-
-        if (findTag(rec, 0x9F65) == null) tap("!! msd: no 9F65 payload bitmap");
-
-        byte[] pun = findTag(rec, 0x9F66);
-        if (pun == null) tap("!! msd: no 9F66 UN bitmap");
-
-        // 9F67 is a COUNT of ATC digits among the 9F66 positions, not a bitmap.
-        byte[] natc = findTag(rec, 0x9F67);
-        if (natc == null || natc.length != 1) {
-            tap("!! msd: no single-byte 9F67 NATC - no ATC digits in the track");
-        } else if ((natc[0] & 0xFF) == 0) {
-            tap("!! msd: 9F67 is 0 - no ATC digits, counter unbound");
-        } else if (pun != null) {
-            int punBits = 0;
-            for (byte x : pun) punBits += Integer.bitCount(x & 0xFF);
-            if ((natc[0] & 0xFF) > punBits) {
-                tap("!! msd: 9F67 says " + (natc[0] & 0xFF) + " ATC digits but 9F66"
-                        + " marks only " + punBits + " positions");
+        if (findTag(rec, TAG_UDOL) != null) {
+            tap("-- msd: 9F69 present - non-Visa descriptor, UN offset from it");
+            if (findTag(rec, TAG_UN_MSD) == null) {
+                tap("!! msd: descriptor has no 9F6A - no UN to MAC");
             }
+        } else {
+            tap("-- msd: no 9F69 - correct for Visa-family MSD, CCC field is the UN only");
         }
 
         byte[] a = afl();
@@ -1224,8 +1194,8 @@ public class ShadowApduService extends HostApduService {
             tap("!! msd: afl is " + a.length + "B - must be a multiple of 4");
         }
 
-        if (p("ivcvc3", "").trim().isEmpty()) tap("!! msd: IVCVC3 not set - CVC3 will be 0000");
-        if (kdCvc3() == null) tap("!! msd: IMKCVC3 not set - CVC3 will be 0000");
+        if (p("ivcvc3", "").trim().isEmpty()) tap("!! msd: IVCVC3 not set - CSC will be 0000");
+        if (kdCvc3() == null) tap("!! msd: IMKCVC3 not set - CSC will be 0000");
         tap("-- msd: skeleton " + rec.length + "B, sanity checked");
     }
 
@@ -1365,14 +1335,11 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * Byte offset of 9F6A inside the CCC data field, from the UDOL (9F69).
+     * Byte offset of 9F6A inside the CCC data field.
      *
-     * The UDOL is optional; its absence means the default UDOL, which is 9F6A
-     * with length 04, so the UN is the first four bytes. Only a custom UDOL
-     * lacking 9F6A makes offset 0 wrong, and that is logged.
-     *
-     * The block stays IVCVC3 || UN || ATC whatever else the UDOL asks for - the
-     * extra fields are sent but never enter the block.
+     * Visa-family MSD defines no UDOL, so the field is the UN alone and the
+     * offset is 0. Only a manually typed 9F69 changes that; a Mastercard
+     * skeleton can still carry one.
      */
     private int unOffset() {
         byte[] rec = msdRecord();
@@ -1395,7 +1362,7 @@ public class ShadowApduService extends HostApduService {
         return 0;
     }
 
-    /** Total data length the descriptor asks for, or 4 for the default UDOL. */
+    /** Total data length the descriptor asks for, or 4 with no descriptor. */
     private int udolLen() {
         byte[] rec = msdRecord();
         if (rec == null) return 4;
@@ -1419,10 +1386,10 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CVC3.
+     * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CSC.
      *
-     * One ATC per tap: gpo() already climbed it for the ARQC, so that value is
-     * reused and only a second checksum in the same tap takes a new one.
+     * One ATC per tap: gpo() already climbed it, so that value is reused and
+     * only a second checksum in the same tap takes a new one.
      *
      * Block is IVCVC3 || UN || ATC, assembled to exactly 8 bytes, 3DES under
      * KDCVC3, LOW two bytes out. The ATC is BINARY - BCD is the trap. No
@@ -1479,7 +1446,7 @@ public class ShadowApduService extends HostApduService {
             tap("!! ccc: " + (iv.length != 2
                         ? "IVCVC3 not set (needs 4 hex)"
                         : "IMKCVC3 not set (needs 32 or 48 hex)")
-                    + " - CVC3 will be 0000");
+                    + " - CSC will be 0000");
             body = tlv(TAG_CVC3_T2, new byte[2]);
         } else {
             byte[] cvc3 = null;
@@ -1515,7 +1482,8 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * GENERATE AC.
+     * GENERATE AC. Unreachable in MSD - that flow is a single CCC exchange -
+     * but kept for the EMV path.
      *
      * The CID must not be "higher" than requested: AAC for AAC, ARQC for ARQC,
      * TC for anything else. The response carries 9F10, 9F26, 9F27 and 9F36 and
@@ -1682,10 +1650,10 @@ public class ShadowApduService extends HostApduService {
         if (isMsd()) {
             if (nGens > 0)  return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";
             if (nCccs == 0) return "TAP: MSD - terminal took " + nRecs
-                    + " record(s) and never sent the CCC, so it judged the track without CVC3";
+                    + " record(s) and never sent the CCC, so it judged the track without a CSC";
             if (nRecs == 0) return "TAP: MSD - terminal sent the CCC without reading the track";
             return "TAP: MSD - terminal read " + nRecs + " record(s) and sent the CCC "
-                    + nCccs + "x; CVC3 was "
+                    + nCccs + "x; CSC was "
                     + (kdCvc3() == null ? "NOT computable - key missing" : "computed");
         }
 
