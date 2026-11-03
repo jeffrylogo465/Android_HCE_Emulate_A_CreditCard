@@ -985,17 +985,57 @@ public class MainActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
-                // FIX: vector entries added as indexes 4 and 5
                 .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
-                                "Show KCV", "Run SKD vector", "Run CSK vector"},
+                                "Show KCV", "Run SKD vector", "Run CSK vector",
+                                "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: set record"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
                             else if (w == 3) showKcv();
                             else if (w == 4) runSkdVector();
                             else if (w == 5) runCskVector();
+                            else if (w == 6) setHexPref("imkcvc3", "IMKCVC3",
+                                    "32 or 48 hex. A different key from IMK-AC.", 32);
+                            else if (w == 7) setHexPref("ivcvc3", "IVCVC3",
+                                    "4 hex. From the personalisation dump, usually tag DD.", 4);
+                            else if (w == 8) setHexPref("msdrec", "MSD record",
+                                    "The personalised 9F6B record, verbatim, no status word.", 8);
                             else pickKeyVariant();
                         })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /**
+     * One hex value into a card-scoped pref, with the length checked.
+     *
+     * These three are the MSD inputs and none of them has a box: IMKCVC3 is a
+     * second master key that the MK-AC box does not hold, IVCVC3 is a
+     * personalisation value, and the record has to be the dump's skeleton
+     * verbatim because IVCVC3 is a MAC over the static track. Putting them here
+     * rather than in the layout keeps activity_main.xml untouched.
+     */
+    private void setHexPref(String name, String title, String hint, int minLen) {
+        final EditText e = new EditText(this);
+        e.setText(prefs.getString(key(current, name), ""));
+        e.setHint(hint);
+        e.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(e)
+                .setPositiveButton("Save", (d, w) -> {
+                    String h = e.getText().toString()
+                            .replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+                    if (h.length() < minLen) {
+                        Toast.makeText(this, title + " needs at least " + minLen + " hex",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    prefs.edit().putString(key(current, name), h).apply();
+                    status(title + " set, " + (h.length() / 2) + " bytes");
+                })
                 .setNegativeButton("Cancel", null)
                 .show();
     }
