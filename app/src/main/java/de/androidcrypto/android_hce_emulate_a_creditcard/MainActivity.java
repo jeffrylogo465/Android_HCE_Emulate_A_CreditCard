@@ -253,7 +253,7 @@ public class MainActivity extends AppCompatActivity {
 
         etAid.setOnLongClickListener(v -> { showAidPicker(); return true; });
         etLabel.setOnLongClickListener(v -> { showProfilePicker(); return true; });
-        etTrack2.setOnLongClickListener(v -> { showPreview(); return true; });
+        etTrack2.setOnLongClickListener(v -> { promptDump(); return true; });
         etMkac.setOnLongClickListener(v -> { showKeyTools(); return true; });
         navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
         txtCount.setOnLongClickListener(v -> { startCapture(); return true; });
@@ -493,6 +493,65 @@ public class MainActivity extends AppCompatActivity {
         status("Script " + net + " - directory, FCI and GPO come from Profile" + net
                 + ", script box blank");
         Toast.makeText(this, net + " profile loaded", Toast.LENGTH_SHORT).show();
+    }
+
+    // ---------- track 2 dump ----------
+
+    /**
+     * One-shot loader: paste a track 2 dump and everything downstream derives.
+     *
+     * Validate-then-commit - the parse finishes before a single field is
+     * written, so a bad dump cannot leave the card half-populated. The fields
+     * are then set and the skeleton rebuilt from them, so the 57 and the boxes
+     * agree instead of carrying two versions of the same track.
+     *
+     * MSD is switched on here because that is the only reason to paste a dump.
+     */
+    private void applyDump(String raw) {
+        Track2Dump d;
+        try {
+            d = Track2Dump.parse(raw);
+        } catch (IllegalArgumentException e) {
+            status("dump: " + e.getMessage(), COL_STALE);
+            return;
+        }
+
+        binding = true;
+        etPan.setText(d.pan);
+        etExpiry.setText(d.expiry);
+        etService.setText(d.serviceCode);
+        etDiscretionary.setText(d.dd);
+        etTrack2.setText(d.pan + "=" + d.expiry + d.serviceCode + d.dd);
+        binding = false;
+
+        collect();
+        maybeProfile();
+
+        binding = true;
+        etMsd.setText("1");
+        binding = false;
+        collect();
+
+        adapter.notifyItemChanged(current);
+        buildMsdRecord();
+
+        status("dump loaded " + d.pan + " exp " + d.expiry + " svc " + d.serviceCode
+                + " dd " + (d.dd.isEmpty() ? "none" : d.dd.length() + "d")
+                + " - harness next", COL_WARM);
+    }
+
+    /** Paste a dump into a dialog, pre-filled with whatever the box holds. */
+    private void promptDump() {
+        final EditText in = new EditText(this);
+        in.setText(t(etTrack2));
+        in.setHint("PAN=YYMM<svc><DD>  or  PAN D YYMM<svc><DD>");
+        in.setTextSize(12f);
+        new AlertDialog.Builder(this)
+                .setTitle("Track 2 dump")
+                .setView(in)
+                .setPositiveButton("Load", (dlg, w) -> applyDump(in.getText().toString()))
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     // ---------- BIN hints ----------
