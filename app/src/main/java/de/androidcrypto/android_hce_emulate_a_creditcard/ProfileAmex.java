@@ -1,36 +1,47 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 /**
- * American Express, modelled on ProfileMastercard.
+ * American Express, mag-stripe mode with CVC3.
  *
- * Kernel 4 uses the same application structure as Kernel 2 - an FCI carrying
- * 84 and A5, a GPO carrying 82 and 94, and the AC in GENERATE AC - so the
- * builders and the shape are reused verbatim. Only the AID, the directory and
- * the FCI differ.
+ * Kernel 4 reuses the Kernel 2 application structure - an FCI carrying 84 and
+ * A5, a GPO carrying 82 and 94 - so the framing is shared with ProfileMastercard
+ * and only the AID, the directory, the FCI and the AIP differ.
  *
- * THE AIP IS THE GUESS. 1880 mirrors the Mastercard profile: CV and TRM set,
- * every ODA bit clear, EMV mode in byte 2. Amex numbers its AIP bits by the
- * classic table as Mastercard does, but the value itself is not lifted from a
- * real Amex card - nothing in the dump provided one. If a terminal takes the
- * FCI and then misbehaves, vary the AIP before suspecting anything else.
+ * WHY MAG-STRIPE AND NOT EMV MODE: CVC3 is the one offline decision a card can
+ * make without the issuer's key. It is a 3DES checksum over a static track, so
+ * a clone holding IMKCVC3 produces a value the terminal verifies on the spot.
+ * EMV mode would instead ask for an ARQC, which needs IMK-AC. So the AIP keeps
+ * the EMV-mode bit clear and msd() returns true.
  *
- * No 9F38 in the FCI, so the terminal sends a PDOL-free GPO, same as Mastercard.
+ * THE AIP IS 1C00. Classic EMV numbering, as Mastercard uses: 0x10 CV, 0x08
+ * TRM, 0x04 issuer auth, and every ODA bit clear - SDA 0x40, DDA 0x20, CDA
+ * 0x01. Byte 2 is 00. The value is not lifted off a real Amex card; nothing in
+ * the dump provided one. If a terminal takes the FCI and then misbehaves, vary
+ * the AIP before suspecting anything else.
  *
- * LENGTHS: the AID is 9 bytes, so every outer length is computed against that.
- * PPSE closes at 6F32 / A520 / BF0C1E / 611C - 50, 34, 32 and 30 bytes of
- * content. The FCI closes at 6F1E / A511 - 30 and 17.
+ * 9F2A 04 is advertised in both the directory entry and the FCI so the terminal
+ * picks Kernel 4 by identifier rather than guessing from the AID prefix.
+ *
+ * NO IAD. Amex has no M/Chip style CVN block and cvn() would misread one, so
+ * defaultIad() is empty rather than null.
+ *
+ * LENGTHS: the AID is 9 bytes, so every length is computed against that. PPSE
+ * closes at 6F36 / A524 / BF0C22 / 6120 - 54, 36, 34 and 32 bytes of content.
+ * The FCI closes at 6F22 / A515 - 34 and 21.
  */
 public final class ProfileAmex implements CardProfile {
 
+    private static final String LABEL = "414D45582042617365203031";   // "AMEX Base 01"
+
     private static final String PPSE =
-            "6F32840E325041592E5359532E4444463031A520BF0C1E611C4F09A0000000250150"
-          + "0C414D45582042617365203031" + "870101";
+            "6F36840E325041592E5359532E4444463031A524BF0C226120"
+          + "4F09A00000002501500C" + LABEL + "8701019F2A0104";
 
     private static final String FCI =
-            "6F1E8409A00000002501A511500C414D45582042617365203031" + "870101";
+            "6F228409A00000002501A515500C" + LABEL + "8701019F2A0104";
 
-    /** Mirrors the Mastercard AIP. See the class comment - this is the guess. */
-    private static final String AIP = "1880";
+    /** See the class comment. ODA bits clear, byte 2 00. */
+    private static final String AIP = "1C00";
 
     @Override public String name() { return "AMEX"; }
 
@@ -44,17 +55,16 @@ public final class ProfileAmex implements CardProfile {
         return aid != null && aid.startsWith("A000000025");
     }
 
+    /** Amex is mag-stripe by nature - see the class comment. */
+    @Override public boolean msd() { return true; }
+
+    /** Empty, not null: Amex has no CVN-bearing IAD to fall back to. */
+    @Override public String defaultIad() { return ""; }
+
     @Override public String selectPpse(String aid) {
         return Profiles.selectPpse(PPSE);
     }
 
     @Override public String[] selectApp(String aid, String label) {
         return new String[]{
-                "00A4040009A0000000250100=" + FCI + "9000",
-        };
-    }
-
-    @Override public String gpo(String atc, String arqc) {
-        return Profiles.gpoMastercard(atc, arqc);
-    }
-}
+                "00A4040009A000000
