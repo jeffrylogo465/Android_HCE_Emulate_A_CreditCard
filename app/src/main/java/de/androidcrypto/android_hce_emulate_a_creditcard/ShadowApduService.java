@@ -403,11 +403,11 @@ public class ShadowApduService extends HostApduService {
      * CVC3 is NOT session-keyed and does NOT use the AC key. It uses a
      * card-specific key derived from IMKCVC3 - a different master key from the
      * IMK-AC in the MK-AC box - over PAN and PSN, exactly like an ICC master
-     * key. There is no per-transaction derivation on top.
+     * key. There is no per-transaction derivation on top: the key is static per
+     * card and all the variation enters through the UN and ATC in the block.
      *
      * The derivation yields ONE 16-byte double-length key, so it is the two
-     * halves concatenated, not a single half picked out of the pair. Returning
-     * [0] alone was wrong: the 3DES below needs all sixteen bytes.
+     * halves concatenated, not a single half picked out of the pair.
      *
      * Returns null when IMKCVC3 is absent or malformed, so the caller can say
      * so instead of quietly encrypting with garbage.
@@ -777,15 +777,39 @@ public class ShadowApduService extends HostApduService {
      * The MSD record, served verbatim.
      *
      * This is the personalised skeleton: 9F6B with the CVC3/UN/ATC positions as
-     * personalised, plus the bitmaps and the UDOL. The terminal's kernel writes
-     * CVC3, UN, ATC and nUN into it on every tap - the CARD writes nothing. So
-     * it must not be regenerated, only echoed.
+     * personalised, plus the bitmaps and optionally the UDOL. The terminal's
+     * kernel writes CVC3, UN, ATC and nUN into it on every tap - the CARD
+     * writes nothing. So it must not be regenerated, only echoed.
      *
      * Empty means "not set", and the caller falls back to captured or synthetic.
      */
     private byte[] msdRecord() {
         String h = p("msdrec", "").replaceAll("[^0-9A-Fa-f]", "");
         return h.isEmpty() ? null : hex(h);
+    }
+
+    /**
+     * SFI/record that carries the skeleton, as "ssrr" hex.
+     *
+     * The magstripe skeleton is ONE record - 9F6B with the Track 2 bitmaps,
+     * plus 56 and the Track 1 bitmaps when Track 1 is personalised - even when
+     * the AFL lists several records across SFIs. Serving it for every record is
+     * wrong as soon as there are two.
+     *
+     * Falls back to the first AFL entry, which is the conventional location
+     * (often SFI 2), then to SFI 1 rec 1.
+     */
+    private int[] msdLocation() {
+        String v = p("msdloc", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (v.length() == 4) {
+            try {
+                return new int[]{Integer.parseInt(v.substring(0, 2), 16),
+                                 Integer.parseInt(v.substring(2, 4), 16)};
+            } catch (NumberFormatException ignored) { }
+        }
+        byte[] a = afl();
+        if (a.length >= 4) return new int[]{(a[0] & 0xFF) >> 3, a[1] & 0xFF};
+        return new int[]{1, 1};
     }
 
     @Override
@@ -1211,15 +1235,18 @@ public class ShadowApduService extends HostApduService {
         int sfi = (p2 & 0xFF) >> 3;
         int rec = p1 & 0xFF;
 
-        // The skeleton's location is whatever the personalised AFL says, so no
-        // SFI test here. Caveat: with several AFL entries every record gets the
-        // same bytes, which is right for a single-record card only.
         if (isMsd()) {
             byte[] msd = msdRecord();
             if (msd != null) {
-                tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd skeleton, verbatim "
-                        + msd.length + "B)");
-                return cat(msd, SW_OK);
+                int[] loc = msdLocation();
+                if (loc[0] == sfi && loc[1] == rec) {
+                    tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd skeleton, verbatim "
+                            + msd.length + "B)");
+                    return cat(msd, SW_OK);
+                }
+                tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd skeleton is sfi="
+                        + loc[0] + " rec=" + loc[1] + ")");
+                return SW_NO_RECORD;
             }
             tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd but no skeleton set)");
         }
@@ -1243,10 +1270,13 @@ public class ShadowApduService extends HostApduService {
      * Byte offset of 9F6A inside the CCC data field, from the personalised UDOL
      * (9F69 in the skeleton), or 0 when there is no UDOL to read.
      *
-     * The CCC data field is the UDOL value filled in positionally, so the UN
-     * sits wherever the UDOL puts it - NOT necessarily at offset 0. Reading the
-     * first four bytes only works while 9F6A happens to be first, and a
-     * reordered UDOL would otherwise give a plausible, wrong CVC3.
+     * The UDOL is OPTIONAL. Its absence is not an error and does not mean offset
+     * 0 is a guess: the kernel then applies the default UDOL, which is exactly
+     * 9F6A with length 04, so the UN is the first four bytes. Only a custom
+     * UDOL that somehow lacks 9F6A makes 0 wrong, and that is logged.
+     *
+     * A custom UDOL need not put 9F6A first, but it must contain it - 9F6A is
+     * the only defined source for the four UN bytes the CVC3 block consumes.
      *
      * The CVC3 block itself stays IVCVC3 || UN(4) || ATC(2) whatever else the
      * UDOL asks for: the extra fields are sent in the command but never enter
@@ -1258,7 +1288,7 @@ public class ShadowApduService extends HostApduService {
         if (rec == null) return 0;
 
         byte[] udol = findTag(rec, TAG_UDOL);
-        if (udol == null) return 0;
+        if (udol == null) return 0;   // no UDOL means the default UDOL: 9F6A first
 
         int off = 0, i = 0;
         while (i < udol.length) {
@@ -1270,6 +1300,7 @@ public class ShadowApduService extends HostApduService {
             off += l;
             i = q[0] + l;
         }
+        tap("-- udol present but has no 9F6A - assuming offset 0");
         return 0;
     }
 
@@ -1588,6 +1619,6 @@ public class ShadowApduService extends HostApduService {
             } catch (Exception ignored) { }
             popup(v);
         }
-        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
+        Log.d("HCE", "onDeactivated reason=" + reason + " | " + v);
     }
 }
