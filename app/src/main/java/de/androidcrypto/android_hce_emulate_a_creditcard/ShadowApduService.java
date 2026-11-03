@@ -771,10 +771,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * The MSD record, served verbatim.
      *
-     * Under Visa and ExpressPay the CSC's position in the DD is fixed by the
-     * spec rather than by bitmaps, so there is nothing to regenerate and
-     * nothing to point at - the track is served as personalised and the
-     * terminal patches the CSC into its own copy when it comes back in 9F61.
+     * Nothing here is regenerated per tap: the bitmaps and the 9F69 descriptor
+     * are part of the personalised skeleton and the CSC slot stays as carved.
+     * The terminal writes the CSC into its own copy, never into this one.
      *
      * A 70 wrapper is added when the skeleton arrives bare. Without it the
      * record is not a record and the parser has nothing to read.
@@ -1162,9 +1161,12 @@ public class ShadowApduService extends HostApduService {
      * Name what MSD needs that is not set, at tap time.
      *
      * Every MSD failure is silent, so saying it up front is the only cheap
-     * signal. Under Visa and ExpressPay there are no bitmaps to check - the
-     * one structural thing left is that the track exists and differs from the
-     * 57 record, which means the DD is carved out.
+     * signal. The track sits under 57 on the Visa family and under 9F6B on
+     * Mastercard - either tag means the DD was carved out, so both are
+     * accepted and the identity check runs on whichever is found.
+     *
+     * A 9F69 descriptor must also name the UN and carry the three bitmaps,
+     * or the terminal has no way to place the CSC in the track.
      */
     private void msdSanity() {
         byte[] rec = msdRecord();
@@ -1173,20 +1175,26 @@ public class ShadowApduService extends HostApduService {
             return;
         }
 
-        byte[] t57 = findTag(rec, 0x57);
-        if (t57 == null) {
-            tap("!! msd: skeleton has no 57 - no track to MAC");
-        } else if (Arrays.equals(t57, track2())) {
-            tap("-- msd: 57 is byte-identical to the track - DD not carved out");
+        byte[] track = findTag(rec, 0x57);
+        if (track == null) track = findTag(rec, 0x9F6B);
+
+        if (track == null) {
+            tap("!! msd: skeleton has no 57 or 9F6B - no track to MAC");
+        } else if (Arrays.equals(track, track2())) {
+            tap("-- msd: track is byte-identical to the field - DD not carved out");
         }
 
-        if (findTag(rec, TAG_UDOL) != null) {
-            tap("-- msd: 9F69 present - non-Visa descriptor, UN offset from it");
+        byte[] udol = findTag(rec, TAG_UDOL);
+        if (udol != null) {
+            tap("-- msd: 9F69 present - descriptor drives the UN offset");
             if (findTag(rec, TAG_UN_MSD) == null) {
                 tap("!! msd: descriptor has no 9F6A - no UN to MAC");
             }
+            if (findTag(rec, 0x9F65) == null) tap("!! msd: no 9F65 PAN bitmap");
+            if (findTag(rec, 0x9F66) == null) tap("!! msd: no 9F66 DD bitmap - CSC position undefined");
+            if (findTag(rec, 0x9F67) == null) tap("!! msd: no 9F67 nUN bitmap");
         } else {
-            tap("-- msd: no 9F69 - correct for Visa-family MSD, CCC field is the UN only");
+            tap("-- msd: no 9F69 - Visa-family shape, CCC field is the UN only");
         }
 
         byte[] a = afl();
