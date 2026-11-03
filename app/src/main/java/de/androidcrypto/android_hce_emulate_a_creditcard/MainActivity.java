@@ -586,7 +586,7 @@ public class MainActivity extends AppCompatActivity {
         adapter.notifyItemChanged(current);
         buildMsdRecord();
 
-        if (p("msdrec", "").isEmpty()) {
+        if (prefs.getString(key(current, "msdrec"), "").isEmpty()) {
             status("dump parsed, but the skeleton failed - check the PAN", COL_STALE);
             return;
         }
