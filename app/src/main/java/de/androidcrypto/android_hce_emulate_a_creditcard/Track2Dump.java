@@ -4,8 +4,9 @@ import java.util.Locale;
 
 /**
  * Parses a raw track 2 dump into the fields the MSD path needs.
- * Everything is validated before any field is handed back, so a bad dump
- * cannot half-populate the profile.
+ *
+ * Everything is validated before any field is handed back, so a caller can
+ * abort a load without having written anything.
  */
 public final class Track2Dump {
 
@@ -66,12 +67,16 @@ public final class Track2Dump {
         return new Track2Dump(pan, expiry, sc, dd);
     }
 
-    /** 57 payload: vector track plus the computed CVC3, padded with F to even length. */
-    public String recordTrack(String cvc3) {
-        if (cvc3 == null || cvc3.length() != 5 || !isDigits(cvc3))
-            throw new IllegalArgumentException("CVC3 must be 5 digits");
-        String t = padEven(vectorTrack + cvc3);
-        if (t.length() > 37) throw new IllegalArgumentException("57 exceeds 37 bytes");
+    /**
+     * 57 payload: the vector track plus whatever occupies the DD slot, padded
+     * with F to even length and capped at the 37 bytes tag 57 allows.
+     */
+    public String recordTrack(String slot) {
+        if (slot == null || slot.isEmpty() || slot.length() > 12 || !isDigits(slot))
+            throw new IllegalArgumentException("DD slot must be 1-12 digits");
+        String t = padEven(vectorTrack + slot);
+        if (t.length() > 37)
+            throw new IllegalArgumentException("57 exceeds 37 bytes (" + t.length() + ")");
         return t;
     }
 
