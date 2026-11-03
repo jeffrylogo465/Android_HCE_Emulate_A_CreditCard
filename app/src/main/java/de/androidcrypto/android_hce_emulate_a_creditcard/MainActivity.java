@@ -506,6 +506,10 @@ public class MainActivity extends AppCompatActivity {
      * agree instead of carrying two versions of the same track.
      *
      * MSD is switched on here because that is the only reason to paste a dump.
+     *
+     * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
+     * a previous card left behind - a stale AFL passes afl()'s length test and
+     * points the terminal at a record the skeleton is not in.
      */
     private void applyDump(String raw) {
         Track2Dump d;
@@ -529,12 +533,18 @@ public class MainActivity extends AppCompatActivity {
 
         binding = true;
         etMsd.setText("1");
+        etAfl.setText("");
+        etCid.setText("");
         binding = false;
         collect();
 
         adapter.notifyItemChanged(current);
         buildMsdRecord();
 
+        if (p("msdrec", "").isEmpty()) {
+            status("dump parsed, but the skeleton failed - check the PAN", COL_STALE);
+            return;
+        }
         status("dump loaded " + d.pan + " exp " + d.expiry + " svc " + d.serviceCode
                 + " dd " + (d.dd.isEmpty() ? "none" : d.dd.length() + "d")
                 + " - harness next", COL_WARM);
