@@ -28,6 +28,7 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] SW_MALFORMED   = hex("6700");
     private static final byte[] SW_NO_RECORD   = hex("6A83");
     private static final byte[] SW_NOT_FOUND   = hex("6A88");
+    private static final byte[] SW_CONDITIONS  = hex("6985");
     private static final byte[] SW_ERR         = hex("6F00");
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
@@ -39,6 +40,7 @@ public class ShadowApduService extends HostApduService {
 
     /** Track 2 CVC3 tag in the CCC response. 9F60 is the Track 1 twin. */
     private static final int TAG_CVC3_T2 = 0x9F61;
+    private static final int TAG_CVC3_T1 = 0x9F60;
     private static final int TAG_UN_MSD   = 0x9F6A;
     private static final int TAG_UDOL     = 0x9F69;
 
@@ -50,8 +52,8 @@ public class ShadowApduService extends HostApduService {
      * cvn() reads to pick the session-key scheme. A default whose byte 2 was
      * 01 read as CVN 1 and silently changed the derivation.
      *
-     * The typed IAD from the card overrides this, and the MAC input uses
-     * whichever is in force, because the IAD is part of what the issuer MACs.
+     * Only reached when the profile's own defaultIad() returns null. Amex
+     * returns an empty string instead, because it has no CVN block.
      */
     private static final String DEFAULT_IAD = "06010A03A00000";
 
@@ -137,6 +139,9 @@ public class ShadowApduService extends HostApduService {
 
     private byte[] capturedIad;
     private String gpoCid = "";
+
+    /** True once a checksum has consumed this tap's ATC, so a second one climbs. */
+    private boolean atcUsedByCcc;
 
     private boolean sawPpse;
     private int nSelects, nGpos, nRecs, nGens, nCccs;
@@ -276,9 +281,17 @@ public class ShadowApduService extends HostApduService {
         prefs().edit().putString(sel() + k, v).apply();
     }
 
+    /**
+     * Whether this tap runs mag-stripe mode.
+     *
+     * The pref ORs with the profile: Amex is mag-stripe by nature, so a true
+     * there cannot be turned off from the box. Mastercard and Visa return
+     * false and stay governed by the pref alone.
+     */
     private boolean isMsd() {
         String v = p("msd", "0").trim();
-        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
+        if (v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on")) return true;
+        return activeProfile().msd();
     }
 
     // ---------- card fields ----------
@@ -333,6 +346,7 @@ public class ShadowApduService extends HostApduService {
         txnAc = null;
         cryptogramSent = false;
         scriptHits = 0;
+        atcUsedByCcc = false;
         sawPpse = false;
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
@@ -351,9 +365,19 @@ public class ShadowApduService extends HostApduService {
         return a;
     }
 
-    /** IAD in force: captured first, then typed, then the default. */
+    /**
+     * IAD in force: captured first, then typed, then the profile's own default.
+     *
+     * The profile step exists because an Amex card must not inherit the M/Chip
+     * default - it has no CVN block and cvn() would read byte 2 of a fabricated
+     * one. Amex returns an empty string, so the tag goes out empty.
+     */
     private String iadHex() {
-        return (capturedIad == null) ? p("iad", DEFAULT_IAD) : bytesToHex(capturedIad);
+        if (capturedIad != null) return bytesToHex(capturedIad);
+        String typed = p("iad", "");
+        if (!typed.isEmpty()) return typed;
+        String d = activeProfile().defaultIad();
+        return d == null ? DEFAULT_IAD : d;
     }
 
     private boolean haveKey() {
@@ -781,11 +805,18 @@ public class ShadowApduService extends HostApduService {
      * kernel writes CVC3, UN, ATC and nUN into it on every tap - the CARD
      * writes nothing. So it must not be regenerated, only echoed.
      *
+     * A 70 wrapper is added when the skeleton arrives bare. Without it the
+     * record is not a record and the parser has nothing to read.
+     *
      * Empty means "not set", and the caller falls back to captured or synthetic.
      */
     private byte[] msdRecord() {
         String h = p("msdrec", "").replaceAll("[^0-9A-Fa-f]", "");
-        return h.isEmpty() ? null : hex(h);
+        if (h.isEmpty()) return null;
+        byte[] r = hex(h);
+        if ((r[0] & 0xFF) == 0x70) return r;
+        tap("-- msd: skeleton had no 70 wrapper - wrapped");
+        return tlv(0x70, r);
     }
 
     /**
@@ -842,6 +873,7 @@ public class ShadowApduService extends HostApduService {
                                 + " | script " + n + " line(s), gate="
                                 + (useScript() ? "ON" : "OFF")
                                 + " | msd=" + isMsd());
+                        if (isMsd()) msdSanity();
                         popup(nameLine());
                     }
                 }
@@ -868,6 +900,15 @@ public class ShadowApduService extends HostApduService {
                 }
 
                 if (ins == 0xA8) {
+                    // The script path returns before gpo() runs, so the MSD mask
+                    // inside gpo() never applied while a script was armed - and
+                    // every profile arms one. Same edit, applied to the bytes.
+                    if (isMsd()) {
+                        byte[] body = Arrays.copyOf(out, out.length - 2);
+                        out = cat(msdAip(body), SW_OK);
+                        tap("-- msd: script GPO AIP forced to "
+                                + bytesToHex(capturedAip(body)));
+                    }
                     byte[] sa = capturedAip(out);
                     if (sa != null && sa.length >= 2) {
                         txnAip = sa;
@@ -1020,14 +1061,15 @@ public class ShadowApduService extends HostApduService {
 
         byte[] used = new byte[]{aip[0], aip[1]};
 
-        // MSD: force the magstripe bit on and clear the EMV-mode bit, so a typed
-        // 1880 still yields a valid magstripe AIP. 0x3F and not 0x7F - 0x40 is
-        // SDA, which a magstripe-only clone cannot satisfy either, so leaving it
-        // set would invite a check that fails.
+        // MSD: drop every ODA bit. 0x1C keeps CV, TRM and issuer auth and
+        // clears SDA 0x40, DDA 0x20 and CDA 0x01 - a clone can satisfy none of
+        // the three, and a set CDA bit with no 9F4B in the response invites a
+        // check that fails. 0x3F left DDA and CDA set, and |0x01 set CDA on a
+        // card that never sends 9F4B.
         //
         // The AIP itself is static personalised data and is not forced per tap;
         // this is a convenience for a hand-typed value, not a rule.
-        if (msd) used = new byte[]{(byte) ((used[0] | 0x01) & 0x3F), 0x00};
+        if (msd) used = new byte[]{(byte) (used[0] & 0x1C), 0x00};
 
         txnAip = used;
 
@@ -1129,6 +1171,87 @@ public class ShadowApduService extends HostApduService {
             }
             i = q[0] + l;
         }
+    }
+
+    /**
+     * Force the AIP of a scripted GPO to the MSD shape.
+     *
+     * The script path returns before gpo() runs, so the mask inside gpo() never
+     * applied while a script was armed - and every profile arms one. Without
+     * this MSD never left EMV mode and the terminal sent GENERATE AC instead of
+     * the CCC.
+     */
+    private byte[] msdAip(byte[] tpl) {
+        byte[] aip = capturedAip(tpl);
+        if (aip == null || aip.length < 2) return tpl;
+        return setAip(tpl, new byte[]{(byte) (aip[0] & 0x1C), 0x00});
+    }
+
+    /** Overwrite the AIP in either framing, in place. */
+    private static byte[] setAip(byte[] tpl, byte[] aip) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int len = readLen(tpl, pos);
+
+        if (outer == 0x80) {
+            if (pos[0] + 2 <= tpl.length) {
+                tpl[pos[0]] = aip[0];
+                tpl[pos[0] + 1] = aip[1];
+            }
+            return tpl;
+        }
+
+        int end = Math.min(tpl.length, pos[0] + len);
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == 0x82 && l >= 2) {
+                tpl[q[0]] = aip[0];
+                tpl[q[0] + 1] = aip[1];
+                return tpl;
+            }
+            i = q[0] + l;
+        }
+        return tpl;
+    }
+
+    private static boolean isZero(byte[] b) {
+        for (byte x : b) if (x != 0) return false;
+        return true;
+    }
+
+    /**
+     * Name what MSD needs that is not set, at tap time.
+     *
+     * Every MSD failure is silent: a missing bitmap or a skeleton without 9F6B
+     * still produces a well-formed CCC, and the terminal just computes a CVC3
+     * that cannot match. Saying it up front is the only cheap signal.
+     */
+    private void msdSanity() {
+        byte[] rec = msdRecord();
+        if (rec == null) {
+            tap("!! msd: no skeleton set - the synthetic EMV record has no 9F6B"
+                    + " and no bitmaps, so there is nothing to MAC");
+            return;
+        }
+        if (findTag(rec, 0x9F6B) == null) tap("!! msd: skeleton has no 9F6B - no track to MAC");
+        if (findTag(rec, TAG_UDOL) == null) {
+            tap("-- msd: no 9F69 descriptor - the default UDOL (9F6A at offset 0) applies");
+        } else if (findTag(rec, TAG_UN_MSD) == null) {
+            tap("!! msd: descriptor has no 9F6A - no UN to MAC");
+        }
+        if (findTag(rec, 0x9F65) == null) tap("!! msd: no 9F65 payload bitmap");
+        if (findTag(rec, 0x9F66) == null) tap("!! msd: no 9F66 UN bitmap");
+        byte[] natc = findTag(rec, 0x9F67);
+        if (natc == null) tap("!! msd: no 9F67 counter bitmap");
+        else if (isZero(natc)) tap("!! msd: 9F67 is all zeros - counter unbound,"
+                + " every freshness claim fails");
+        if (p("ivcvc3", "").trim().isEmpty()) tap("!! msd: IVCVC3 not set - CVC3 will be 0000");
+        if (kdCvc3() == null) tap("!! msd: IMKCVC3 not set - CVC3 will be 0000");
+        tap("-- msd: skeleton " + rec.length + "B, sanity checked");
     }
 
     private static byte[] forceCid(byte[] tpl, byte cid) {
@@ -1304,6 +1427,29 @@ public class ShadowApduService extends HostApduService {
         return 0;
     }
 
+    /** Total data length the descriptor asks for, or 4 for the default UDOL. */
+    private int udolLen() {
+        byte[] rec = msdRecord();
+        if (rec == null) return 4;
+        byte[] udol = findTag(rec, TAG_UDOL);
+        if (udol == null) return 4;
+        int n = 0, i = 0;
+        while (i < udol.length) {
+            int[] q = new int[]{i};
+            int t = readTag(udol, q);
+            int l = readLen(udol, q);
+            if (q[0] + l > udol.length) break;
+            n += l;
+            i = q[0] + l;
+        }
+        return n;
+    }
+
+    private boolean hasTrack1() {
+        byte[] rec = msdRecord();
+        return rec != null && findTag(rec, 0x56) != null;
+    }
+
     /**
      * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CVC3.
      *
@@ -1312,16 +1458,27 @@ public class ShadowApduService extends HostApduService {
      * CVC3 into the track, so the value MACed and the value on the wire cannot
      * diverge. The terminal sends only the UDOL data, never an ATC.
      *
+     * ONE ATC PER TAP. gpo() already climbed it for the ARQC, so that value is
+     * reused here and only a second checksum in the same tap takes a new one.
+     * An unconditional climb burned an ATC per tap and left the ARQC and the
+     * CVC3 on different counters.
+     *
      * Block is IVCVC3 || UN || ATC, 8 bytes, 3DES under KDCVC3, and the LOW two
-     * bytes are the CVC3. No session key and no per-transaction derivation.
+     * bytes are the CVC3. The ATC is BINARY - packed BCD is the trap. No session
+     * key and no per-transaction derivation.
+     *
+     * The data field length is exact, not padded: a strict verifier rejects a
+     * short field rather than guessing, so this refuses instead of zero-filling.
      *
      * Every failure mode here is silent - a wrong key or a wrong UDOL offset
      * produces a well-formed CVC3 that the host rejects. So the key, the offset
      * and the result are all logged, and a missing input is named.
      */
     private byte[] ccc(byte[] apdu) {
-        String atc = nextAtc();
-        byte[] atcB = hex(atc);
+        if (nRecs == 0) {
+            tap("!! ccc: no record read this tap - a strict verifier refuses the checksum");
+            return SW_CONDITIONS;
+        }
 
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
@@ -1329,43 +1486,62 @@ public class ShadowApduService extends HostApduService {
                 ? Arrays.copyOfRange(apdu, off, off + lc)
                 : new byte[0];
 
-        int uo = unOffset();
-        byte[] un = new byte[4];
-        if (uo + 4 <= d.length) {
-            System.arraycopy(d, uo, un, 0, 4);
-        } else {
-            tap("-- ccc: UDOL offset " + uo + " past the " + d.length
-                    + "B data field - UN padded with zeros");
+        int need = udolLen();
+        if (d.length != need) {
+            tap("!! ccc: field is " + d.length + "B, descriptor asks " + need
+                    + " - refusing, not padding");
+            return SW_MALFORMED;
         }
+
+        int uo = unOffset();
+        if (uo + 4 > d.length) {
+            tap("!! ccc: 9F6A offset " + uo + " past the " + d.length + "B field");
+            return SW_MALFORMED;
+        }
+        byte[] un = Arrays.copyOfRange(d, uo, uo + 4);
         tap("-- ccc: UN at UDOL offset " + uo + " of " + d.length + "B");
+
+        String atc;
+        if (atcUsedByCcc) {
+            atc = nextAtc();
+        } else {
+            atc = txnAtc();
+            atcUsedByCcc = true;
+        }
+        byte[] atcB = EmvCrypto.atcField(Integer.parseInt(atc, 16));
+
+        if ((atcB[0] & 0xFF) == 0xFF && (atcB[1] & 0xFF) == 0xFF) {
+            tap("!! ccc: ATC exhausted at " + atc);
+            return SW_CONDITIONS;
+        }
 
         byte[] iv = hex(p("ivcvc3", "").replaceAll("[^0-9A-Fa-f]", ""));
         byte[] kd = kdCvc3();
 
-        byte[] cvc3;
-        if (iv.length != 2) {
-            tap("!! ccc: IVCVC3 not set (needs 4 hex) - CVC3 will be 0000");
-            cvc3 = new byte[2];
-        } else if (kd == null) {
-            tap("!! ccc: IMKCVC3 not set (needs 32 or 48 hex) - CVC3 will be 0000");
-            cvc3 = new byte[2];
+        byte[] body;
+        if (iv.length != 2 || kd == null) {
+            tap("!! ccc: " + (iv.length != 2
+                        ? "IVCVC3 not set (needs 4 hex)"
+                        : "IMKCVC3 not set (needs 32 or 48 hex)")
+                    + " - CVC3 will be 0000");
+            body = tlv(TAG_CVC3_T2, new byte[2]);
         } else {
-            try {
-                byte[] block = cat(iv, un, atcB);
-                byte[] e = EmvCrypto.des3(kd, block);
-                cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
-                tap("-- ccc atc=" + atc + " un=" + bytesToHex(un)
-                        + " iv=" + bytesToHex(iv) + " kd=" + bytesToHex(kd)
-                        + " cvc3=" + bytesToHex(cvc3));
-            } catch (Exception ex) {
-                tap("!! ccc failed: " + ex);
-                cvc3 = new byte[2];
+            byte[] e = EmvCrypto.des3(kd, cat(iv, un, atcB));
+            byte[] cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
+            tap("-- ccc atc=" + atc + " un=" + bytesToHex(un) + " iv=" + bytesToHex(iv)
+                    + " kd=" + bytesToHex(kd) + " cvc3=" + bytesToHex(cvc3));
+            body = tlv(TAG_CVC3_T2, cvc3);
+
+            // Track 1 has its own IV and its own tag; only when a 56 is present.
+            byte[] ivT1 = hex(p("ivcvc3_t1", "").replaceAll("[^0-9A-Fa-f]", ""));
+            if (hasTrack1() && ivT1.length == 2) {
+                byte[] e1 = EmvCrypto.des3(kd, cat(ivT1, un, atcB));
+                body = cat(body, tlv(TAG_CVC3_T1,
+                        Arrays.copyOfRange(e1, e1.length - 2, e1.length)));
             }
         }
 
-        byte[] body = cat(
-                tlv(0x9F36, atcB),
-                tlv(TAG_CVC3_T2, cvc3));
+        body = cat(body, tlv(0x9F36, atcB));
         return cat(tlv(0x77, body), SW_OK);
     }
 
