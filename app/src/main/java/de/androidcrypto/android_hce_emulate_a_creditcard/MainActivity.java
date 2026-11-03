@@ -985,14 +985,15 @@ public class MainActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
-                // FIX: "Run SKD vector" added as index 4
+                // FIX: vector entries added as indexes 4 and 5
                 .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
-                                "Show KCV", "Run SKD vector"},
+                                "Show KCV", "Run SKD vector", "Run CSK vector"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
                             else if (w == 3) showKcv();
                             else if (w == 4) runSkdVector();
+                            else if (w == 5) runCskVector();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1063,6 +1064,29 @@ public class MainActivity extends AppCompatActivity {
                     + sk + (want.equals(sk) ? "" : "  want " + want));
         } catch (Exception e) {
             status("SKD vector failed - " + e);
+        }
+    }
+
+    /**
+     * CSK vector, CVN 20/21. Stage 1 is the same ICC derivation as SKD, so it is
+     * not repeated here - run the SKD vector first, and if its stage 1 fails this
+     * cannot pass either.
+     *
+     * Stage 2: ATC 0001, UN ignored, must give DF20453BB5E5D946BAC2C7E645B5405E.
+     * That is the parity-adjusted value; unadjusted it is DE21453AB5E4D946BAC3C6
+     * E745B4415E, and both produce identical DES results because DES drops the
+     * parity bits.
+     */
+    private void runCskVector() {
+        try {
+            byte[][] k = EmvCrypto.iccMasterKeys(
+                    "0123456789ABCDEFFEDCBA9876543210", "5287250568943496", "01");
+            String sk = bytesToHex(EmvCrypto.sessionKeyCskRaw(k[0], k[1], "0001"));
+            String want = "DF20453BB5E5D946BAC2C7E645B5405E";
+            status((want.equals(sk) ? "CSK vector OK " : "CSK vector MISMATCH ")
+                    + sk + (want.equals(sk) ? "" : "  want " + want));
+        } catch (Exception e) {
+            status("CSK vector failed - " + e);
         }
     }
 
