@@ -21,43 +21,27 @@ public final class Profiles {
      * AIP for the Mastercard profile: 18 80.
      *
      * BYTE 1 - classic EMV, not the Visa meaning:
-     *   0x80 RFU        0x40 SDA        0x20 DDA        0x10 CV
-     *   0x08 TRM        0x04 issuer auth 0x02 on-device CVM 0x01 CDA
+     *   0x80 RFU  0x40 SDA  0x20 DDA  0x10 CV
+     *   0x08 TRM  0x04 issuer auth  0x02 on-device CVM  0x01 CDA
      *
-     * 0x18 = CV + TRM. SDA (0x40) is cleared because a clone cannot sign
-     * static data and has no 9F4A or certificates - claiming it invites a check
-     * that fails. DDA, CDA and issuer auth are cleared for the same reason.
+     * 0x18 = CV + TRM. Every ODA bit is clear - a clone cannot sign static data
+     * and has no 9F4A or certificates, so claiming them invites a failed check.
      *
-     * BYTE 2 b8 is the one that matters: "EMV mode supported". Without it the
-     * kernel does not run EMV mode at all - it drops to mag-stripe mode. The bit
-     * stays on here; the MSD path is entered from the other side, by the service
-     * masking this byte when the CID asks for it.
-     *
-     * The reference card's 5980 is 0x40 SDA + 0x10 + 0x08 + 0x01 CDA, byte 2
-     * 0x80 - it can sign, so it keeps SDA and CDA.
+     * BYTE 2 b8 is "EMV mode supported". It stays on here; the MSD path is
+     * entered from the other side, by the service masking this byte.
      */
     private static final String AIP_MC = "1880";
 
-    /**
-     * AIP for the Visa profile: 58 00.
-     *
-     * Visa numbers byte 1 differently: b8 is mag-stripe, b7 is qVSDC. 0x58 is
-     * 0x40 qVSDC + 0x10 CV + 0x08 TRM, with no mag-stripe bit. Byte 2 carries
-     * no mode bit for qVSDC.
-     */
+    /** Visa: 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM. */
     private static final String AIP_VISA = "5800";
 
     /**
-     * AIP for the Amex profile: 1C 00.
+     * AIP for Amex: 1C 00.
      *
-     * Same classic EMV numbering as Mastercard. 0x1C = 0x10 CV + 0x08 TRM +
-     * 0x04 issuer auth, so every ODA bit is clear - SDA 0x40, DDA 0x20 and CDA
-     * 0x01 all off, which is what a clone without a key must declare.
-     *
-     * BYTE 2 is 00, deliberately: no "EMV mode supported" bit, so the kernel
-     * takes the mag-stripe path and runs the CVC3 exchange. That is the whole
-     * point of the Amex profile - it is the one scheme where an offline decision
-     * rests on a checksum the card can produce without the issuer's key.
+     * Classic numbering. 0x1C = CV + TRM + issuer auth, every ODA bit clear.
+     * BYTE 2 is 00 deliberately: no EMV-mode bit, so the kernel takes the
+     * mag-stripe path and runs the CVC3 exchange - the one offline decision a
+     * card can make without the issuer's key.
      */
     private static final String AIP_AMEX = "1C00";
 
@@ -65,17 +49,8 @@ public final class Profiles {
     private static final String AFL_ONE = "940408010100";
 
     /**
-     * Visa CTQ (9F6C) as sent by the card.
-     *
-     * 30 = b6 + b5: go online if ODA fails, switch interface if ODA fails.
-     * 80 in byte 2 = Consumer Device CVM performed - correct for a phone.
-     *
-     * With no CTQ the kernel treats every bit as zero, so a failed
-     * authentication is a silent offline decline. Neither fallback reaches an
-     * approval while the ARQC is zeros, though - they only classify the decline.
-     *
-     * VISA ONLY. In Kernel 2 the same tag is the Mag-stripe Application Version
-     * Number and has no qualifier bits.
+     * Visa CTQ (9F6C): 30 = go online and switch interface if ODA fails.
+     * VISA ONLY - in Kernel 2 the same tag is the mag-stripe app version.
      */
     private static final String CTQ_VISA = "9F6C023080";
 
@@ -157,4 +132,77 @@ public final class Profiles {
     static byte[] oneAppPpse(String aidHex) {
         byte[] entry = cat(tlv(0x4F, Hex.hex(aidHex)), tlv(0x87, new byte[]{0x01}));
         byte[] dir = tlv(0xBF0C, tlv(0x61, entry));
-       
+        return tlv(0x6F, cat(tlv(0x84, Hex.hex(PPSE)), tlv(0xA5, dir)));
+    }
+
+    /** A label-only FCI with no 9F38, so the terminal sends a PDOL-free GPO. */
+    static byte[] labelFci(String aidHex, String label) {
+        String l = (label == null || label.isEmpty()) ? "CARD" : label;
+        if (l.length() > 16) l = l.substring(0, 16);
+        byte[] prop = cat(
+                tlv(0x50, l.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x87, new byte[]{0x01}));
+        return tlv(0x6F, cat(tlv(0x84, Hex.hex(aidHex)), tlv(0xA5, prop)));
+    }
+
+    /**
+     * Kernel 2 GPO with a caller-supplied AIP: AIP and AFL and nothing else.
+     *
+     * The AIP is a parameter because the MSD path cannot use the profile
+     * constant - reaching mag-stripe mode means the EMV-mode bit has to go, so
+     * the service masks the AIP on the way in. Everything else is identical.
+     *
+     * The AC is NOT here. Kernel 2 puts the cryptogram in GENERATE AC in both
+     * modes. 10 bytes of body, 0x0A.
+     */
+    static String gpoWithAip(String aip, String atc) {
+        String body = "8202" + aip + AFL_ONE;
+        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
+    }
+
+    /** Mastercard GPO on the profile AIP. ARQC unused, see above. */
+    static String gpoMastercard(String atc, String arqc) {
+        return gpoWithAip(AIP_MC, atc);
+    }
+
+    /** Amex GPO on the profile AIP. Same shape, same unused ARQC. */
+    static String gpoAmex(String atc, String arqc) {
+        return gpoWithAip(AIP_AMEX, atc);
+    }
+
+    /**
+     * Visa qVSDC GPO: AIP, AFL, AC, IAD and CTQ.
+     *
+     * qVSDC does fold the decision into the GPO, so the cryptogram and CID
+     * belong here and there is no GENERATE AC round trip. Both lengths are
+     * computed - the 9F10 length used to be the literal 0x11, which pinned
+     * every profile to a 17-byte IAD and desynchronised the parser.
+     *
+     * 45 bytes of body, 0x2D.
+     */
+    static String gpoVisa(String iad, String atc, String arqc) {
+        String body = "8202" + AIP_VISA
+                + AFL_ONE
+                + "9F2608" + arqc
+                + "9F270140"
+                + "9F3602" + atc
+                + "9F10" + String.format("%02X", iad.length() / 2) + iad
+                + CTQ_VISA;
+        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
+    }
+
+    /** Not used yet, kept so a future profile can reuse the AIP mapping. */
+    static int kernelFor(String aidHex) {
+        String a = aidHex == null ? "" : aidHex.toUpperCase();
+        if (a.startsWith("A000000152")) return 6;
+        if (a.startsWith("A000000015")) return 6;
+        if (a.startsWith("A000000004")) return 2;
+        if (a.startsWith("A000000065")) return 5;
+        if (a.startsWith("A000000025")) return 4;
+        if (a.startsWith("A000000333")) return 7;
+        return 3;
+    }
+
+    /** Convenience for a caller holding bytes rather than hex. */
+    static String of(byte[] d) { return hex(Arrays.copyOf(d, d.length)); }
+}
