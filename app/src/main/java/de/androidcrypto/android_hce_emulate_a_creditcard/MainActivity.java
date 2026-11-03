@@ -23,10 +23,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.PagerSnapHelper;
 import androidx.recyclerview.widget.RecyclerView;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
 
@@ -75,9 +73,10 @@ public class MainActivity extends AppCompatActivity {
      * THE AMEX IAD IS EMPTY on purpose. Amex does not use the M/Chip CVN shape,
      * so an invented IAD would be worse than none.
      *
-     * THE AMEX AIP IS 1C00, NOT 1880: byte 2 is 00 so the kernel takes the
+     * THE AMEX AIP IS 1800, NOT 1880: byte 2 is 00 so the kernel takes the
      * mag-stripe path and runs the CVC3 exchange. 1880 would keep it in EMV
-     * mode and ask for an ARQC no keyless card can produce.
+     * mode and ask for an ARQC no keyless card can produce. 0x04 is absent
+     * because the MSD mask keeps it and nothing here satisfies issuer auth.
      */
     private static final String[] PROFILE_MASTERCARD = {
             "MASTERCARD", "A0000000041010", "1880",
@@ -86,7 +85,7 @@ public class MainActivity extends AppCompatActivity {
             "VISA", "A0000000031010", "5800",
             "06011200000000", "001C" };
     private static final String[] PROFILE_AMEX = {
-            "AMEX", "A00000002501", "1C00", "", "001C" };
+            "AMEX", "A00000002501", "1800", "", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
 
@@ -1004,6 +1003,7 @@ public class MainActivity extends AppCompatActivity {
                 .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
                                 "Show KCV", "Run SKD vector", "Run CSK vector",
                                 "Run CVC3 vector",
+                                "Seed vector card", "Run CVC3 harness",
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
                                 "MSD: set record", "MSD: set location"},
                         (d, w) -> {
@@ -1013,14 +1013,16 @@ public class MainActivity extends AppCompatActivity {
                             else if (w == 4) runSkdVector();
                             else if (w == 5) runCskVector();
                             else if (w == 6) runCvc3Vector();
-                            else if (w == 7) setHexPref("imkcvc3", "IMKCVC3",
+                            else if (w == 7) status(VectorSeed.apply(this));
+                            else if (w == 8) status(Cvc3Vector.run());
+                            else if (w == 9) setHexPref("imkcvc3", "IMKCVC3",
                                     "32 or 48 hex. A different key from IMK-AC.", 32);
-                            else if (w == 8) setHexPref("ivcvc3", "IVCVC3",
+                            else if (w == 10) setHexPref("ivcvc3", "IVCVC3",
                                     "4 hex. From the dump, usually tag DD.", 4);
-                            else if (w == 9) buildMsdRecord();
-                            else if (w == 10) setHexPref("msdrec", "MSD record",
+                            else if (w == 11) buildMsdRecord();
+                            else if (w == 12) setHexPref("msdrec", "MSD record",
                                     "The personalised 9F6B record, verbatim, no status word.", 8);
-                            else if (w == 11) setHexPref("msdloc", "MSD record location",
+                            else if (w == 13) setHexPref("msdloc", "MSD record location",
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else pickKeyVariant();
                         })
@@ -1073,6 +1075,8 @@ public class MainActivity extends AppCompatActivity {
      *
      * The DD is written as eight zeros, so the track differs from the 57 track
      * by construction - the placeholder positions have to be carved out.
+     *
+     * Tlv's builder is t(), not tlv().
      */
     private void buildMsdRecord() {
         String pan = prefs.getString(key(current, "pan"), "").replaceAll("[^0-9]", "");
@@ -1084,13 +1088,13 @@ public class MainActivity extends AppCompatActivity {
 
         int dd = pan.length() + 1 + 4 + 3;
 
-        byte[] rec = Tlv.tlv(0x70, Tlv.cat(
-                Tlv.tlv(0x9F6B, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
+        byte[] rec = Tlv.t(0x70, Tlv.cat(
+                Tlv.t(0x9F6B, EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
                         svc.substring(0, 3), 8)),
-                Tlv.tlv(0x9F65, bits(0, pan.length())),
-                Tlv.tlv(0x9F66, bits(dd, 4)),
-                Tlv.tlv(0x9F67, new byte[]{0x02}),
-                Tlv.tlv(0x9F69, Tlv.tlv(0x9F6A, new byte[]{0x04}))));
+                Tlv.t(0x9F65, bits(0, pan.length())),
+                Tlv.t(0x9F66, bits(dd, 4)),
+                Tlv.t(0x9F67, new byte[]{0x02}),
+                Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
 
         prefs.edit()
                 .putString(key(current, "msdrec"), Hex.toHex(rec))
@@ -1141,20 +1145,14 @@ public class MainActivity extends AppCompatActivity {
      * Three-stage vector, so a failure names its own cause.
      *
      * Stage 0 is a DES known-answer test: key 133457799BBCDFF1 over the block
-     * 0123456789ABCDEF must give 85E813540F0AB405. It touches no key material
-     * at all, so a broken cipher stops the run here instead of dressing up as a
-     * wrong key further down.
+     * 0123456789ABCDEF must give 85E813540F0AB405.
      *
      * Stage 1 pins the ICC master key derivation: MKiss 0123456789ABCDEFFEDCB
-     * A9876543210 with PAN 5287250568943496 and PSN 01 must give X 8725056894
-     * 349601, MK_L 57B3F7D3DC526123 and MK_R 4C75D998135DCD0B. If that stage
-     * mismatches, the derivation is wrong and stage 2 is not reached.
+     * A9876543210 with PAN 5287250568943496 and PSN 01 must give MK_L
+     * 57B3F7D3DC526123 and MK_R 4C75D998135DCD0B.
      *
-     * Stage 2 pins the SK layout: ATC 0001, UN 12345678 must give AB8373B63D1F
-     * FD9EE3F8EFA71A2F61FD. F0 goes through MK_L, 0F through MK_R.
-     *
-     * The old single-stage value FB99AF71C5A2924D62E87E6643E6F1FD was the code's
-     * own output with no ICC step, not a spec vector.
+     * Stage 2 pins the SK layout: ATC 0001, UN 12345678 must give
+     * AB8373B63D1FFD9EE3F8EFA71A2F61FD.
      */
     private void runSkdVector() {
         try {
@@ -1187,13 +1185,9 @@ public class MainActivity extends AppCompatActivity {
 
     /**
      * CSK vector, CVN 20/21. Stage 1 is the same ICC derivation as SKD, so it is
-     * not repeated here - run the SKD vector first, and if its stage 1 fails this
-     * cannot pass either.
+     * not repeated here - run the SKD vector first.
      *
      * Stage 2: ATC 0001, UN ignored, must give DF20453BB5E5D946BAC2C7E645B5405E.
-     * That is the parity-adjusted value; unadjusted it is DE21453AB5E4D946BAC3C6
-     * E745B4415E, and both produce identical DES results because DES drops the
-     * parity bits.
      */
     private void runCskVector() {
         try {
@@ -1212,14 +1206,10 @@ public class MainActivity extends AppCompatActivity {
      * CVC3 vector. Staged, so a failure names its own cause.
      *
      * Stage 0 DES KAT. Stage 1 pins KDCVC3 from IMKCVC3 over PAN and PSN - the
-     * same Option A derivation the ARQC path uses, so a mismatch here breaks
-     * both. Stage 2 pins block order and truncation. Stage 3 is the negative,
-     * changing only the IV. Stage 4 runs the integer 26 through the production
-     * ATC encoder, because at 0001 binary and BCD are the same two bytes and the
-     * encoding goes untested.
-     *
-     * Stages 2 and 3 compare the WHOLE cipher and the tail - a bug confined to
-     * the first six bytes must fail, not pass on the tail alone.
+     * same Option A derivation the ARQC path uses. Stage 2 pins block order and
+     * truncation. Stage 3 is the negative, changing only the IV. Stage 4 runs
+     * the integer 26 through the production ATC encoder, because at 0001 binary
+     * and BCD are the same two bytes and the encoding goes untested.
      */
     private void runCvc3Vector() {
         try {
@@ -1355,12 +1345,8 @@ public class MainActivity extends AppCompatActivity {
      * into the boxes. The typed route uses the REFERENCE card's AIP, not ours:
      * the reference ARQC was MACed over that AIP, so 1880 can never match.
      *
-     * The MAC input is cdol || AIP || ATC || IAD. The IAD is in there because
-     * it carries the CVN; without it every candidate is judged over too few
-     * bytes and a right key looks wrong.
-     *
-     * The session key scheme follows the CVN: 16/17 are SKD with the UN,
-     * 20/21 are CSK. Using the wrong one produces a wrong ARQC from a right key.
+     * The MAC input is cdol || AIP || ATC || IAD. The session key scheme follows
+     * the CVN: 16/17 are SKD with the UN, 20/21 are CSK.
      */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
