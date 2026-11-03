@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
- * The profile registry, and the byte builders both profiles share.
+ * The profile registry, and the byte builders every profile shares.
  *
  * forPan() is the automatic path - it reads the network off the PAN prefix.
  * byName() is the manual override from the selector. AUTO means "ask the PAN",
@@ -29,9 +29,9 @@ public final class Profiles {
      * that fails. DDA, CDA and issuer auth are cleared for the same reason.
      *
      * BYTE 2 b8 is the one that matters: "EMV mode supported". Without it the
-     * kernel does not run EMV mode at all - it drops to mag-stripe mode, which
-     * needs 9F6B, PCVC3, PUNATC, NATC, a UDOL and a COMPUTE CRYPTOGRAPHIC
-     * CHECKSUM command. This build implements none of those, so the bit is on.
+     * kernel does not run EMV mode at all - it drops to mag-stripe mode. The bit
+     * stays on here; the MSD path is entered from the other side, by the service
+     * masking this byte when the CID asks for it.
      *
      * The reference card's 5980 is 0x40 SDA + 0x10 + 0x08 + 0x01 CDA, byte 2
      * 0x80 - it can sign, so it keeps SDA and CDA.
@@ -46,6 +46,20 @@ public final class Profiles {
      * no mode bit for qVSDC.
      */
     private static final String AIP_VISA = "5800";
+
+    /**
+     * AIP for the Amex profile: 1C 00.
+     *
+     * Same classic EMV numbering as Mastercard. 0x1C = 0x10 CV + 0x08 TRM +
+     * 0x04 issuer auth, so every ODA bit is clear - SDA 0x40, DDA 0x20 and CDA
+     * 0x01 all off, which is what a clone without a key must declare.
+     *
+     * BYTE 2 is 00, deliberately: no "EMV mode supported" bit, so the kernel
+     * takes the mag-stripe path and runs the CVC3 exchange. That is the whole
+     * point of the Amex profile - it is the one scheme where an offline decision
+     * rests on a checksum the card can produce without the issuer's key.
+     */
+    private static final String AIP_AMEX = "1C00";
 
     /** One AFL entry: SFI 1, rec 1 to 1, none for offline auth. */
     private static final String AFL_ONE = "940408010100";
@@ -68,6 +82,7 @@ public final class Profiles {
     private static final CardProfile[] ALL = {
             new ProfileMastercard(),
             new ProfileVisa(),
+            new ProfileAmex(),
     };
 
     private Profiles() { }
@@ -142,69 +157,4 @@ public final class Profiles {
     static byte[] oneAppPpse(String aidHex) {
         byte[] entry = cat(tlv(0x4F, Hex.hex(aidHex)), tlv(0x87, new byte[]{0x01}));
         byte[] dir = tlv(0xBF0C, tlv(0x61, entry));
-        return tlv(0x6F, cat(tlv(0x84, Hex.hex(PPSE)), tlv(0xA5, dir)));
-    }
-
-    /** A label-only FCI with no 9F38, so the terminal sends a PDOL-free GPO. */
-    static byte[] labelFci(String aidHex, String label) {
-        String l = (label == null || label.isEmpty()) ? "CARD" : label;
-        if (l.length() > 16) l = l.substring(0, 16);
-        byte[] prop = cat(
-                tlv(0x50, l.getBytes(StandardCharsets.US_ASCII)),
-                tlv(0x87, new byte[]{0x01}));
-        return tlv(0x6F, cat(tlv(0x84, Hex.hex(aidHex)), tlv(0xA5, prop)));
-    }
-
-    /**
-     * Mastercard GPO: AIP and AFL and NOTHING ELSE.
-     *
-     * Kernel 2 does not put the cryptogram in the GPO in either mode - that is
-     * qVSDC's design, not Mastercard's. The AC arrives later in the GENERATE AC
-     * response, after the terminal's own risk management and Terminal Action
-     * Analysis. So this builder ignores the ARQC it is handed.
-     *
-     * 10 bytes of body, 0x0A: 82/1880, 94/08010100.
-     */
-    static String gpoMastercard(String atc, String arqc) {
-        String body = "8202" + AIP_MC + AFL_ONE;
-        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
-    }
-
-    /**
-     * Visa qVSDC GPO: AIP, AFL, the AC, the IAD and a CTQ.
-     *
-     * qVSDC really does fold the decision into the GPO, so here the cryptogram
-     * and CID belong in the response and there is no GENERATE AC round trip.
-     *
-     * Both lengths are computed. The 9F10 length used to be the literal 0x11,
-     * which pinned every profile to a 17-byte IAD - wrong for the 7-byte VIS
-     * shape, and a wrong TLV length desynchronises the parser and kills the tap.
-     *
-     * 45 bytes of body, 0x2D.
-     */
-    static String gpoVisa(String iad, String atc, String arqc) {
-        String body = "8202" + AIP_VISA
-                + AFL_ONE
-                + "9F2608" + arqc
-                + "9F270140"
-                + "9F3602" + atc
-                + "9F10" + String.format("%02X", iad.length() / 2) + iad
-                + CTQ_VISA;
-        return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
-    }
-
-    /** Not used yet, kept so a future profile can reuse the AIP mapping. */
-    static int kernelFor(String aidHex) {
-        String a = aidHex == null ? "" : aidHex.toUpperCase();
-        if (a.startsWith("A000000152")) return 6;
-        if (a.startsWith("A000000015")) return 6;
-        if (a.startsWith("A000000004")) return 2;
-        if (a.startsWith("A000000065")) return 5;
-        if (a.startsWith("A000000025")) return 4;
-        if (a.startsWith("A000000333")) return 7;
-        return 3;
-    }
-
-    /** Convenience for a caller holding bytes rather than hex. */
-    static String of(byte[] d) { return hex(Arrays.copyOf(d, d.length)); }
-}
+       
