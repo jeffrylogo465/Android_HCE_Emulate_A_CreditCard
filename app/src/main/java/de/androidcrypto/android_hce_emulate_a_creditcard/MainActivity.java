@@ -985,11 +985,14 @@ public class MainActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
-                .setItems(new String[]{"Scan for the key", "Edit candidate list", label, "Show KCV"},
+                // FIX: "Run SKD vector" added as index 4
+                .setItems(new String[]{"Scan for the key", "Edit candidate list", label,
+                                "Show KCV", "Run SKD vector"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
                             else if (w == 3) showKcv();
+                            else if (w == 4) runSkdVector();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1024,6 +1027,29 @@ public class MainActivity extends AppCompatActivity {
             status("KCV " + EmvCrypto.kcv(k) + "  (compare with the seller's)");
         } catch (Exception e) {
             status("KCV failed - " + e);
+        }
+    }
+
+    /**
+     * FIX: fixed SKD vector, so the session-key derivation is checkable without
+     * a terminal. MK-AC 0123456789ABCDEFFEDCBA9876543210, ATC 0001, UN 12345678
+     * must give FB99AF71C5A2924D62E87E6643E6F1FD.
+     *
+     * The key goes in raw - sessionKeySkd does not apply the PAN/PSN block, so
+     * this exercises the ICC-master-key level only, not a real issuer IMK. The
+     * PAN and PSN arguments are carried for signature compatibility and unused.
+     */
+    private void runSkdVector() {
+        final String mk = "0123456789ABCDEFFEDCBA9876543210";
+        final String want = "FB99AF71C5A2924D62E87E6643E6F1FD";
+        try {
+            byte[] sk = EmvCrypto.sessionKeySkd(mk, "5287250568943496", "01", "0001",
+                    hexToBytes("12345678"), 0);
+            String got = bytesToHex(sk);
+            status((want.equals(got) ? "SKD vector OK " : "SKD vector MISMATCH ")
+                    + got + (want.equals(got) ? "" : "  want " + want));
+        } catch (Exception e) {
+            status("SKD vector failed - " + e);
         }
     }
 
