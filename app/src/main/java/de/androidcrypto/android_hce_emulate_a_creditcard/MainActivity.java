@@ -52,8 +52,17 @@ public class MainActivity extends AppCompatActivity {
      */
     private static final String CVMLIST = "00000000000000001F031E03";
 
-    /** The one dump that matches the reference log. */
-    private static final String KNOWN_PAN = "5287250568943496";
+    /**
+     * Dumps that are already known, keyed by PAN: 1 expiry, 2 service, 3 DD.
+     *
+     * A picked profile cannot know the card's own data - the CSC lives on the
+     * plastic and nothing derives it - so the known dumps carry it. Without an
+     * entry here the DD stays empty and the arm serves CSC 0000.
+     */
+    private static final String[][] KNOWN = {
+            {"5287250568943496", "3105", "201", "14129745"},
+            {"371697209091010",  "2803", "201", "23030057800000"},
+    };
 
     /**
      * Per-network field defaults: 0 label, 1 AID, 2 AIP, 3 IAD, 4 ATC.
@@ -285,10 +294,22 @@ public class MainActivity extends AppCompatActivity {
 
                 String t2 = t(etTrack2);
                 if (looksLikeFullDump(t2)) applyDump(t2);
+
+                seedFromPan(digits(t(etPan)));
             }
         };
         etTrack2.addTextChangedListener(filler);
         etPan.addTextChangedListener(filler);
+
+        TextWatcher cscTyped = new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(Editable s) {
+                if (binding || dumping) return;
+                onCscTyped();
+            }
+        };
+        etDiscretionary.addTextChangedListener(cscTyped);
 
         showPage(0);
     }
@@ -378,10 +399,26 @@ public class MainActivity extends AppCompatActivity {
         return "";
     }
 
+    /** The length a PAN of this network has. 15 for Amex, 16 for everything else. */
+    private static int panLength(String net) {
+        return "AMEX".equals(net) ? 15 : 16;
+    }
+
+    /** Digits the CSC takes on this network. 3 on Visa, 4 on Amex and Mastercard. */
+    private static int cscLength(String net) {
+        return "VISA".equals(net) ? 3 : 4;
+    }
+
     private static String[] profileFields(String net) {
         if ("AMEX".equals(net)) return PROFILE_AMEX;
         if ("VISA".equals(net)) return PROFILE_VISA;
         if ("MASTERCARD".equals(net)) return PROFILE_MASTERCARD;
+        return null;
+    }
+
+    private static String[] knownFor(String pan) {
+        if (pan == null) return null;
+        for (String[] k : KNOWN) if (k[0].equals(pan)) return k;
         return null;
     }
 
@@ -457,10 +494,18 @@ public class MainActivity extends AppCompatActivity {
      *
      * This is called on every rebind through maybeProfile, so it does NOT arm -
      * arming resets the ATC from the DD and would rewind it every time the
-     * screen came back. armFromFields() is called explicitly by paste and pick.
+     * screen came back. armFromFields() is called explicitly by paste, by pick
+     * and by seedFromPan().
      *
      * The capture is wiped so an old PPSE or GPO cannot get in front of the
      * profile. The script box is only blanked when nothing is armed.
+     *
+     * The CID is a default, not a card value: 80 is a TC in MSD, 40 is a TC in
+     * qVSDC. It follows the network and is overwritten on every call.
+     *
+     * A known dump carries its own expiry, service and DD. Anything else only
+     * gets the expiry and service defaults, and no DD, because the CSC is on the
+     * plastic and cannot be derived from the number.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
@@ -475,15 +520,16 @@ public class MainActivity extends AppCompatActivity {
         etIad.setText(f[3]);
         if (t(etAtc).isEmpty()) etAtc.setText(f[4]);
         etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
+        etCid.setText("VISA".equals(net) ? "40" : "80");
         etAfl.setText("");
-        etCid.setText("");
         if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
-        if (KNOWN_PAN.equals(pan)) {
-            etExpiry.setText("3105");
-            etService.setText("201");
-            etDiscretionary.setText("14129745");
-            etTrack2.setText(pan + "D310520114129745");
+        String[] known = knownFor(pan);
+        if (known != null) {
+            etExpiry.setText(known[1]);
+            etService.setText(known[2]);
+            etDiscretionary.setText(known[3]);
+            etTrack2.setText(pan + "D" + known[1] + known[2] + known[3]);
         } else if (t(etExpiry).isEmpty()) {
             etExpiry.setText("3112");
             etService.setText("201");
@@ -495,8 +541,99 @@ public class MainActivity extends AppCompatActivity {
         collect();
         adapter.notifyItemChanged(current);
         status("Script " + net + " - directory, FCI and GPO come from Profile" + net
-                + ", script box blank");
+                + (known == null ? ", no DD known - paste the dump" : ", dump known"));
         Toast.makeText(this, net + " profile loaded", Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * Fill and arm the card from the number alone. No dump.
+     *
+     * The brand, the AID, the AIP, the IAD, the CID, the ATC seed and the script
+     * all derive from the prefix. The CSC does not - it is the issuer's CVC3 and
+     * lives only on the plastic - so it is taken from the known dumps, else from
+     * whatever was typed last time, else zeros.
+     *
+     * Zeros build a card that runs every exchange and fails the checksum, which
+     * is a usable harness. Typing the real CSC turns it into an approving card,
+     * and onCscTyped() re-arms the moment enough digits are in.
+     *
+     * Fires only on a full-length, Luhn-valid PAN, and only once per PAN, or a
+     * rebind would reseed and rewind the ATC every time the screen came back.
+     */
+    private void seedFromPan(String pan) {
+        String net = profileFor(pan);
+        if (net.isEmpty()) return;
+        if (pan.length() != panLength(net)) return;
+        if (!luhn(pan)) return;
+        if (pan.equals(prefs.getString(key(current, "seededfor"), ""))) return;
+
+        int cscLen = cscLength(net);
+
+        String[] known = knownFor(pan);
+        String csc;
+        if (known != null) {
+            csc = known[3].substring(0, Math.min(cscLen, known[3].length()));
+        } else {
+            csc = prefs.getString(key(current, "csc"), "")
+                    .replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+            if (csc.length() > cscLen) csc = csc.substring(0, cscLen);
+        }
+        while (csc.length() < cscLen) csc = csc + "0";
+
+        applyProfile(pan, net);
+
+        binding = true;
+        etDiscretionary.setText(csc + "0001");
+        etAtc.setText("0000");
+        binding = false;
+
+        prefs.edit()
+                .putString(key(current, "seededfor"), pan)
+                .putString(key(current, "csc"), csc)
+                .apply();
+
+        collect();
+        adapter.notifyItemChanged(current);
+
+        if (!armFromFields()) return;
+
+        if (isZeroCsc(csc)) {
+            status("Card built from the number - CSC " + csc
+                    + " is a guess, type the real one or it will decline", COL_STALE);
+        } else {
+            status("Card built from the number, CSC " + csc + ". Tap it.", COL_WARM);
+        }
+    }
+
+    /** A CSC that is all zeros (or all F after padding) is a guess, not a value. */
+    private static boolean isZeroCsc(String csc) {
+        for (int i = 0; i < csc.length(); i++) {
+            char c = csc.charAt(i);
+            if (c != '0' && c != 'F') return false;
+        }
+        return true;
+    }
+
+    /** Enough CSC typed on a complete card: remember it and re-arm. */
+    private void onCscTyped() {
+        String pan = digits(t(etPan));
+        String net = profileFor(pan);
+        if (net.isEmpty() || pan.length() != panLength(net) || !luhn(pan)) return;
+
+        int cscLen = cscLength(net);
+        String dd = t(etDiscretionary).toUpperCase().replaceAll("[^0-9A-F]", "");
+        if (dd.length() < cscLen) return;
+
+        String csc = dd.substring(0, cscLen);
+        if (isZeroCsc(csc)) return;
+
+        prefs.edit()
+                .putString(key(current, "csc"), csc)
+                .putString(key(current, "seededfor"), pan)
+                .apply();
+
+        if (!armFromFields()) return;
+        status("CSC " + csc + " - armed. Tap it.", COL_WARM);
     }
 
     // ---------- track 2 dump ----------
@@ -564,6 +701,9 @@ public class MainActivity extends AppCompatActivity {
      * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
      * a previous card left behind - a stale AFL passes afl()'s length test and
      * points the terminal at a record the skeleton is not in.
+     *
+     * The CSC is remembered so a later reseed of the same PAN reuses it instead
+     * of falling back to zeros.
      */
     private void applyDump(String raw) {
         String[] d;
@@ -597,9 +737,16 @@ public class MainActivity extends AppCompatActivity {
 
         binding = true;
         etAfl.setText("");
-        etCid.setText("");
         binding = false;
         collect();
+
+        int cscLen = cscLength(net);
+        if (d[3].length() >= cscLen) {
+            prefs.edit()
+                    .putString(key(current, "csc"), d[3].substring(0, cscLen))
+                    .putString(key(current, "seededfor"), d[0])
+                    .apply();
+        }
 
         boolean armed = armFromFields();
         dumping = false;
@@ -653,7 +800,7 @@ public class MainActivity extends AppCompatActivity {
             return false;
         }
         String net = prof.name();
-        int cscLen = "VISA".equals(net) ? 3 : 4;
+        int cscLen = cscLength(net);
 
         String dd = (ddRaw == null ? "" : ddRaw)
                 .toUpperCase(java.util.Locale.ROOT).replaceAll("[^0-9A-F]", "");
@@ -699,7 +846,7 @@ public class MainActivity extends AppCompatActivity {
         return true;
     }
 
-    /** Arm from what is in the boxes. The only two callers are paste and pick. */
+    /** Arm from what is in the boxes. The only callers are paste, pick and seed. */
     private boolean armFromFields() {
         return armMsdCard(digits(t(etPan)), t(etExpiry), t(etService), t(etDiscretionary));
     }
@@ -1050,6 +1197,10 @@ public class MainActivity extends AppCompatActivity {
         sb.append("ATC        : live - climbs once per tap, script carries it\n");
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
+        sb.append("CSC        : ")
+                .append(disc.isEmpty() ? "(no DD at all - the arm will guess zeros)"
+                        : (isZeroCsc(disc) ? "GUESSED - will fail the checksum"
+                                : "from the card")).append('\n');
         sb.append('\n');
 
         sb.append("5A  PAN    : ")
