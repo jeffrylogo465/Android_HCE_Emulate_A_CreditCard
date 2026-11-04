@@ -49,7 +49,7 @@ final class Card {
 
         String mk = p.getString(prefix + "mkac", "");
         mk = mk == null ? "" : mk.replaceAll("[^0-9A-Fa-f]", "");
-        byte[] mkac = mk.length() >= 32 ? Emv.hex(mk) : null;
+        byte[] mkac = mk.length() >= 32 ? Hex.hex(mk) : null;
 
         int atc = 0x001B;
         String a = p.getString(prefix + "atc", "001B");
