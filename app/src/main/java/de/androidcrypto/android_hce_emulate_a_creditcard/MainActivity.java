@@ -298,7 +298,7 @@ public class MainActivity extends AppCompatActivity {
         String s = normaliseTrack2(t2);
         int d = s.indexOf('D');
         if (d < 12 || d > 19) return false;
-        return s.length() >= d + 8;          // separator + expiry + service + 1
+        return s.length() >= d + 8;
     }
 
     // ---------- status line ----------
@@ -370,11 +370,6 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- profiles ----------
 
-    /**
-     * 34/37 is tested first: it is the longest prefix of the three and nothing
-     * else starts with 3, so the order is cosmetic but reads better specific
-     * before broad.
-     */
     private static String profileFor(String pan) {
         if (pan == null || pan.length() < 4) return "";
         if (pan.startsWith("34") || pan.startsWith("37")) return "AMEX";
@@ -410,10 +405,6 @@ public class MainActivity extends AppCompatActivity {
         return net.isEmpty() ? "MASTERCARD" : net;
     }
 
-    /**
-     * The profile selector. AUTOMATICO is the default and reads the network off
-     * the PAN; picking a network pins it until you pick AUTOMATICO again.
-     */
     private void showProfilePicker() {
         final String[] names = Profiles.names();
         final String[] labels = new String[names.length];
@@ -438,6 +429,7 @@ public class MainActivity extends AppCompatActivity {
                     } else {
                         appliedProfile = names[which];
                         applyProfile(digits(t(etPan)), names[which]);
+                        armFromFields();
                     }
                 })
                 .setNegativeButton("Cancel", null)
@@ -463,27 +455,18 @@ public class MainActivity extends AppCompatActivity {
      * Only the FIELDS are written here. The directory, the FCI and the GPO come
      * from the profile file the service picks off the same number.
      *
+     * This is called on every rebind through maybeProfile, so it does NOT arm -
+     * arming resets the ATC from the DD and would rewind it every time the
+     * screen came back. armFromFields() is called explicitly by paste and pick.
+     *
      * The capture is wiped so an old PPSE or GPO cannot get in front of the
-     * profile.
-     *
-     * The script box is only blanked when nothing is armed, so a card that the
-     * dump loader has set up keeps its replay through a SAVE or a rebind.
-     *
-     * The ATC is only written when the box is empty - the service climbs it once
-     * per tap and owns it after that.
-     *
-     * MSD follows the network: 1 for Amex and Mastercard, both of which have a
-     * mag-stripe mode worth walking, 0 for Visa where the profile AIP has no
-     * byte-2 bit. It is set here rather than only in the dump loader because
-     * bindCard re-applies the profile on every rebind, so a flag set once is
-     * wiped the next time the screen comes back - bindCard puts it back.
+     * profile. The script box is only blanked when nothing is armed.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
         if (f == null) return;
 
         appliedProfile = net;
-        // no pref write - profilePref() derives from the PAN while unpinned
 
         binding = true;
         etLabel.setText(f[0]);
@@ -518,16 +501,9 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- track 2 dump ----------
 
-    /**
-     * Parse and validate a track 2 dump. Returns {pan, expiry, service, dd}.
-     *
-     * Lives here rather than in its own class so there is no second file to get
-     * wrong. Throws with a short reason, which the caller shows on the status
-     * line - the parse finishes before any field is written.
-     */
     private static String[] parseDump(String raw) {
         if (raw == null) throw new IllegalArgumentException("empty");
-        String s = raw.trim().toUpperCase(java.util.Locale.US);
+        String s = raw.trim().toUpperCase(java.util.Locale.ROOT);
         s = s.replace("\n", "").replace("\r", "");
 
         // A full dump arrives as "track2;track1;country;state;city;zip". Only
@@ -541,7 +517,7 @@ public class MainActivity extends AppCompatActivity {
 
         int eq = s.indexOf('=');
         if (eq < 0) {
-            int dsep = s.indexOf('D');                 // some dumps use D as the separator
+            int dsep = s.indexOf('D');
             if (dsep < 0) throw new IllegalArgumentException("no separator");
             s = s.substring(0, dsep) + "=" + s.substring(dsep + 1);
             eq = dsep;
@@ -581,15 +557,13 @@ public class MainActivity extends AppCompatActivity {
      * The network comes off the PAN, so the profile fields go on unconditionally
      * - a dump is authoritative about which network it is.
      *
-     * MSD is switched on for all three because the reason to paste a dump is to
-     * replay the card's own CSC, and only the mag-stripe path serves it.
+     * MSD is switched on for all three by the arming, because the reason to
+     * paste a dump is to replay the card's own CSC and only the mag-stripe path
+     * serves it.
      *
      * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
      * a previous card left behind - a stale AFL passes afl()'s length test and
      * points the terminal at a record the skeleton is not in.
-     *
-     * The record, the location, the ATC and the script are all armed by
-     * armMsdCard() below, so nothing has to be typed by hand after the paste.
      */
     private void applyDump(String raw) {
         String[] d;
@@ -619,7 +593,6 @@ public class MainActivity extends AppCompatActivity {
         binding = false;
         collect();
 
-        // The PAN decides the network, so the profile fields go on unconditionally.
         applyProfile(d[0], net);
 
         binding = true;
@@ -628,7 +601,7 @@ public class MainActivity extends AppCompatActivity {
         binding = false;
         collect();
 
-        boolean armed = armMsdCard(d[0], d[1], d[2], d[3]);
+        boolean armed = armFromFields();
         dumping = false;
 
         if (!armed) return;
@@ -637,43 +610,53 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Arm the whole card from a parsed dump.
+     * Arm the whole card from the fields.
      *
-     * One paste, one setup. The record keeps the dump's own DD - CSC and ATC
-     * carved exactly where they were - the served ATC is pinned to the CSC's
-     * mint point so the track and 9F36 agree, and the script replays the GPO
-     * and the CCC so neither has to be typed.
+     * The record shape and the script come from the profile, not from the PAN, so
+     * picking a network in the picker and pasting a dump of it behave the same
+     * way. The ATC arithmetic stays here because the service is what adds one
+     * before serving.
      *
-     * THREE SHAPES, because the networks disagree:
+     * Every field is validated before assembly so the status line names the field
+     * rather than surfacing a Hex throw.
      *
-     *   AMEX      bare 57, CSC 4 digits. Fixed position, no bitmaps, no UDOL.
-     *   VISA      bare 57, CSC 3 digits (dCVV). Fixed position. AIP comes from
-     *             msdAip() because the mask would clear the MSD bit.
-     *   MASTERCARD 9F6B not 57, CSC 4 digits, plus 9F65/9F66/9F67 and a 9F69
-     *             UDOL naming 9F6A. Kernel 2 will not place the CSC without them.
-     *
-     * The CCC line is what makes this work with no key: the script path returns
-     * before ccc(), so the card's own CSC goes out instead of the 0000 that a
-     * missing IMKCVC3 would produce.
-     *
-     * The ATC is written as atc - 1 because nextAtc() adds one before serving.
-     * A dump with no ATC in it (a Visa dCVV is 3 digits and nothing more) pads
-     * to 0000, so the served ATC starts at 0001 rather than wrapping to FFFF.
+     * The ATC is written as atc - 1 for that reason. A dump with no ATC in it (a
+     * Visa dCVV is 3 digits and nothing more) pads to 0000, so the served ATC
+     * starts at 0001 rather than wrapping to FFFF.
      */
     private boolean armMsdCard(String pan, String exp, String svc, String ddRaw) {
-        if (pan == null || pan.length() < 12) {
-            status("PAN too short to arm the card", COL_STALE);
+        if (pan == null || pan.length() < 12 || pan.length() > 19) {
+            status("PAN must be 12-19 digits", COL_STALE);
             return false;
         }
-        if (exp == null || exp.length() < 4) exp = "3112";
-        if (svc == null) svc = "";
-        while (svc.length() < 3) svc = "0" + svc;
+        if (!pan.matches("[0-9]+")) {
+            status("PAN not digits", COL_STALE);
+            return false;
+        }
 
-        String net = profileFor(pan);
-        boolean mc = "MASTERCARD".equals(net);
+        String e = (exp == null || exp.length() < 4) ? "3112" : exp;
+        if (!e.matches("[0-9]{4}")) {
+            status("expiry not digits (YYMM)", COL_STALE);
+            return false;
+        }
+
+        String s = svc == null ? "" : svc;
+        while (s.length() < 3) s = "0" + s;
+        if (!s.matches("[0-9]{3}")) {
+            status("service code not digits", COL_STALE);
+            return false;
+        }
+
+        CardProfile prof = Profiles.byName(effectiveProfile());
+        if (prof == null) {
+            status("no profile for this card", COL_STALE);
+            return false;
+        }
+        String net = prof.name();
         int cscLen = "VISA".equals(net) ? 3 : 4;
 
-        String dd = (ddRaw == null ? "" : ddRaw).toUpperCase().replaceAll("[^0-9A-F]", "");
+        String dd = (ddRaw == null ? "" : ddRaw)
+                .toUpperCase(java.util.Locale.ROOT).replaceAll("[^0-9A-F]", "");
         while (dd.length() < cscLen + 4) dd = dd + "0";
 
         String csc = dd.substring(0, cscLen);
@@ -683,49 +666,42 @@ public class MainActivity extends AppCompatActivity {
         int atcVal;
         try {
             atcVal = Integer.parseInt(atc, 16);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException ex) {
             atcVal = 0;
         }
-        if (atcVal == 0) atcVal = 1;             // no ATC in the dump: start at 1
+        if (atcVal == 0) atcVal = 1;
         int atcPrev = (atcVal - 1) & 0xFFFF;
-        String atcServed = String.format("%04X", atcVal);
+        String atcServed = String.format(java.util.Locale.ROOT, "%04X", atcVal);
 
-        StringBuilder t = new StringBuilder(pan)
-                .append('D').append(exp, 0, 4).append(svc, 0, 3).append(dd);
-        if (t.length() % 2 != 0) t.append('F');
-
-        byte[] track = hexToBytes(t.toString());
-        byte[] rec;
-
-        if (mc) {
-            int ddOff = pan.length() + 1 + 4 + 3;
-            rec = Tlv.t(0x70, Tlv.cat(
-                    Tlv.t(0x9F6B, track),
-                    Tlv.t(0x9F65, bits(0, pan.length())),
-                    Tlv.t(0x9F66, bits(ddOff, cscLen)),
-                    Tlv.t(0x9F67, new byte[]{0x02}),
-                    Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
-        } else {
-            rec = Tlv.t(0x70, Tlv.t(0x57, track));
+        String rec = prof.msdRecord(pan, e, s, dd);
+        if (rec == null) {
+            status(net + " has no MSD record shape for this DD", COL_STALE);
+            return false;
+        }
+        String script = prof.msdScript(csc, atcServed);
+        if (script == null) {
+            status(net + " has no MSD script", COL_STALE);
+            return false;
         }
 
-        String script = "80A80000=80061880080101009000" + "\n"
-                + "80AE8000=770A9F61" + String.format("%02X", csc.length() / 2) + csc
-                + "9F3602" + atcServed + "9000";
-
         binding = true;
-        etAtc.setText(String.format("%04X", atcPrev));
+        etAtc.setText(String.format(java.util.Locale.ROOT, "%04X", atcPrev));
         etScript.setText(script);
         etMsd.setText("1");
         binding = false;
         collect();
 
         prefs.edit()
-                .putString(key(current, "msdrec"), Hex.toHex(rec))
+                .putString(key(current, "msdrec"), rec)
                 .putString(key(current, "msdloc"), "0101")
                 .apply();
 
         return true;
+    }
+
+    /** Arm from what is in the boxes. The only two callers are paste and pick. */
+    private void armFromFields() {
+        armMsdCard(digits(t(etPan)), t(etExpiry), t(etService), t(etDiscretionary));
     }
 
     /** Paste a dump into a dialog, pre-filled with whatever the box holds. */
@@ -892,17 +868,6 @@ public class MainActivity extends AppCompatActivity {
         if (aid == null || aid.isEmpty()) return false;
         for (String f : ROUTABLE) if (aid.startsWith(f)) return true;
         return false;
-    }
-
-    private static int kernelOf(String aid) {
-        String a = aid == null ? "" : aid.toUpperCase();
-        if (a.startsWith("A000000152")) return 6;
-        if (a.startsWith("A000000015")) return 6;
-        if (a.startsWith("A000000004")) return 2;
-        if (a.startsWith("A000000065")) return 5;
-        if (a.startsWith("A000000025")) return 4;
-        if (a.startsWith("A000000333")) return 7;
-        return 3;
     }
 
     private void loadAll() {
@@ -1287,15 +1252,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /**
-     * One hex value into a card-scoped pref, with the length checked.
-     *
-     * These four are the MSD inputs and none of them has a box: IMKCVC3 is a
-     * second master key that the MK-AC box does not hold, IVCVC3 is a
-     * personalisation value, the record has to be the dump's skeleton verbatim,
-     * and the location says which record carries it. Putting them here rather
-     * than in the layout keeps activity_main.xml untouched.
-     */
     private void setHexPref(String name, String title, String hint, int minLen) {
         final EditText e = new EditText(this);
         e.setText(prefs.getString(key(current, name), ""));
@@ -1321,24 +1277,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /** Bitmap of `len` bits starting at `from`, MSB first. */
-    private static byte[] bits(int from, int len) {
-        byte[] b = new byte[(from + len + 7) / 8];
-        for (int i = 0; i < len; i++) {
-            int p = from + i;
-            b[p / 8] |= (byte) (0x80 >> (p % 8));
-        }
-        return b;
-    }
-
-    /**
-     * Validate every hardcoded profile constant.
-     *
-     * The directory and FCI are the only hand-written lengths in the app, and
-     * the only things that can fail with no compiler complaint. ProfileAmex had
-     * all of them wrong; ProfileMastercard is the clean baseline, so if MC comes
-     * back bad the validator itself is suspect rather than the bytes.
-     */
     private void checkProfiles() {
         StringBuilder sb = new StringBuilder();
         int bad = 0;
@@ -1350,7 +1288,6 @@ public class MainActivity extends AppCompatActivity {
         dialog("Profile constants", sb.toString());
     }
 
-    /** Validates one profile's constants into sb. Returns the failure count. */
     private int reportConstants(StringBuilder sb, String name, String[] hexes) {
         int bad = 0;
         for (String hex : hexes) {
@@ -1394,8 +1331,8 @@ public class MainActivity extends AppCompatActivity {
             int ddOff = pan.length() + 1 + 4 + 3;
             rec = Tlv.t(0x70, Tlv.cat(
                     Tlv.t(0x9F6B, track),
-                    Tlv.t(0x9F65, bits(0, pan.length())),
-                    Tlv.t(0x9F66, bits(ddOff, 4)),
+                    Tlv.t(0x9F65, Profiles.bits(0, pan.length())),
+                    Tlv.t(0x9F66, Profiles.bits(ddOff, 4)),
                     Tlv.t(0x9F67, new byte[]{0x02}),
                     Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
         } else {
@@ -1424,10 +1361,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /**
-     * Show the KCV of whatever is in the MK-AC box, so a seller's quoted value
-     * can be compared before the key is trusted. Six hex characters.
-     */
     private void showKcv() {
         String k = t(etMkac).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
         if (k.length() != 32 && k.length() != 48) {
@@ -1441,19 +1374,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Three-stage vector, so a failure names its own cause.
-     *
-     * Stage 0 is a DES known-answer test: key 133457799BBCDFF1 over the block
-     * 0123456789ABCDEF must give 85E813540F0AB405.
-     *
-     * Stage 1 pins the ICC master key derivation: MKiss 0123456789ABCDEFFEDCB
-     * A9876543210 with PAN 5287250568943496 and PSN 01 must give MK_L
-     * 57B3F7D3DC526123 and MK_R 4C75D998135DCD0B.
-     *
-     * Stage 2 pins the SK layout: ATC 0001, UN 12345678 must give
-     * AB8373B63D1FFD9EE3F8EFA71A2F61FD.
-     */
     private void runSkdVector() {
         try {
             String kat = bytesToHex(EmvCrypto.des(hexToBytes("133457799BBCDFF1"),
@@ -1483,12 +1403,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * CSK vector, CVN 20/21. Stage 1 is the same ICC derivation as SKD, so it is
-     * not repeated here - run the SKD vector first.
-     *
-     * Stage 2: ATC 0001, UN ignored, must give DF20453BB5E5D946BAC2C7E645B5405E.
-     */
     private void runCskVector() {
         try {
             byte[][] k = EmvCrypto.iccMasterKeys(
@@ -1502,15 +1416,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * CVC3 vector. Staged, so a failure names its own cause.
-     *
-     * Stage 0 DES KAT. Stage 1 pins KDCVC3 from IMKCVC3 over PAN and PSN - the
-     * same Option A derivation the ARQC path uses. Stage 2 pins block order and
-     * truncation. Stage 3 is the negative, changing only the IV. Stage 4 runs
-     * the integer 26 through the production ATC encoder, because at 0001 binary
-     * and BCD are the same two bytes and the encoding goes untested.
-     */
     private void runCvc3Vector() {
         try {
             String kat = bytesToHex(EmvCrypto.des(hexToBytes("133457799BBCDFF1"),
@@ -1565,7 +1470,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Whole 3DES output for IV || UN || ATC. */
     private String cipherOf(byte[] kd, String iv, String un, String atc) throws Exception {
         return bytesToHex(EmvCrypto.des3(kd, hexToBytes(iv + un + atc)));
     }
@@ -1587,14 +1491,6 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /**
-     * Candidates for the scan.
-     *
-     * A remembered key for this BIN comes first. When a supplied list exists it
-     * is used ALONE: generated families cannot match a production IMK, so
-     * merging them only spends hundreds of thousands of MACs on keys that are
-     * known not to work. Generation is the fallback for an empty list.
-     */
     private List<String> candidateKeys() {
         String bin = digits(t(etPan));
         List<String> out = new ArrayList<>();
@@ -1623,7 +1519,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void scanForKey() { scanForKey(true); }
 
-    /** CVN from the IAD: byte 2 of a DKI||CVN IAD, low nibble for CCD. -1 if none. */
     private static int cvnFromIad(String iadHex) {
         String h = (iadHex == null ? "" : iadHex).replaceAll("[^0-9A-Fa-f]", "");
         if (h.length() < 4) return -1;
@@ -1637,17 +1532,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Search the candidate list for the issuer key.
-     *
-     * Two sources of reference: a real capture from READ CARD, or - for a card
-     * that was never read, i.e. a dump - the ARQC, CDOL data, AIP and ATC typed
-     * into the boxes. The typed route uses the REFERENCE card's AIP, not ours:
-     * the reference ARQC was MACed over that AIP, so 1880 can never match.
-     *
-     * The MAC input is cdol || AIP || ATC || IAD. The session key scheme follows
-     * the CVN: 16/17 are SKD with the UN, 20/21 are CSK.
-     */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
