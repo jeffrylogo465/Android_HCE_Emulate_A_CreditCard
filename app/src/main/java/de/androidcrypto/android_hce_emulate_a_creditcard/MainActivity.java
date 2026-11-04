@@ -700,8 +700,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** Arm from what is in the boxes. The only two callers are paste and pick. */
-    private void armFromFields() {
-        armMsdCard(digits(t(etPan)), t(etExpiry), t(etService), t(etDiscretionary));
+    private boolean armFromFields() {
+        return armMsdCard(digits(t(etPan)), t(etExpiry), t(etService), t(etDiscretionary));
     }
 
     /** Paste a dump into a dialog, pre-filled with whatever the box holds. */
