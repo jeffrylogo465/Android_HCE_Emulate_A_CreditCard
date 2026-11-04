@@ -1315,26 +1315,28 @@ public class MainActivity extends AppCompatActivity {
      */
     private void checkProfiles() {
         StringBuilder sb = new StringBuilder();
-        String[][] sets = {
-                {"AMEX", ProfileAmex.scriptConstants()},
-                {"MASTERCARD", ProfileMastercard.scriptConstants()},
-        };
         int bad = 0;
-        for (String[] set : sets) {
-            for (String hex : set[1]) {
-                String p = TlvValidator.firstProblem(hex);
-                if (p == null) {
-                    sb.append(set[0]).append(" ok\n");
-                } else {
-                    bad++;
-                    sb.append(set[0]).append(" BAD: ").append(p).append('\n');
-                }
-            }
-        }
+        bad += reportConstants(sb, "AMEX", ProfileAmex.scriptConstants());
+        bad += reportConstants(sb, "MASTERCARD", ProfileMastercard.scriptConstants());
         sb.append('\n').append(bad == 0
                 ? "All constants balanced."
                 : bad + " constant(s) malformed.");
         dialog("Profile constants", sb.toString());
+    }
+
+    /** Validates one profile's constants into sb. Returns the failure count. */
+    private int reportConstants(StringBuilder sb, String name, String[] hexes) {
+        int bad = 0;
+        for (String hex : hexes) {
+            String p = TlvValidator.firstProblem(hex);
+            if (p == null) {
+                sb.append(name).append(" ok\n");
+            } else {
+                bad++;
+                sb.append(name).append(" BAD: ").append(p).append('\n');
+            }
+        }
+        return bad;
     }
 
     /**
