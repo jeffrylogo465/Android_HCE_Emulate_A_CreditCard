@@ -2,30 +2,28 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import java.util.Locale;
 
-/**
- * Mastercard, replayed from the reference card.
- *
- * The directory, the FCI and the second applet are the plastic's own, lifted off
- * it in the reader log byte for byte. The Maestro entry stops a second SELECT
- * from falling through to a generated FCI that would carry 9F2A and a 9F38 PDOL.
- *
- * The FCI deliberately has no 9F38, so the terminal sends a PDOL-free GPO.
- *
- * LENGTHS: every outer length is the byte count of what it covers, and the label
- * is 12 bytes. The PPSE closes at 6F46 / A534 / BF0C31 / 6118 / 6115 - 70, 52,
- * 49, 24 and 21 bytes of content. It was 6F45 / A533, one short at two levels,
- * which truncated the final 02 of the Maestro 87 01 02 and made a
- * length-validating kernel drop the field after the directory SELECT.
- *
- * The GPO comes from Profiles.gpoMastercard, which builds AIP and AFL and nothing
- * else - Kernel 2 does not carry the cryptogram in the GPO.
- *
- * IAD: defaultIad() returns the reference card's own block. It used to be a
- * constant nothing read, so the service fell through to the generic M/Chip
- * default - byte 2 of which is CVN 10 against this card's 16. Both are SKD so the
- * scheme never changed, which is why it worked; but the IAD goes into the MAC
- * input, so a correct key would still have produced a wrong ARQC.
- */
+// Mastercard, replayed from the reference card.
+//
+// The directory, the FCI and the second applet are the plastic's own, lifted off
+// it in the reader log byte for byte. The Maestro entry stops a second SELECT
+// from falling through to a generated FCI that would carry 9F2A and a 9F38 PDOL.
+//
+// The FCI deliberately has no 9F38, so the terminal sends a PDOL-free GPO.
+//
+// LENGTHS: every outer length is the byte count of what it covers, and the label
+// is 12 bytes. The PPSE closes at 6F46 / A534 / BF0C31 / 6118 / 6115 - 70, 52,
+// 49, 24 and 21 bytes of content. It was 6F45 / A533, one short at two levels,
+// which truncated the final 02 of the Maestro 87 01 02 and made a
+// length-validating kernel drop the field after the directory SELECT.
+//
+// The GPO comes from Profiles.gpoMastercard, which builds AIP and AFL and nothing
+// else - Kernel 2 does not carry the cryptogram in the GPO.
+//
+// IAD: defaultIad() returns the reference card's own block. It used to be a
+// constant nothing read, so the service fell through to the generic M/Chip
+// default - byte 2 of which is CVN 10 against this card's 16. Both are SKD so the
+// scheme never changed, which is why it worked; but the IAD goes into the MAC
+// input, so a correct key would still have produced a wrong ARQC.
 public final class ProfileMastercard implements CardProfile {
 
     private static final String PPSE =
@@ -38,7 +36,7 @@ public final class ProfileMastercard implements CardProfile {
     private static final String MAESTRO_FCI =
             "6F198407A0000000043060A50E500C434849502042617365203031";
 
-    /** The reference card's own IAD. Byte 2 is the CVN: 0x10 = 16, so SKD. */
+    // The reference card's own IAD. Byte 2 is the CVN: 0x10 = 16, so SKD.
     private static final String IAD = "0110A000092400000102000000000000FF";
 
     @Override public String name() { return "MASTERCARD"; }
@@ -56,14 +54,12 @@ public final class ProfileMastercard implements CardProfile {
 
     @Override public String defaultIad() { return IAD; }
 
-    /**
-     * 9F6B not 57, and the CSC's position has to be described.
-     *
-     * Kernel 2 will not place the CSC without 9F65 over the PAN, 9F66 over the DD
-     * region, 9F67 for nUN and a 9F69 UDOL naming 9F6A. The bitmaps are derived
-     * from the actual offsets, so they stay right if the PAN length changes - a
-     * hand-written bitmap is the same class of bug as a hand-written length.
-     */
+    // 9F6B not 57, and the CSC's position has to be described.
+    //
+    // Kernel 2 will not place the CSC without 9F65 over the PAN, 9F66 over the DD
+    // region, 9F67 for nUN and a 9F69 UDOL naming 9F6A. The bitmaps are derived
+    // from the actual offsets, so they stay right if the PAN length changes - a
+    // hand-written bitmap is the same class of bug as a hand-written length.
     @Override public String msdRecord(String pan, String exp, String svc, String dd) {
         if (pan == null || pan.length() < 12 || pan.length() > 19) return null;
         if (!pan.matches("[0-9]+")) return null;
@@ -105,7 +101,7 @@ public final class ProfileMastercard implements CardProfile {
         return Profiles.gpoMastercard(atc, arqc);
     }
 
-    /** For TlvValidator. Its own directory and both FCIs. */
+    // For TlvValidator. Its own directory and both FCIs.
     static String[] scriptConstants() {
         return new String[]{PPSE, FCI, MAESTRO_FCI};
     }
