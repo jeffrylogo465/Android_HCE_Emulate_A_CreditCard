@@ -16,6 +16,11 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
  * as a failed offline authentication, and has no TVR/TAC path to fall back on.
  * With a zero ARQC the CTQ's b6 goes online and the issuer declines. A Visa TC
  * here can never approve until a real MK-AC exists.
+ *
+ * msdAip() returns 1880 so the dump path can run this card as MSD instead: byte
+ * 1 0x18 is CV + TRM with qVSDC dropped, byte 2 0x80 is the MSD bit. The default
+ * mask would clear that bit, which is why it has to be supplied rather than
+ * derived - under Visa the bit IS MSD, the opposite of Mastercard.
  */
 public final class ProfileVisa implements CardProfile {
 
@@ -33,6 +38,8 @@ public final class ProfileVisa implements CardProfile {
     @Override public boolean matchesAid(String aid) {
         return aid != null && aid.startsWith("A000000003");
     }
+
+    @Override public String msdAip() { return "1880"; }
 
     @Override public String selectPpse(String aid) {
         return Profiles.selectPpse(Profiles.hex(Profiles.oneAppPpse(aid)));
