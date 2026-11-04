@@ -561,6 +561,9 @@ public class MainActivity extends AppCompatActivity {
      * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
      * a previous card left behind - a stale AFL passes afl()'s length test and
      * points the terminal at a record the skeleton is not in.
+     *
+     * The record, the location, the ATC and the script are all armed by
+     * armMsdCard() below, so nothing has to be typed by hand after the paste.
      */
     private void applyDump(String raw) {
         String[] d;
@@ -590,15 +593,72 @@ public class MainActivity extends AppCompatActivity {
         collect();
 
         adapter.notifyItemChanged(current);
-        buildMsdRecord();
 
-        if (prefs.getString(key(current, "msdrec"), "").isEmpty()) {
-            status("dump parsed, but the skeleton failed - check the PAN", COL_STALE);
-            return;
-        }
+        if (!armMsdCard(d[0], d[1], d[2], d[3])) return;
+
         status("dump loaded " + d[0] + " exp " + d[1] + " svc " + d[2]
                 + " dd " + (d[3].isEmpty() ? "none" : d[3].length() + "d")
-                + " - harness next", COL_WARM);
+                + " - record, GPO and CCC armed. Tap it.", COL_WARM);
+    }
+
+    /**
+     * Arm the whole MSD card from a parsed dump.
+     *
+     * One paste, one setup. The record keeps the dump's own DD - CSC and ATC
+     * carved exactly where they were - the served ATC is pinned to the CSC's
+     * mint point so the track and 9F36 agree, and the script replays the GPO
+     * and the CCC so neither has to be typed.
+     *
+     * The CCC line is what makes this work with no key: the script path returns
+     * before ccc(), so the card's own CSC goes out instead of the 0000 that a
+     * missing IMKCVC3 would produce.
+     *
+     * The ATC is written as atc - 1 because nextAtc() adds one before serving.
+     */
+    private boolean armMsdCard(String pan, String exp, String svc, String ddRaw) {
+        if (pan == null || pan.length() < 12) {
+            status("PAN too short to arm the card", COL_STALE);
+            return false;
+        }
+        if (exp == null || exp.length() < 4) exp = "3112";
+        if (svc == null) svc = "";
+        while (svc.length() < 3) svc = "0" + svc;
+
+        String dd = (ddRaw == null ? "" : ddRaw).toUpperCase().replaceAll("[^0-9A-F]", "");
+        while (dd.length() < 8) dd = dd + "0";
+
+        String csc = dd.substring(0, 4);
+        String atc = dd.substring(4, 8);
+
+        int atcPrev;
+        try {
+            atcPrev = (Integer.parseInt(atc, 16) - 1) & 0xFFFF;
+        } catch (NumberFormatException e) {
+            status("ATC in the DD is not hex", COL_STALE);
+            return false;
+        }
+
+        StringBuilder t = new StringBuilder(pan)
+                .append('D').append(exp, 0, 4).append(svc, 0, 3).append(dd);
+        if (t.length() % 2 != 0) t.append('F');
+
+        byte[] rec = Tlv.t(0x70, Tlv.cat(Tlv.t(0x57, hexToBytes(t.toString()))));
+
+        String script = "80A80000=80061880080101009000" + "\n"
+                + "80AE8000=770A9F6102" + csc + "9F3602" + atc + "9000";
+
+        binding = true;
+        etAtc.setText(String.format("%04X", atcPrev));
+        etScript.setText(script);
+        binding = false;
+        collect();
+
+        prefs.edit()
+                .putString(key(current, "msdrec"), Hex.toHex(rec))
+                .putString(key(current, "msdloc"), "0101")
+                .apply();
+
+        return true;
     }
 
     /** Paste a dump into a dialog, pre-filled with whatever the box holds. */
@@ -1203,6 +1263,9 @@ public class MainActivity extends AppCompatActivity {
      * - the CSC position is fixed by the spec - so they get a bare 57.
      *
      * The DD is eight zeros in both: CSC 2, ATC 2, nUN 2, two spare.
+     *
+     * armMsdCard() supersedes this for the dump path, because it keeps the
+     * dump's own DD instead of zeroing it. This stays for the menu.
      */
     private void buildMsdRecord() {
         String pan = prefs.getString(key(current, "pan"), "").replaceAll("[^0-9]", "");
