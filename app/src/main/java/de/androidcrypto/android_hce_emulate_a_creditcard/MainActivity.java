@@ -461,7 +461,7 @@ public class MainActivity extends AppCompatActivity {
      * mag-stripe mode worth walking, 0 for Visa where the profile AIP has no
      * byte-2 bit. It is set here rather than only in the dump loader because
      * bindCard re-applies the profile on every rebind, so a flag set once is
-     * wiped the next time the screen comes back.
+     * wiped the next time the screen comes back - bindCard puts it back.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
@@ -602,12 +602,20 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * Arm the whole MSD card from a parsed dump.
+     * Arm the whole card from a parsed dump.
      *
      * One paste, one setup. The record keeps the dump's own DD - CSC and ATC
      * carved exactly where they were - the served ATC is pinned to the CSC's
      * mint point so the track and 9F36 agree, and the script replays the GPO
      * and the CCC so neither has to be typed.
+     *
+     * THREE SHAPES, because the networks disagree:
+     *
+     *   AMEX      bare 57, CSC 4 digits. Fixed position, no bitmaps, no UDOL.
+     *   VISA      bare 57, CSC 3 digits (dCVV). Fixed position. AIP comes from
+     *             msdAip() because the mask would clear the MSD bit.
+     *   MASTERCARD 9F6B not 57, CSC 4 digits, plus 9F65/9F66/9F67 and a 9F69
+     *             UDOL naming 9F6A. Kernel 2 will not place the CSC without them.
      *
      * The CCC line is what makes this work with no key: the script path returns
      * before ccc(), so the card's own CSC goes out instead of the 0000 that a
@@ -624,11 +632,16 @@ public class MainActivity extends AppCompatActivity {
         if (svc == null) svc = "";
         while (svc.length() < 3) svc = "0" + svc;
 
-        String dd = (ddRaw == null ? "" : ddRaw).toUpperCase().replaceAll("[^0-9A-F]", "");
-        while (dd.length() < 8) dd = dd + "0";
+        String net = profileFor(pan);
+        boolean mc = "MASTERCARD".equals(net);
+        int cscLen = "VISA".equals(net) ? 3 : 4;
 
-        String csc = dd.substring(0, 4);
-        String atc = dd.substring(4, 8);
+        String dd = (ddRaw == null ? "" : ddRaw).toUpperCase().replaceAll("[^0-9A-F]", "");
+        while (dd.length() < cscLen + 4) dd = dd + "0";
+
+        String csc = dd.substring(0, cscLen);
+        String atc = dd.substring(cscLen, cscLen + 4);
+        while (csc.length() % 2 != 0) csc = csc + "F";
 
         int atcPrev;
         try {
@@ -642,14 +655,29 @@ public class MainActivity extends AppCompatActivity {
                 .append('D').append(exp, 0, 4).append(svc, 0, 3).append(dd);
         if (t.length() % 2 != 0) t.append('F');
 
-        byte[] rec = Tlv.t(0x70, Tlv.cat(Tlv.t(0x57, hexToBytes(t.toString()))));
+        byte[] track = hexToBytes(t.toString());
+        byte[] rec;
+
+        if (mc) {
+            int ddOff = pan.length() + 1 + 4 + 3;
+            rec = Tlv.t(0x70, Tlv.cat(
+                    Tlv.t(0x9F6B, track),
+                    Tlv.t(0x9F65, bits(0, pan.length())),
+                    Tlv.t(0x9F66, bits(ddOff, cscLen)),
+                    Tlv.t(0x9F67, new byte[]{0x02}),
+                    Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
+        } else {
+            rec = Tlv.t(0x70, Tlv.t(0x57, track));
+        }
 
         String script = "80A80000=80061880080101009000" + "\n"
-                + "80AE8000=770A9F6102" + csc + "9F3602" + atc + "9000";
+                + "80AE8000=770A9F61" + String.format("%02X", csc.length() / 2) + csc
+                + "9F3602" + atc + "9000";
 
         binding = true;
         etAtc.setText(String.format("%04X", atcPrev));
         etScript.setText(script);
+        etMsd.setText("1");
         binding = false;
         collect();
 
@@ -940,6 +968,14 @@ public class MainActivity extends AppCompatActivity {
         status("");
         autoFill();
         maybeProfile();
+
+        // maybeProfile -> applyProfile blanks the script and resets msd; put the
+        // armed values back so a rebind does not disarm the card.
+        binding = true;
+        etScript.setText(prefs.getString(key(i, "script"), ""));
+        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
+        binding = false;
+        collect();
     }
 
     private void updateCount() {
