@@ -451,8 +451,11 @@ public class MainActivity extends AppCompatActivity {
      * Only the FIELDS are written here. The directory, the FCI and the GPO come
      * from the profile file the service picks off the same number.
      *
-     * The script box is blanked so the profile runs instead of a stale replay,
-     * and the capture is wiped so an old PPSE or GPO cannot get in front of it.
+     * The capture is wiped so an old PPSE or GPO cannot get in front of the
+     * profile.
+     *
+     * The script box is only blanked when nothing is armed, so a card that the
+     * dump loader has set up keeps its replay through a SAVE or a rebind.
      *
      * The ATC is only written when the box is empty - the service climbs it once
      * per tap and owns it after that.
@@ -479,7 +482,7 @@ public class MainActivity extends AppCompatActivity {
         etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
         etAfl.setText("");
         etCid.setText("");
-        etScript.setText("");
+        if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
         if (KNOWN_PAN.equals(pan)) {
             etExpiry.setText("3105");
@@ -513,8 +516,15 @@ public class MainActivity extends AppCompatActivity {
     private static String[] parseDump(String raw) {
         if (raw == null) throw new IllegalArgumentException("empty");
         String s = raw.trim().toUpperCase(java.util.Locale.US);
-        s = s.replace(";", "").replace("?", "").replace(" ", "")
-             .replace("\n", "").replace("\r", "");
+        s = s.replace("\n", "").replace("\r", "");
+
+        // A full dump arrives as "track2;track1;country;state;city;zip". Only
+        // track 2 is ours - cut at the first separator rather than deleting
+        // them, or track 1 runs into the DD and trips the length check.
+        int semi = s.indexOf(';');
+        if (semi >= 0) s = s.substring(0, semi);
+
+        s = s.replace(";", "").replace("?", "").replace(" ", "");
         if (s.startsWith("B")) s = s.substring(1);
 
         int eq = s.indexOf('=');
@@ -574,12 +584,15 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        String rawName = nameFromTrack1(raw);
+
         binding = true;
         etPan.setText(d[0]);
         etExpiry.setText(d[1]);
         etService.setText(d[2]);
         etDiscretionary.setText(d[3]);
         etTrack2.setText(d[0] + "=" + d[1] + d[2] + d[3]);
+        if (!rawName.isEmpty() && t(etName).isEmpty()) etName.setText(rawName);
         binding = false;
 
         collect();
@@ -969,7 +982,7 @@ public class MainActivity extends AppCompatActivity {
         autoFill();
         maybeProfile();
 
-        // maybeProfile -> applyProfile blanks the script and resets msd; put the
+        // maybeProfile -> applyProfile can blank the script and reset msd; put the
         // armed values back so a rebind does not disarm the card.
         binding = true;
         etScript.setText(prefs.getString(key(i, "script"), ""));
