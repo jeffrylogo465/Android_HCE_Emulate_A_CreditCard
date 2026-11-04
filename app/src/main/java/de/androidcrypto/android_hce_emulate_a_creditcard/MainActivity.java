@@ -149,6 +149,7 @@ public class MainActivity extends AppCompatActivity {
 
     private int current = 0;
     private boolean binding = false;
+    private boolean dumping = false;
     private boolean suppressResumeStatus = false;
 
     private String appliedProfile = "";
@@ -278,15 +279,26 @@ public class MainActivity extends AppCompatActivity {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
             public void afterTextChanged(Editable s) {
-                if (binding) return;
+                if (binding || dumping) return;
                 autoFill();
                 maybeProfile();
+
+                String t2 = t(etTrack2);
+                if (looksLikeFullDump(t2)) applyDump(t2);
             }
         };
         etTrack2.addTextChangedListener(filler);
         etPan.addTextChangedListener(filler);
 
         showPage(0);
+    }
+
+    /** A track 2 long enough to carry a CSC and an ATC. */
+    private static boolean looksLikeFullDump(String t2) {
+        String s = normaliseTrack2(t2);
+        int d = s.indexOf('D');
+        if (d < 12 || d > 19) return false;
+        return s.length() >= d + 8;          // separator + expiry + service + 1
     }
 
     // ---------- status line ----------
@@ -566,7 +578,11 @@ public class MainActivity extends AppCompatActivity {
     /**
      * One-shot loader: paste a track 2 dump and everything downstream derives.
      *
-     * MSD is switched on here because that is the only reason to paste a dump.
+     * The network comes off the PAN, so the profile fields go on unconditionally
+     * - a dump is authoritative about which network it is.
+     *
+     * MSD is switched on for all three because the reason to paste a dump is to
+     * replay the card's own CSC, and only the mag-stripe path serves it.
      *
      * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
      * a previous card left behind - a stale AFL passes afl()'s length test and
@@ -584,6 +600,13 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        String net = profileFor(d[0]);
+        if (net.isEmpty()) {
+            status("dump: " + d[0] + " is not a network this app serves", COL_STALE);
+            return;
+        }
+
+        dumping = true;
         String rawName = nameFromTrack1(raw);
 
         binding = true;
@@ -592,26 +615,25 @@ public class MainActivity extends AppCompatActivity {
         etService.setText(d[2]);
         etDiscretionary.setText(d[3]);
         etTrack2.setText(d[0] + "=" + d[1] + d[2] + d[3]);
-        if (!rawName.isEmpty() && t(etName).isEmpty()) etName.setText(rawName);
+        if (!rawName.isEmpty()) etName.setText(rawName);
         binding = false;
-
         collect();
-        maybeProfile();
+
+        // The PAN decides the network, so the profile fields go on unconditionally.
+        applyProfile(d[0], net);
 
         binding = true;
-        etMsd.setText("1");
         etAfl.setText("");
         etCid.setText("");
         binding = false;
         collect();
 
-        adapter.notifyItemChanged(current);
+        boolean armed = armMsdCard(d[0], d[1], d[2], d[3]);
+        dumping = false;
 
-        if (!armMsdCard(d[0], d[1], d[2], d[3])) return;
-
-        status("dump loaded " + d[0] + " exp " + d[1] + " svc " + d[2]
-                + " dd " + (d[3].isEmpty() ? "none" : d[3].length() + "d")
-                + " - record, GPO and CCC armed. Tap it.", COL_WARM);
+        if (!armed) return;
+        status("dump loaded " + d[0] + " " + net
+                + " - record, ATC and script armed. Tap it.", COL_WARM);
     }
 
     /**
@@ -635,6 +657,8 @@ public class MainActivity extends AppCompatActivity {
      * missing IMKCVC3 would produce.
      *
      * The ATC is written as atc - 1 because nextAtc() adds one before serving.
+     * A dump with no ATC in it (a Visa dCVV is 3 digits and nothing more) pads
+     * to 0000, so the served ATC starts at 0001 rather than wrapping to FFFF.
      */
     private boolean armMsdCard(String pan, String exp, String svc, String ddRaw) {
         if (pan == null || pan.length() < 12) {
@@ -656,13 +680,15 @@ public class MainActivity extends AppCompatActivity {
         String atc = dd.substring(cscLen, cscLen + 4);
         while (csc.length() % 2 != 0) csc = csc + "F";
 
-        int atcPrev;
+        int atcVal;
         try {
-            atcPrev = (Integer.parseInt(atc, 16) - 1) & 0xFFFF;
+            atcVal = Integer.parseInt(atc, 16);
         } catch (NumberFormatException e) {
-            status("ATC in the DD is not hex", COL_STALE);
-            return false;
+            atcVal = 0;
         }
+        if (atcVal == 0) atcVal = 1;             // no ATC in the dump: start at 1
+        int atcPrev = (atcVal - 1) & 0xFFFF;
+        String atcServed = String.format("%04X", atcVal);
 
         StringBuilder t = new StringBuilder(pan)
                 .append('D').append(exp, 0, 4).append(svc, 0, 3).append(dd);
@@ -685,7 +711,7 @@ public class MainActivity extends AppCompatActivity {
 
         String script = "80A80000=80061880080101009000" + "\n"
                 + "80AE8000=770A9F61" + String.format("%02X", csc.length() / 2) + csc
-                + "9F3602" + atc + "9000";
+                + "9F3602" + atcServed + "9000";
 
         binding = true;
         etAtc.setText(String.format("%04X", atcPrev));
@@ -2161,6 +2187,12 @@ public class MainActivity extends AppCompatActivity {
         prefs.edit().putString(key(current, "psn"), psn.isEmpty() ? "01" : psn).apply();
 
         copyStagingToCard(current);
+
+        // A read that captured no records still has the DD: arm the card from it
+        // rather than leaving something the terminal will 6A83 on.
+        if (recordCountOnCard() == 0 && !track2.isEmpty()) {
+            armMsdCard(pan, expiry, service, disc);
+        }
 
         binding = true;
         etMsd.setText(String.valueOf(msdFromCapture(current)));
