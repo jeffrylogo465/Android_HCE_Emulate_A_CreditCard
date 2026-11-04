@@ -1234,7 +1234,8 @@ public class MainActivity extends AppCompatActivity {
                                 "Run CVC3 vector",
                                 "Seed vector card", "Run CVC3 harness",
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
-                                "MSD: set record", "MSD: set location"},
+                                "MSD: set record", "MSD: set location",
+                                "Check profile constants"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1253,6 +1254,7 @@ public class MainActivity extends AppCompatActivity {
                                     "The personalised 57 record, verbatim, no status word.", 8);
                             else if (w == 13) setHexPref("msdloc", "MSD record location",
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
+                            else if (w == 14) checkProfiles();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1301,6 +1303,38 @@ public class MainActivity extends AppCompatActivity {
             b[p / 8] |= (byte) (0x80 >> (p % 8));
         }
         return b;
+    }
+
+    /**
+     * Validate every hardcoded profile constant.
+     *
+     * The directory and FCI are the only hand-written lengths in the app, and
+     * the only things that can fail with no compiler complaint. ProfileAmex had
+     * all of them wrong; ProfileMastercard is the clean baseline, so if MC comes
+     * back bad the validator itself is suspect rather than the bytes.
+     */
+    private void checkProfiles() {
+        StringBuilder sb = new StringBuilder();
+        String[][] sets = {
+                {"AMEX", ProfileAmex.scriptConstants()},
+                {"MASTERCARD", ProfileMastercard.scriptConstants()},
+        };
+        int bad = 0;
+        for (String[] set : sets) {
+            for (String hex : set[1]) {
+                String p = TlvValidator.firstProblem(hex);
+                if (p == null) {
+                    sb.append(set[0]).append(" ok\n");
+                } else {
+                    bad++;
+                    sb.append(set[0]).append(" BAD: ").append(p).append('\n');
+                }
+            }
+        }
+        sb.append('\n').append(bad == 0
+                ? "All constants balanced."
+                : bad + " constant(s) malformed.");
+        dialog("Profile constants", sb.toString());
     }
 
     /**
