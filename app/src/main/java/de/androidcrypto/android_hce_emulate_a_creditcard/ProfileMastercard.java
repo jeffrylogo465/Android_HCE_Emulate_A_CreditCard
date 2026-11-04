@@ -22,9 +22,13 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
  * the field after the directory SELECT.
  *
  * The GPO comes from Profiles.gpoMastercard, which builds AIP and AFL and
- * nothing else - Kernel 2 does not carry the cryptogram in the GPO. The IAD
- * below is therefore documentation of what the card declares, not an input to
- * the builder; the service reads the IAD from the card record.
+ * nothing else - Kernel 2 does not carry the cryptogram in the GPO.
+ *
+ * IAD: defaultIad() returns the reference card's own block. It used to be a
+ * constant nothing read, so the service fell through to the generic M/Chip
+ * default - byte 2 of which is CVN 10 against this card's 16. Both are SKD so
+ * the scheme never changed, which is why it worked; but the IAD goes into the
+ * MAC input, so a correct key would still have produced a wrong ARQC.
  */
 public final class ProfileMastercard implements CardProfile {
 
@@ -54,6 +58,8 @@ public final class ProfileMastercard implements CardProfile {
                 && (aid.startsWith("A000000004") || aid.startsWith("A000000005"));
     }
 
+    @Override public String defaultIad() { return IAD; }
+
     @Override public String selectPpse(String aid) {
         return Profiles.selectPpse(PPSE);
     }
@@ -67,5 +73,10 @@ public final class ProfileMastercard implements CardProfile {
 
     @Override public String gpo(String atc, String arqc) {
         return Profiles.gpoMastercard(atc, arqc);
+    }
+
+    /** For TlvValidator. Its own directory and both FCIs. */
+    static String[] scriptConstants() {
+        return new String[]{PPSE, FCI, MAESTRO_FCI};
     }
 }
