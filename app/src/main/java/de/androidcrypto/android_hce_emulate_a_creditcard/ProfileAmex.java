@@ -1,45 +1,42 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
+import java.util.Locale;
+
 /**
  * American Express, mag-stripe mode.
  *
  * Mag-stripe mode is one COMPUTE CRYPTOGRAPHIC CHECKSUM exchange yielding a
- * dynamic CSC. There is no second GENERATE AC and no ARPC, which is why the
- * AIP claims nothing online: CV and TRM only.
+ * dynamic CSC. There is no second GENERATE AC and no ARPC, which is why the AIP
+ * claims nothing online: CV and TRM only.
  *
  * AIP 1880: byte 1 0x18 is CV (0x10) + TRM (0x08), byte 2 0x80 is the MSD bit.
  * Byte 1 b8 is RFU under Visa and ExpressPay both - it is not a rung on the
- * ladder, whatever the older notes said. If 1880 is refused, the only live
- * bits left to vary are 0x10 and 0x08: 1080, then 0080.
+ * ladder, whatever the older notes said. If 1880 is refused, the only live bits
+ * left to vary are 0x10 and 0x08: 1080, then 0080.
  *
- * THE AIP IS AN ASSUMPTION, not a verified spec value. Byte 2 b8 is *called*
- * the MSD bit here, but whether ExpressPay assigns it that meaning could not be
+ * THE AIP IS AN ASSUMPTION, not a verified spec value. Byte 2 b8 is *called* the
+ * MSD bit here, but whether ExpressPay assigns it that meaning could not be
  * confirmed - across the contactless kernels, MSD-vs-EMV is driven more by the
- * GPO response format than by one canonical bit. 1880 is what the reference
- * card declares and Amex is mag-stripe by nature, so it stands; the ladder above
- * is a live thing to try, not trivia.
+ * GPO response format than by one canonical bit. 1880 is what the reference card
+ * declares and Amex is mag-stripe by nature, so it stands.
  *
- * There are NO bitmaps. 9F65/9F66/9F67 are Mastercard Kernel 2 only; under
- * Visa and ExpressPay the CSC's position in the DD is fixed by the spec, so
- * the record is 70 [ 57 <track> ] and nothing else. There is no UDOL either -
- * 9F69 is Card Authentication Related Data here, and the CCC data field is
- * the UN alone.
+ * There are NO bitmaps. 9F65/9F66/9F67 are Mastercard Kernel 2 only; under Visa
+ * and ExpressPay the CSC's position in the DD is fixed by the spec, so the
+ * record is 70 [ 57 <track> ] and nothing else. There is no UDOL either.
  *
- * 9F2A 04 goes in the directory and the FCI so kernel 4 is picked by
- * identifier. That one is verified: ExpressPay is EMVCo Kernel 4.
+ * 9F2A 04 goes in the directory and the FCI so kernel 4 is picked by identifier.
+ * That one is verified: ExpressPay is EMVCo Kernel 4.
  *
- * No IAD: Amex has no CVN block, so defaultIad() is empty.
+ * No IAD: Amex has no CVN block, so defaultIad() is EMPTY (not null).
  *
- * gpo() goes through Profiles.gpoAmex, which emits FORMAT 1 - a raw 80 with
- * AIP and AFL and no inner tags. gpoWithAip would emit a 77, and a mag-stripe
- * kernel rejects a format 2 body carrying no 5A and no 57.
+ * gpo() goes through Profiles.gpoAmex, which emits FORMAT 1 - a raw 80 with AIP
+ * and AFL and no inner tags. gpoWithAip would emit a 77, and a mag-stripe kernel
+ * rejects a format 2 body carrying no 5A and no 57.
  *
  * LENGTHS: the AID A00000002501 is SIX bytes, so every 4F and 84 that names it
- * is 06. Both constants previously declared 09 and every outer length was
- * wrong with them - the PPSE was inconsistent at two levels, not uniformly off,
- * so nothing could be fixed by subtracting a constant. The PPSE closes at
- * 6F34 / A522 / BF0C1F / 611D and the FCI at 6F1F / A515. TlvValidator proves
- * both, and ProfileMastercard is the clean baseline to compare against.
+ * is 06. Both constants previously declared 09 and every outer length was wrong
+ * with them. The PPSE closes at 6F34 / A522 / BF0C1F / 611D and the FCI at
+ * 6F1F / A515. TlvValidator proves both.
  */
 public final class ProfileAmex implements CardProfile {
 
@@ -69,13 +66,39 @@ public final class ProfileAmex implements CardProfile {
 
     @Override public String defaultIad() { return ""; }
 
+    /**
+     * Bare 57 in a 70. CSC is 4 digits at a fixed offset, no bitmap, no UDOL.
+     *
+     * The 37-byte cap keeps both Tlv.t length fields in BER short form, one byte
+     * each. A track past 127 bytes would need the long form, so raising this
+     * without checking Tlv.t breaks the record silently.
+     *
+     * PAN is checked for digits as well as length - Hex.hex throws on a non-hex
+     * character, and a throw here reads as a crash rather than a refusal.
+     */
+    @Override public String msdRecord(String pan, String exp, String svc, String dd) {
+        if (pan == null || pan.length() < 12 || pan.length() > 19) return null;
+        if (!pan.matches("[0-9]+")) return null;
+
+        String e = (exp == null || exp.length() < 4) ? "3112" : exp;
+        String s = svc == null ? "" : svc;
+        while (s.length() < 3) s = "0" + s;
+        String d = dd == null ? "" : dd.toUpperCase(Locale.ROOT).replaceAll("[^0-9A-F]", "");
+
+        StringBuilder t = new StringBuilder(pan).append('D')
+                .append(e, 0, 4).append(s, 0, 3).append(d);
+        if (t.length() % 2 != 0) t.append('F');
+
+        byte[] track = Hex.hex(t.toString());
+        if (track.length > 37) return null;
+        return Hex.toHex(Tlv.t(0x70, Tlv.t(0x57, track)));
+    }
+
     @Override public String selectPpse(String aid) {
         return Profiles.selectPpse(PPSE);
     }
 
     @Override public String[] selectApp(String aid, String label) {
-        // Lc 06 for a 6-byte AID. Le is omitted from the match key so a
-        // terminal that does not send one still hits.
         return new String[]{"00A4040006A00000002501=" + FCI + "9000"};
     }
 
