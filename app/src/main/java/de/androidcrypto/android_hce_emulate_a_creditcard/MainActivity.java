@@ -1212,6 +1212,8 @@ public class MainActivity extends AppCompatActivity {
         sb.append("FORCE TC   : ").append(chkForceTc.isChecked()
                 ? "on - TC forced, ladder skipped" : "off - ladder decides").append('\n');
         sb.append("ATC        : live - climbs once per tap, script carries it\n");
+        sb.append("ATC served : ").append(nextAtc(t(etAtc)))
+                .append("  (box + 1 - the service increments)").append('\n');
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
         sb.append("CSC        : ")
