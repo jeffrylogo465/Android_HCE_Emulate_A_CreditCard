@@ -34,15 +34,27 @@ jobs:
           echo "--- cardEmulation entries in android-34/android.jar:"
           unzip -l "$ANDROID_HOME/platforms/android-34/android.jar" | grep -c 'cardEmulation' || true
 
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # Runs before the build on purpose. assembleDebug only proves the code
+      # compiles; these tests are the ones that prove the bytes are well formed,
+      # and a malformed directory or FCI is a green build that a terminal still
+      # refuses. Failing here stops the APK being published as an artifact.
       - name: Unit tests
-        run: |
-          chmod +x gradlew
-          ./gradlew testDebugUnitTest
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      # Reports are only interesting when the tests failed, and the raw output is
+      # unreadable on a phone. Without this a red run from mobile says nothing.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
 
       - name: Build debug APK
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug
+        run: ./gradlew assembleDebug
 
       - uses: actions/upload-artifact@v5
         if: always()
