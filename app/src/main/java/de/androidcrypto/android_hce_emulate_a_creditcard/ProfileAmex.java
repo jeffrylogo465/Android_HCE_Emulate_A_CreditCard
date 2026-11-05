@@ -131,8 +131,15 @@ public final class ProfileAmex implements CardProfile {
         return Profiles.gpoAmex(AIP, atc);
     }
 
-    /** For TlvValidator. Both hardcoded TLVs this profile serves. */
-    static String[] scriptConstants() {
+    /**
+     * For TlvValidator. Both hardcoded TLVs this profile serves.
+     *
+     * public and instance, not static: CardProfile declares it, and a static
+     * package-private method cannot implement an interface method. The same
+     * applies to ProfileMastercard - if one of these is still `static`, the
+     * build stops with "cannot implement scriptConstants() in CardProfile".
+     */
+    @Override public String[] scriptConstants() {
         return new String[]{PPSE, FCI};
     }
 }
