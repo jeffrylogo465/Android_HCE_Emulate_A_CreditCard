@@ -2,7 +2,6 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
