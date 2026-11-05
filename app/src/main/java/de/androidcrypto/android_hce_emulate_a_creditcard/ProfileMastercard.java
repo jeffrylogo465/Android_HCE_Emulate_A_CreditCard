@@ -102,7 +102,7 @@ public final class ProfileMastercard implements CardProfile {
     }
 
     // For TlvValidator. Its own directory and both FCIs.
-    static String[] scriptConstants() {
+    @Override public String[] scriptConstants() {
         return new String[]{PPSE, FCI, MAESTRO_FCI};
     }
 }
