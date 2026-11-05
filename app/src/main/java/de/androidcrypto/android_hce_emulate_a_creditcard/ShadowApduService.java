@@ -138,6 +138,31 @@ public class ShadowApduService extends HostApduService {
     private final StringBuilder tapLog = new StringBuilder();
     private final SecureRandom rnd = new SecureRandom();
 
+    /**
+     * Main-looper handler, one instance.
+     *
+     * Everything posted to the UI - toasts and the stall watcher - goes through
+     * this, so removeCallbacksAndMessages(null) can clear them all in one place
+     * when a tap ends.
+     */
+    private final android.os.Handler ui =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /**
+     * Tap generation counter.
+     *
+     * The stall watcher runs 1.5s after the GPO, on the main looper, and reads
+     * counters that the binder thread owns. Without a token to compare against,
+     * a watcher armed for tap A fires during tap B and reports B's counters as
+     * if they were A's - or fires after onDeactivated() reset them all to zero
+     * and reports "the terminal read no records" for a tap that is over.
+     *
+     * Bumped by resetTransaction(), which runs both at the start of a tap and at
+     * deactivation, so any watcher armed before either point is stale by
+     * definition and drops out.
+     */
+    private int txnEpoch;
+
     private byte[] txnAip;
     private String txnAtc;
     /** Hex, cached with txnAtc so the two can never disagree. */
@@ -188,7 +213,7 @@ public class ShadowApduService extends HostApduService {
     private void popup(final String s) {
         if (s == null || s.isEmpty()) return;
         try {
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+            ui.post(new Runnable() {
                 @Override
                 public void run() {
                     Toast.makeText(ShadowApduService.this, s, Toast.LENGTH_SHORT).show();
@@ -373,7 +398,20 @@ public class ShadowApduService extends HostApduService {
         return txnAc;
     }
 
+    /**
+     * Clear the tap.
+     *
+     * Also the epoch bump: any stall watcher armed before this call is now
+     * stale, and clearCallbacks drops the ones still queued. Both halves are
+     * needed - the clear handles the queued runnable, the epoch handles one that
+     * has already been dequeued and is mid-run on the main thread.
+     */
     private void resetTransaction() {
+        try {
+            ui.removeCallbacksAndMessages(null);
+        } catch (Exception ignored) { }
+        txnEpoch++;
+
         txnAip = null;
         txnAtc = null;
         txnAc = null;
@@ -1165,22 +1203,51 @@ public class ShadowApduService extends HostApduService {
         return cat(tlv(0x77, body), SW_OK);
     }
 
+    /**
+     * Watch for a terminal that takes the GPO and then goes quiet.
+     *
+     * That is the single most common failure and it leaves no line of its own -
+     * the log just stops after the GPO. The watcher names it 1.5s later.
+     *
+     * THREE separate hazards, all handled here:
+     *
+     * 1. It runs on the main looper but reads counters the binder thread writes.
+     *    So the counters are SNAPSHOTTED into finals now, at GPO time, and the
+     *    runnable never touches the live fields.
+     * 2. A fast tap can end before 1.5s. resetTransaction() then zeroes the
+     *    counters, and without a guard the watcher reports "read no records" for
+     *    a tap that finished cleanly. The epoch makes it drop out instead.
+     * 3. A new tap can start inside the window. Same epoch check, because
+     *    resetTransaction() bumps it at the start of a tap too - so the watcher
+     *    never reports tap B's counters as tap A's.
+     *
+     * Queued copies are also cleared outright in resetTransaction(), so a tap
+     * that ends early does not leave one sitting in the looper.
+     */
     private void watchForStall() {
+        final int epoch = txnEpoch;
+        final int gpos = nGpos, recs = nRecs, gens = nGens;
+        final boolean stripped = STRIP_AC;
+
         try {
-            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
-                    new Runnable() {
-                        @Override
-                        public void run() {
-                            if (nGpos > 0 && nRecs == 0 && nGens == 0) {
-                                tap("!! verdict: TAP: terminal took the GPO and read NO"
-                                        + " records - "
-                                        + (STRIP_AC
-                                            ? "no AC in the GPO, so it judged the AIP and AFL"
-                                            : "it judged the AIP, AFL and CID")
-                                        + " and quit");
-                            }
-                        }
-                    }, 1500L);
+            ui.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (epoch != txnEpoch) {
+                        tap("-- stall watch: tap " + epoch + " is over (now "
+                                + txnEpoch + ") - ignored");
+                        return;
+                    }
+                    if (gpos > 0 && recs == 0 && gens == 0) {
+                        tap("!! verdict: TAP: terminal took the GPO and read NO"
+                                + " records - "
+                                + (stripped
+                                    ? "no AC in the GPO, so it judged the AIP and AFL"
+                                    : "it judged the AIP, AFL and CID")
+                                + " and quit");
+                    }
+                }
+            }, 1500L);
         } catch (Exception ignored) { }
     }
 
