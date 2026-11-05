@@ -98,12 +98,14 @@ public class ShadowApduService extends HostApduService {
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
 
     /**
-     * Both flags are GENERATE AC only, so neither is reachable in MSD - that
-     * flow is a single CCC exchange and never sends GENERATE AC. Kept for the
-     * EMV path.
+     * GENERATE AC only, so unreachable in MSD - that flow is a single CCC
+     * exchange and never sends GENERATE AC. Kept for the EMV path.
+     *
+     * FORCE_OFFLINE_TC is the one flag of the two that is a PREF, see
+     * forceOfflineTc(). It changes what the card tells a terminal, and whether
+     * an offline approve is wanted depends on the shop, not on the build.
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
-    private static final boolean FORCE_OFFLINE_TC = true;
 
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
@@ -298,6 +300,31 @@ public class ShadowApduService extends HostApduService {
         String v = p("msd", "0").trim();
         if (v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on")) return true;
         return activeProfile().msd();
+    }
+
+    /**
+     * Whether an offline TC is forced. DEFAULT TRUE, and a deliberate deviation
+     * from what the card would really answer.
+     *
+     * A card with no IMK-AC cannot produce a real ARQC - computeAc emits eight
+     * zero bytes - so going online hands the issuer a cryptogram that verifies
+     * against nothing. Forcing TC keeps the tap offline and the terminal
+     * approves on its own TAC without ever consulting the issuer. The cost is
+     * that nothing is authorised against a real balance, so an empty account
+     * still taps through.
+     *
+     * A pref rather than a constant because that trade is a choice per shop,
+     * not per build. "0" is the only value that turns it off, so any other
+     * string - including an empty one - leaves the safe default.
+     *
+     * Sits BELOW the 0x00 check in genac(), so a requested AAC still wins.
+     */
+    private boolean forceOfflineTc() {
+        String v = p("forcetc", "1").trim();
+        if (v.isEmpty()) return true;
+        if (v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on")) return true;
+        if (v.equalsIgnoreCase("false") || v.equalsIgnoreCase("off")) return false;
+        return !v.equals("0");
     }
 
     // ---------- card fields ----------
@@ -880,7 +907,8 @@ public class ShadowApduService extends HostApduService {
                         tap("-- profile: " + activeProfile().name()
                                 + " | script " + n + " line(s), gate="
                                 + (useScript() ? "ON" : "OFF")
-                                + " | msd=" + isMsd());
+                                + " | msd=" + isMsd()
+                                + " | forcetc=" + forceOfflineTc());
                         if (isMsd()) msdSanity();
                         popup(nameLine());
                     }
@@ -1577,7 +1605,7 @@ public class ShadowApduService extends HostApduService {
      * AAC is tested first and cannot be overridden - no force may approve a
      * decline. The rest is a priority ladder, highest first:
      *   cryptogram already in the GPO > forced CID box > ALWAYS_ONLINE_FOR_RECEIPT
-     *   > FORCE_ONLINE_ARQC > FORCE_OFFLINE_TC > the terminal's own request.
+     *   > FORCE_ONLINE_ARQC > forceOfflineTc() > the terminal's own request.
      *
      * ARQC IS GATED ON haveKey(). Without a key computeAc emits eight zero
      * bytes, so an ARQC is unsatisfiable and every path that would produce one
@@ -1615,7 +1643,7 @@ public class ShadowApduService extends HostApduService {
             cid = CID_ARQC;
         } else if (haveKey() && FORCE_ONLINE_ARQC) {
             cid = CID_ARQC;
-        } else if (FORCE_OFFLINE_TC) {
+        } else if (forceOfflineTc()) {
             cid = CID_TC;
         } else if (requested == 0x80 && haveKey()) {
             cid = CID_ARQC;
@@ -1643,6 +1671,7 @@ public class ShadowApduService extends HostApduService {
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
                 + (forced.length() == 2 ? " (forced from the CID box)" : "")
+                + " forcetc=" + forceOfflineTc()
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
         // No IAD means no tag at all. A zero-length 9F10 is legal BER but the
