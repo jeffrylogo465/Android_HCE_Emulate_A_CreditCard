@@ -1538,6 +1538,16 @@ public class ShadowApduService extends HostApduService {
      * The CID must not be "higher" than requested: AAC for AAC, ARQC for ARQC,
      * TC for anything else. The response carries 9F10, 9F26, 9F27 and 9F36 and
      * nothing else - 9F34 is a terminal tag. No 9F4B: the AIP has no CDA bit.
+     *
+     * AAC is tested first and cannot be overridden - no force may approve a
+     * decline. The rest is a priority ladder, highest first:
+     *   cryptogram already in the GPO > forced CID box > ALWAYS_ONLINE_FOR_RECEIPT
+     *   > FORCE_ONLINE_ARQC > FORCE_OFFLINE_TC > the terminal's own request.
+     *
+     * ARQC IS GATED ON haveKey(). Without a key computeAc emits eight zero
+     * bytes, so an ARQC is unsatisfiable and every path that would produce one
+     * falls through to TC instead. The one exception is a 0x80 request with no
+     * key, which is an unavoidable upgrade to TC - noted, not accidental.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
@@ -1546,21 +1556,33 @@ public class ShadowApduService extends HostApduService {
         byte cid;
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
 
+        boolean hasForce = forced.length() == 2;
+        byte forcedCid = 0;
+        if (hasForce) {
+            forcedCid = (byte) Integer.parseInt(forced, 16);
+            // An ARQC override with no key is unsatisfiable - computeAc would
+            // emit eight zero bytes. Downgrade to the answer the card can give.
+            if (forcedCid == CID_ARQC && !haveKey()) {
+                forcedCid = CID_TC;
+                tap("-- cid override 80 with no key - downgraded to TC");
+            }
+        }
+
         if (cryptogramSent) {
             if (requested == 0x00)      cid = CID_AAC;
             else if (requested == 0x80) cid = CID_ARQC;
             else                        cid = CID_TC;
         } else if (requested == 0x00) {
             cid = CID_AAC;
-        } else if (forced.length() == 2) {
-            cid = (byte) Integer.parseInt(forced, 16);
+        } else if (hasForce) {
+            cid = forcedCid;
         } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
             cid = CID_ARQC;
         } else if (haveKey() && FORCE_ONLINE_ARQC) {
             cid = CID_ARQC;
         } else if (FORCE_OFFLINE_TC) {
             cid = CID_TC;
-        } else if (requested == 0x80) {
+        } else if (requested == 0x80 && haveKey()) {
             cid = CID_ARQC;
         } else if (requested == 0x40) {
             cid = CID_TC;
