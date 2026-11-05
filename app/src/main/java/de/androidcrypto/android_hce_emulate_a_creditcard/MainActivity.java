@@ -13,6 +13,7 @@ import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -148,6 +149,7 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayoutManager layoutManager;
     private PagerSnapHelper snapHelper;
     private TextView txtCount, txtStatus, banner;
+    private CheckBox chkForceTc;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -187,6 +189,7 @@ public class MainActivity extends AppCompatActivity {
         txtCount = findViewById(R.id.txtCount);
         txtStatus = findViewById(R.id.txtStatus);
         banner = findViewById(R.id.banner);
+        chkForceTc = findViewById(R.id.chkForceTc);
 
         etLabel = findViewById(R.id.etLabel);
         etName = findViewById(R.id.etName);
@@ -268,6 +271,16 @@ public class MainActivity extends AppCompatActivity {
         navWallet.setOnLongClickListener(v -> { showRoutingCheck(); return true; });
         txtCount.setOnLongClickListener(v -> { startCapture(); return true; });
         txtStatus.setOnLongClickListener(v -> { clearVerdict(); return true; });
+
+        // The service reads this as "1" or "0"; empty means on, which is why
+        // only an untick writes anything but "1".
+        chkForceTc.setOnCheckedChangeListener((b, on) -> {
+            if (binding) return;
+            collect();
+            status(on
+                    ? "Forced offline TC - the terminal gets an approve, no online check"
+                    : "Offline TC force off - the ladder decides");
+        });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -1064,6 +1077,7 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         e.putString(key(i, "script"), t(etScript));
         e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
+        e.putString(key(i, "forcetc"), chkForceTc.isChecked() ? "1" : "0");
         e.putInt(key(i, "usescript"), armedLines(t(etScript)) > 0 ? 1 : 0);
         e.putInt("card_count", cards.size());
         e.putInt("selected", i);
@@ -1114,6 +1128,7 @@ public class MainActivity extends AppCompatActivity {
 
         etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
         etScript.setText(prefs.getString(key(i, "script"), ""));
+        chkForceTc.setChecked(!"0".equals(prefs.getString(key(i, "forcetc"), "1")));
         binding = false;
         updateCount();
         status("");
@@ -1194,6 +1209,8 @@ public class MainActivity extends AppCompatActivity {
         sb.append("CID        : ")
                 .append(t(etCid).isEmpty() ? "40 from the profile - TC, approve offline"
                         : t(etCid).toUpperCase() + "  (FORCED)").append('\n');
+        sb.append("FORCE TC   : ").append(chkForceTc.isChecked()
+                ? "on - TC forced, ladder skipped" : "off - ladder decides").append('\n');
         sb.append("ATC        : live - climbs once per tap, script carries it\n");
         sb.append("MSD        : ").append("0".equals(msd)
                 ? "0  EMV mode - ARQC gets judged" : "1  magstripe - no crypto").append('\n');
