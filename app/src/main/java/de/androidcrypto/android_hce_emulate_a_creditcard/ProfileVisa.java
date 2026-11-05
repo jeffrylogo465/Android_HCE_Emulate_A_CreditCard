@@ -81,4 +81,20 @@ public final class ProfileVisa implements CardProfile {
     @Override public String gpo(String atc, String arqc) {
         return Profiles.gpoVisa(IAD, atc, arqc);
     }
+
+    /**
+     * For TlvValidator. Visa generates its directory and FCI instead of holding
+     * them as constants, so these are the same builders selectPpse() and
+     * selectApp() use - not a copy that can drift.
+     *
+     * The AID comes from defaultAid() rather than a literal, so the validator
+     * cannot keep passing after the profile's own AID changes.
+     */
+    @Override public String[] scriptConstants() {
+        String aid = defaultAid();
+        return new String[]{
+                Profiles.hex(Profiles.oneAppPpse(aid)),
+                Profiles.hex(Profiles.labelFci(aid, "VISA")),
+        };
+    }
 }
