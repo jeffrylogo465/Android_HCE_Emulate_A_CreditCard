@@ -678,7 +678,15 @@ public class ShadowApduService extends HostApduService {
         }
 
         if (map.isEmpty()) {
-            tap("-- afl source: no records - defaulting to SFI 1 rec 1");
+            // MSD has nothing at SFI 1 unless a skeleton was put there, so an
+            // invented entry points the terminal at a record that will 6A83.
+            // EMV is the opposite: syntheticRecord() really is at SFI 1 rec 1,
+            // and an empty AFL there would stop the terminal reading at all.
+            if (isMsd()) {
+                tap("-- afl source: no records and no msd location - empty afl");
+                return new byte[0];
+            }
+            tap("-- afl source: no records - synthetic record is at SFI 1 rec 1");
             TreeSet<Integer> one = new TreeSet<>();
             one.add(1);
             map.put(1, one);
@@ -1212,7 +1220,9 @@ public class ShadowApduService extends HostApduService {
         }
 
         byte[] a = afl();
-        if (a.length % 4 != 0) {
+        if (a.length == 0) {
+            tap("!! msd: afl is EMPTY - nothing tells the terminal where the skeleton is");
+        } else if (a.length % 4 != 0) {
             tap("!! msd: afl is " + a.length + "B - must be a multiple of 4");
         }
 
