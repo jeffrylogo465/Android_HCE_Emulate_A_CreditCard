@@ -34,6 +34,11 @@ jobs:
           echo "--- cardEmulation entries in android-34/android.jar:"
           unzip -l "$ANDROID_HOME/platforms/android-34/android.jar" | grep -c 'cardEmulation' || true
 
+      - name: Unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest
+
       - name: Build debug APK
         run: |
           chmod +x gradlew
