@@ -109,15 +109,17 @@ public class EmvTest {
     // ---- cccBlock ----
 
     @Test
-    public void cccBlockSumsToEightForAShortUn() {
-        assertEquals(8, Emv.cccBlock(h("1234"), h("ABCD"), h("0001")).length);
+    public void cccBlockSumsToEightForAFourByteUn() {
+        // IVCVC3 2 + UN 4 + ATC 2. Eight is the real width, so a fixture that
+        // passes a two-byte UN is six and the assertion looks wrong.
+        assertEquals(8, Emv.cccBlock(h("1234"), h("ABCDEF12"), h("0001")).length);
     }
 
     @Test
     public void cccBlockGrowsWithALongerUn() {
-        // A descriptor naming a six-byte UN no longer lands on eight, which is
+        // A descriptor naming a five-byte UN lands on nine, not eight, which is
         // why ccc() measures the block instead of assuming.
-        assertEquals(9, Emv.cccBlock(h("1234"), h("ABCDEF"), h("0001")).length);
+        assertEquals(9, Emv.cccBlock(h("1234"), h("ABCDEF1234"), h("0001")).length);
     }
 
     // ---- decideCid ----
