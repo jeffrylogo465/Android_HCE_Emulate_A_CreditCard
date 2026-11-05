@@ -1699,12 +1699,23 @@ public class ShadowApduService extends HostApduService {
         }
     }
 
+    /**
+     * GET DATA.
+     *
+     * 9F13 is the last-online-ATC register, two bytes. 0000 means "never been
+     * online", which is the correct state for a fresh card.
+     *
+     * 9F17 is deliberately ABSENT. The CVM list is 1F03 / 1E03 - no CVM below
+     * the limit, signature above - so nothing here ever consumes an offline
+     * PIN and there is no counter to report. 00 is the one value that means
+     * "zero tries left", a different claim from "no PIN capability", so the tag
+     * falls through to 6A88 instead.
+     */
     private byte[] getData(byte[] apdu) {
         int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);
 
         if (tag == 0x9F36)      return cat(tlv(0x9F36, hex(txnAtc())), SW_OK);
-        else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("00")), SW_OK);
-        else if (tag == 0x9F17) return cat(tlv(0x9F17, hex("00")), SW_OK);
+        else if (tag == 0x9F13) return cat(tlv(0x9F13, hex("0000")), SW_OK);
         else if (tag == 0x9F4D) return cat(tlv(0x9F4D, hex("0B0A")), SW_OK);
         else if (tag == 0x9F4F) return cat(tlv(0x9F4F, hex("9F4D020B0A")), SW_OK);
         return SW_NOT_FOUND;
