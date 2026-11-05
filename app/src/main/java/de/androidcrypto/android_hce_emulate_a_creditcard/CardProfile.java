@@ -16,6 +16,19 @@ public interface CardProfile {
     String[] selectApp(String aid, String label);
     String gpo(String atc, String arqc);
 
+    /**
+     * Every hardcoded TLV this profile can serve, for TlvValidator.
+     *
+     * The directory and the FCI are the only bytes in this app whose lengths are
+     * typed by hand, so they are the only ones a compiler cannot catch. Amex
+     * shipped with every one of them wrong and nothing noticed until a terminal
+     * refused it. ProfileTlvTest walks all three profiles and gates the build.
+     *
+     * Not a default: a profile that serves a directory has to say what is in it,
+     * or the validator silently skips the only bytes that can go wrong.
+     */
+    String[] scriptConstants();
+
     /** Whether this network is mag-stripe by nature and cannot be turned off. */
     default boolean msd() { return false; }
 
