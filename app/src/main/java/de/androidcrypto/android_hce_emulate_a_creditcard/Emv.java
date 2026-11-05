@@ -26,6 +26,10 @@ final class Emv {
     /** Tags a GPO replay may carry but a clone must strip. See the service. */
     static final int[] AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
+    static final byte CID_AAC  = (byte) 0x00;
+    static final byte CID_TC   = (byte) 0x40;
+    static final byte CID_ARQC = (byte) 0x80;
+
     static byte[] hex(String s) { return Hex.hex(s); }
 
     static String toHex(byte[] d) { return Hex.toHex(d); }
@@ -169,10 +173,15 @@ final class Emv {
      * Rebuild a GPO template without AC_TAGS, forcing the terminal to ask for a
      * cryptogram.
      *
-     * FIX: format 1 is not a template of TLVs. The AIP is copied verbatim and
-     * only what follows is walked. The old version walked from the AIP: on this
-     * card AIP 0800 read as tag 08 length 00 and landed correctly by accident,
-     * but any non-zero second byte ate that many bytes of track 2.
+     * FORMAT 1 IS RETURNED UNTOUCHED. Its payload is two raw AIP bytes followed
+     * by the AFL, which is not a sequence of TLVs and holds no AC tag to begin
+     * with - there is nothing to strip and nothing to rebuild. Walking it as
+     * TLV re-encodes the AFL: 08 01 01 00 reads as tag 08 length 01 value 01,
+     * then a tag 00 with no length, and the entry comes back one byte longer
+     * than it arrived. A four-byte AFL of 08010100 became 08010100 00, which
+     * the terminal reads as a record range that does not exist.
+     *
+     * Format 2 is a real template, so that branch still walks it.
      */
     static byte[] stripAcTags(byte[] tpl) {
         int[] pos = new int[1];
@@ -180,13 +189,9 @@ final class Emv {
         int olen  = readLen(tpl, pos);
         int end   = Math.min(tpl.length, pos[0] + olen);
 
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (outer == 0x80) return tpl;
 
-        if (outer == 0x80) {
-            if (end - pos[0] < 2) return tpl;
-            out.write(tpl, pos[0], 2);
-            pos[0] += 2;
-        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         int i = pos[0];
         while (i < end) {
@@ -260,6 +265,58 @@ final class Emv {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
         for (byte[] a : arrs) if (a != null) o.write(a, 0, a.length);
         return o.toByteArray();
+    }
+
+    /**
+     * The CCC block: IVCVC3 || UN || ATC.
+     *
+     * Exactly eight bytes, and that is not a coincidence to be preserved by
+     * hand - the descriptor decides the UN width, so a skeleton naming a
+     * two-byte UN still has to land on eight. ccc() checks the total and
+     * refuses anything else rather than enciphering a short block.
+     */
+    static byte[] cccBlock(byte[] iv, byte[] un, byte[] atc) {
+        return concat(iv, un, atc);
+    }
+
+    /**
+     * The GENERATE AC CID, as a pure function so the ladder can be tested.
+     *
+     * Two properties matter more than the rest and both are pinned by tests:
+     *
+     * 1. A requested AAC (0x00) wins over every force. Nothing may approve a
+     *    decline.
+     * 2. An ARQC is never answered without a key, because computeAc would emit
+     *    eight zero bytes and the issuer would judge a cryptogram that verifies
+     *    against nothing. A forced 0x80 with no key is downgraded to TC, and a
+     *    plain 0x80 request with no key falls through to TC as well.
+     *
+     * Order, highest priority first: an AC already sent in the GPO, the
+     * requested AAC, the forced CID box, always-online, forced ARQC, forced
+     * offline TC, then the terminal's own request.
+     */
+    static byte decideCid(boolean acInGpo,
+                          int requested,
+                          boolean haveKey,
+                          boolean hasForce,
+                          byte forcedCid,
+                          boolean alwaysOnline,
+                          boolean forceArqc,
+                          boolean forceTc) {
+        if (acInGpo) {
+            if (requested == 0x00) return CID_AAC;
+            if (requested == 0x80) return CID_ARQC;
+            return CID_TC;
+        }
+        if (requested == 0x00) return CID_AAC;
+        if (hasForce) {
+            return (forcedCid == CID_ARQC && !haveKey) ? CID_TC : forcedCid;
+        }
+        if (alwaysOnline) return CID_ARQC;
+        if (haveKey && forceArqc) return CID_ARQC;
+        if (forceTc) return CID_TC;
+        if (requested == 0x80 && haveKey) return CID_ARQC;
+        return CID_TC;
     }
 
     /**
