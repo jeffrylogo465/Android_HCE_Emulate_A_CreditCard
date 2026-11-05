@@ -75,7 +75,19 @@ public class ShadowApduService extends HostApduService {
     private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
     private static final boolean EXTRA_AIDS = false;
-    private static final boolean PPSE_MINIMAL = true;
+
+    /**
+     * False: the generated directory carries a label and a 9F2A kernel id.
+     *
+     * True emitted 4F and 87 only, which leaves a terminal inferring the kernel
+     * from the AID prefix. Amex needs 9F2A 04 to be picked by identifier at all,
+     * and the two bytes cost nothing under Mastercard and Visa.
+     *
+     * This is the no-script path only. With a script armed the profile's own
+     * selectPpse() answers the directory, which is why the profiles carry 9F2A
+     * themselves.
+     */
+    private static final boolean PPSE_MINIMAL = false;
 
     private static final byte CID_AAC  = (byte) 0x00;
     private static final byte CID_TC   = (byte) 0x40;
