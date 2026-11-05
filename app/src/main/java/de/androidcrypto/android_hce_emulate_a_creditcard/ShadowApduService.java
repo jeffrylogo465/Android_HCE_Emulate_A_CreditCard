@@ -11,10 +11,10 @@ import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Map;
-import java.util.Random;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
@@ -122,7 +122,7 @@ public class ShadowApduService extends HostApduService {
     private static final String CVM_RESULTS = "1F0302";
 
     private final StringBuilder tapLog = new StringBuilder();
-    private final Random rnd = new Random();
+    private final SecureRandom rnd = new SecureRandom();
 
     private byte[] txnAip;
     private String txnAtc;
@@ -296,8 +296,8 @@ public class ShadowApduService extends HostApduService {
     }
 
     private String psn() {
-        String s = p("psn", "01").replaceAll("[^0-9]", "");
-        if (s.isEmpty()) return "01";
+        String s = p("psn", "00").replaceAll("[^0-9]", "");
+        if (s.isEmpty()) return "00";
         if (s.length() > 2) s = s.substring(0, 2);
         if (s.length() == 1) s = "0" + s;
         return s;
