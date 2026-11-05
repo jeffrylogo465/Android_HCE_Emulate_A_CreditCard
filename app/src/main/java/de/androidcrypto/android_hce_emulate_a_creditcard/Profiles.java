@@ -120,9 +120,22 @@ public final class Profiles {
         return "00A404000E" + PPSE + "=" + ppseHex + "9000";
     }
 
-    // A one-applet directory around an AID, with no label and no 9F2A.
+    // A one-applet directory around an AID, with no label.
+    //
+    // 9F2A names the kernel by identifier so the terminal does not have to infer
+    // it from the AID. It is required on a directory this app BUILDS: Visa's
+    // qVSDC kernel is 3, and without the tag a reader falls back to its AID
+    // table and can land on a different kernel than the one the AIP and GPO
+    // were shaped for. Replayed directories (Mastercard, Amex) are the plastic's
+    // own bytes and keep whatever the card carried.
+    //
+    // The value is one byte and comes from kernelFor(), so the id cannot drift
+    // from the AID in the same entry.
     static byte[] oneAppPpse(String aidHex) {
-        byte[] entry = cat(tlv(0x4F, Hex.hex(aidHex)), tlv(0x87, new byte[]{0x01}));
+        byte[] entry = cat(
+                tlv(0x4F, Hex.hex(aidHex)),
+                tlv(0x87, new byte[]{0x01}),
+                tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
         byte[] dir = tlv(0xBF0C, tlv(0x61, entry));
         return tlv(0x6F, cat(tlv(0x84, Hex.hex(PPSE)), tlv(0xA5, dir)));
     }
@@ -171,15 +184,22 @@ public final class Profiles {
         return "80A80000=77" + String.format("%02X", body.length() / 2) + body + "9000";
     }
 
-    // Not used yet, kept so a future profile can reuse the AIP mapping.
+    // Kernel id for an AID, used by oneAppPpse() to fill 9F2A.
+    //
+    // The contactless kernels are numbered by scheme: 2 Mastercard, 3 Visa
+    // qVSDC, 4 ExpressPay, 5 JCB, 6 Discover, 7 UnionPay. A Visa AID used to
+    // fall through to the 7 branch here, which put UnionPay's id in a Visa
+    // directory - the terminal then picked a kernel the AIP and GPO were not
+    // shaped for. The default is 3 because every AID that reaches this call
+    // comes from a profile, and the unrecognised-prefix fallback is Mastercard.
     static int kernelFor(String aidHex) {
         String a = aidHex == null ? "" : aidHex.toUpperCase();
         if (a.startsWith("A000000152")) return 6;
-        if (a.startsWith("A000000015")) return 6;
-        if (a.startsWith("A000000004")) return 2;
         if (a.startsWith("A000000065")) return 5;
         if (a.startsWith("A000000025")) return 4;
         if (a.startsWith("A000000333")) return 7;
+        if (a.startsWith("A000000004")) return 2;
+        if (a.startsWith("A000000015")) return 6;
         return 3;
     }
 
