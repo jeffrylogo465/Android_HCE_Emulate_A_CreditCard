@@ -33,6 +33,19 @@ public class EmvCrypto {
         return k;
     }
 
+    /**
+     * 3DES-ECB, no padding, 16 or 24 byte key.
+     *
+     * THE GUARD IS LOAD-BEARING. SunJCE's DESede refuses a 16-byte key, so
+     * to24() expands to K1|K2|K1 first. If the result is still not 24 bytes the
+     * call throws here rather than letting the cipher build a key of the wrong
+     * length and return something that looks fine.
+     *
+     * The length rule is also what splits this from des(): the ICC derivation
+     * takes a 16-byte issuer MK and may use this, while the SK halves are 8
+     * bytes each and must use single des. Swapping the two is the crash at
+     * stage 2 - "3DES key must be 16 or 24 bytes, got 8".
+     */
     static byte[] des3(byte[] k16or24, byte[] d) throws Exception {
         byte[] k = to24(k16or24);
         if (k == null || k.length != 24) {
@@ -59,9 +72,15 @@ public class EmvCrypto {
     /**
      * ICC master key pair, Book 2 Annex A1.4, Option A.
      *
-     * X = the rightmost 16 digits of PAN||PSN, left-padded with zero nibbles to
-     * 16 digits when the pair is shorter. MK_L = DES3(MKiss, X),
-     * MK_R = DES3(MKiss, X xor FF x 8), both odd-parity adjusted.
+     * X = the RIGHTMOST 16 digits of PAN||PSN, left-padded with zero nibbles to
+     * 16 when the pair is shorter. MK_L = DES3(MKiss, X), MK_R = DES3(MKiss,
+     * X xor FF x 8), both odd-parity adjusted.
+     *
+     * The pad-then-take-rightmost order matters and is easy to get backwards.
+     * Padding on the RIGHT would shift a 19-digit PAN's last digits out of the
+     * window and derive a key from the wrong nibbles - valid length, valid key,
+     * wrong ARQC. Written as one expression: build a 16-character prefix of
+     * zeros, append the digits, then keep sb.substring(sb.length() - 16).
      *
      * The PAN/PSN step lives HERE and not in the session key: PAN and PSN never
      * reach the SK derivation, they only shape the ICC key. That is why the box
@@ -261,10 +280,13 @@ public class EmvCrypto {
      * data. There is no shared IV, and two bytes off the front of the key are
      * not an IV.
      *
-     * PADDING IS UNCONFIRMED. mac() applies padding method 2 unconditionally,
-     * so a track already 8-aligned gains a full block. Whether personalisation
-     * does that is still open - if the IV never matches, this is the first
-     * thing to change.
+     * WHAT IS ESTABLISHED: the MAC is Algorithm 3 and it runs under KDCVC3 over
+     * the track, with the IV taken from the tail. WHAT IS NOT: whether the
+     * padding applies. mac() pads method 2 unconditionally, so a track already
+     * 8-aligned gains a whole 0x80 block here. That is the reading taken, and
+     * it is the one thing to change first if a CSC fails to verify while the
+     * key and the CCC block are both known good - the only way to settle it is
+     * a terminal that logs the CSC it expected.
      */
     static byte[] ivcvc3(String kdHex, byte[] track) throws Exception {
         byte[] m = mac(Hex.hex(kdHex), track);
