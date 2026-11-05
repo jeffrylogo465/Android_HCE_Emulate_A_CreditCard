@@ -72,7 +72,7 @@ public class ShadowApduService extends HostApduService {
 
     private static final boolean STRIP_AC = false;
 
-    private static final int[] GPO_AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
+    private static final int[] GPO_AC_TAGS = Emv.AC_TAGS;
 
     private static final boolean EXTRA_AIDS = false;
 
@@ -89,9 +89,9 @@ public class ShadowApduService extends HostApduService {
      */
     private static final boolean PPSE_MINIMAL = false;
 
-    private static final byte CID_AAC  = (byte) 0x00;
-    private static final byte CID_TC   = (byte) 0x40;
-    private static final byte CID_ARQC = (byte) 0x80;
+    private static final byte CID_AAC  = Emv.CID_AAC;
+    private static final byte CID_TC   = Emv.CID_TC;
+    private static final byte CID_ARQC = Emv.CID_ARQC;
 
     private static final byte GPO_CID = CID_TC;
 
@@ -1632,7 +1632,7 @@ public class ShadowApduService extends HostApduService {
                 // Assembled to exactly 8, so NoPadding is correct. The block is
                 // enciphered raw - it must NOT go through mac(), which would
                 // append a full 0x80 pad block and MAC 16 bytes instead of 8.
-                byte[] block = cat(iv, un, atcB);
+                byte[] block = Emv.cccBlock(iv, un, atcB);
                 if (block.length != 8) {
                     tap("!! ccc: block is " + block.length + "B (iv=" + iv.length
                             + " un=" + un.length + " atc=" + atcB.length + "), must be 8");
@@ -1646,7 +1646,7 @@ public class ShadowApduService extends HostApduService {
 
                     byte[] ivT1 = hex(p("ivcvc3_t1", "").replaceAll("[^0-9A-Fa-f]", ""));
                     if (hasTrack1() && ivT1.length == 2) {
-                        byte[] e1 = EmvCrypto.des3(kd, cat(ivT1, un, atcB));
+                        byte[] e1 = EmvCrypto.des3(kd, Emv.cccBlock(ivT1, un, atcB));
                         cvc3T1 = Arrays.copyOfRange(e1, e1.length - 2, e1.length);
                     }
                 }
@@ -1669,56 +1669,29 @@ public class ShadowApduService extends HostApduService {
      * TC for anything else. The response carries 9F10, 9F26, 9F27 and 9F36 and
      * nothing else - 9F34 is a terminal tag. No 9F4B: the AIP has no CDA bit.
      *
-     * AAC is tested first and cannot be overridden - no force may approve a
-     * decline. The rest is a priority ladder, highest first:
-     *   cryptogram already in the GPO > forced CID box > ALWAYS_ONLINE_FOR_RECEIPT
-     *   > FORCE_ONLINE_ARQC > forceOfflineTc() > the terminal's own request.
-     *
-     * ARQC IS GATED ON haveKey(). Without a key computeAc emits eight zero
-     * bytes, so an ARQC is unsatisfiable and every path that would produce one
-     * falls through to TC instead. The one exception is a 0x80 request with no
-     * key, which is an unavoidable upgrade to TC - noted, not accidental.
+     * THE LADDER ITSELF LIVES IN Emv.decideCid, so it can be tested without
+     * prefs. Read that method for the order and the two invariants; this only
+     * gathers the inputs. The one input worth naming here is haveKey(): without
+     * a key computeAc emits eight zero bytes, so an ARQC is unsatisfiable and
+     * every path that would produce one falls through to TC.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
         int requested = p1 & 0xC0;
 
-        byte cid;
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
-
         boolean hasForce = forced.length() == 2;
-        byte forcedCid = 0;
-        if (hasForce) {
-            forcedCid = (byte) Integer.parseInt(forced, 16);
-            // An ARQC override with no key is unsatisfiable - computeAc would
-            // emit eight zero bytes. Downgrade to the answer the card can give.
-            if (forcedCid == CID_ARQC && !haveKey()) {
-                forcedCid = CID_TC;
-                tap("-- cid override 80 with no key - downgraded to TC");
-            }
-        }
+        byte forcedCid = hasForce ? (byte) Integer.parseInt(forced, 16) : 0;
 
-        if (cryptogramSent) {
-            if (requested == 0x00)      cid = CID_AAC;
-            else if (requested == 0x80) cid = CID_ARQC;
-            else                        cid = CID_TC;
-        } else if (requested == 0x00) {
-            cid = CID_AAC;
-        } else if (hasForce) {
-            cid = forcedCid;
-        } else if (ALWAYS_ONLINE_FOR_RECEIPT) {
-            cid = CID_ARQC;
-        } else if (haveKey() && FORCE_ONLINE_ARQC) {
-            cid = CID_ARQC;
-        } else if (forceOfflineTc()) {
-            cid = CID_TC;
-        } else if (requested == 0x80 && haveKey()) {
-            cid = CID_ARQC;
-        } else if (requested == 0x40) {
-            cid = CID_TC;
-        } else {
-            cid = CID_TC;
-        }
+        byte cid = Emv.decideCid(
+                cryptogramSent,
+                requested,
+                haveKey(),
+                hasForce,
+                forcedCid,
+                ALWAYS_ONLINE_FOR_RECEIPT,
+                FORCE_ONLINE_ARQC,
+                forceOfflineTc());
 
         lastCid = String.format("%02X", cid);
         String atc = txnAtc();
@@ -1737,7 +1710,8 @@ public class ShadowApduService extends HostApduService {
 
         tap("-- genac requested=" + String.format("%02X", requested)
                 + " cid=" + lastCid
-                + (forced.length() == 2 ? " (forced from the CID box)" : "")
+                + (hasForce ? " (forced from the CID box"
+                        + (forcedCid != cid ? ", downgraded" : "") + ")" : "")
                 + " forcetc=" + forceOfflineTc()
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
