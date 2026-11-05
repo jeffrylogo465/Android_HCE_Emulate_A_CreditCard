@@ -98,6 +98,19 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     /**
+     * CDOL1 as advertised in the generated FCI.
+     *
+     * 9F37 alone, four bytes. The CSC needs the UN and nothing else, and a
+     * four-byte descriptor keeps the CCC field at four bytes - which is what
+     * udolLen() returns with no 9F69 and what unOffset() assumes. A longer
+     * descriptor would put the UN behind other fields.
+     *
+     * Without an 8C in the FCI the terminal has no descriptor for COMPUTE
+     * CRYPTOGRAPHIC CHECKSUM and quits after the record.
+     */
+    private static final String CDOL_MSD = "9F3704";
+
+    /**
      * CVM list. Eight bytes of zero Amount X and Amount Y, then two rules:
      * 1F 03 no CVM below the limit, 1E 03 signature above it. Signature cannot
      * fail, so the fallback sets no TVR bit. Ten bytes - the two amount fields
@@ -960,6 +973,7 @@ public class ShadowApduService extends HostApduService {
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
+                tlv(0x8C, hex(CDOL_MSD)),
                 tlv(0x9F11, new byte[]{0x01}),
                 tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
