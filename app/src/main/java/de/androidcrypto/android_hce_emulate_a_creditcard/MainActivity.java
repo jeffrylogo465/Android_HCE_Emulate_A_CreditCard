@@ -1428,12 +1428,22 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /**
+     * Walk every registered profile through the validator.
+     *
+     * Loops Profiles.names() rather than naming the three, so a fourth profile
+     * needs no line here. scriptConstants() is an instance method on the
+     * interface, hence the byName() lookup - it cannot be called off the class.
+     */
     private void checkProfiles() {
         StringBuilder sb = new StringBuilder();
         int bad = 0;
-        bad += reportConstants(sb, "AMEX", ProfileAmex.scriptConstants());
-        bad += reportConstants(sb, "MASTERCARD", ProfileMastercard.scriptConstants());
-        bad += reportConstants(sb, "VISA", ProfileVisa.scriptConstants());
+        for (String name : Profiles.names()) {
+            if (Profiles.AUTO.equals(name)) continue;
+            CardProfile p = Profiles.byName(name);
+            if (p == null) continue;
+            bad += reportConstants(sb, p.name(), p.scriptConstants());
+        }
         sb.append('\n').append(bad == 0
                 ? "All constants balanced."
                 : bad + " constant(s) malformed.");
