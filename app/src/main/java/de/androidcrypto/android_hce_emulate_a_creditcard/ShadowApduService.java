@@ -342,7 +342,7 @@ public class ShadowApduService extends HostApduService {
      * not per build. "0" is the only value that turns it off, so any other
      * string - including an empty one - leaves the safe default.
      *
-     * Sits BELOW the 0x00 check in genac(), so a requested AAC still wins.
+     * Row 8 of Emv.decideCid, so a requested AAC above it still wins.
      */
     private boolean forceOfflineTc() {
         String v = p("forcetc", "1").trim();
@@ -1374,36 +1374,13 @@ public class ShadowApduService extends HostApduService {
         return tlv(outer, cat(content, tlv(0x9F27, new byte[]{cid})));
     }
 
+    /**
+     * Wrapper only. Emv holds the canonical implementation, and that is the one
+     * under test - the copy that lived here still walked a format 1 payload as
+     * TLV and re-encoded the AFL.
+     */
     private static byte[] stripAcTags(byte[] tpl) {
-        int[] pos = new int[1];
-        int outer = readTag(tpl, pos);
-        int olen  = readLen(tpl, pos);
-        int end   = Math.min(tpl.length, pos[0] + olen);
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-        if (outer == 0x80) {
-            if (end - pos[0] < 2) return tpl;
-            out.write(tpl, pos[0], 2);
-            pos[0] += 2;
-        }
-
-        int i = pos[0];
-        while (i < end) {
-            int[] q = new int[]{i};
-            int t = readTag(tpl, q);
-            int l = readLen(tpl, q);
-            if (q[0] + l > tpl.length) break;
-            i = q[0] + l;
-
-            boolean drop = false;
-            for (int d : GPO_AC_TAGS) if (d == t) { drop = true; break; }
-            if (drop) continue;
-
-            byte[] one = tlv(t, Arrays.copyOfRange(tpl, q[0], q[0] + l));
-            out.write(one, 0, one.length);
-        }
-        return tlv(outer, out.toByteArray());
+        return Emv.stripAcTags(tpl);
     }
 
     private static byte[] findTag(byte[] tpl, int want) {
@@ -1669,11 +1646,15 @@ public class ShadowApduService extends HostApduService {
      * TC for anything else. The response carries 9F10, 9F26, 9F27 and 9F36 and
      * nothing else - 9F34 is a terminal tag. No 9F4B: the AIP has no CDA bit.
      *
-     * THE LADDER ITSELF LIVES IN Emv.decideCid, so it can be tested without
-     * prefs. Read that method for the order and the two invariants; this only
-     * gathers the inputs. The one input worth naming here is haveKey(): without
-     * a key computeAc emits eight zero bytes, so an ARQC is unsatisfiable and
-     * every path that would produce one falls through to TC.
+     * THE LADDER IS NOT HERE. It lives in Emv.decideCid, as a pure function,
+     * because this method needs prefs and a Handler and so cannot be tested
+     * without an emulator. Read that method for the order and the two
+     * invariants; all this does is gather its inputs and act on the answer.
+     *
+     * haveKey() is the input worth naming. Without a key computeAc emits eight
+     * zero bytes, so an ARQC is unsatisfiable - decideCid refuses to answer one
+     * and falls through to TC instead, which is why a keyless card can still
+     * approve offline and can never hand the issuer a cryptogram it will reject.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
