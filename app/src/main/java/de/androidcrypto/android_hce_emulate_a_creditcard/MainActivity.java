@@ -1433,6 +1433,7 @@ public class MainActivity extends AppCompatActivity {
         int bad = 0;
         bad += reportConstants(sb, "AMEX", ProfileAmex.scriptConstants());
         bad += reportConstants(sb, "MASTERCARD", ProfileMastercard.scriptConstants());
+        bad += reportConstants(sb, "VISA", ProfileVisa.scriptConstants());
         sb.append('\n').append(bad == 0
                 ? "All constants balanced."
                 : bad + " constant(s) malformed.");
