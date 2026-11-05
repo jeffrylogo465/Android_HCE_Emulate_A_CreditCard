@@ -1384,6 +1384,25 @@ public class ShadowApduService extends HostApduService {
         return 0;
     }
 
+    /** UN length from the 9F69 descriptor, or 4 when there is none. */
+    private int unLen() {
+        byte[] rec = msdRecord();
+        if (rec == null) return 4;
+        byte[] udol = findTag(rec, TAG_UDOL);
+        if (udol == null) return 4;
+        int i = 0;
+        while (i < udol.length) {
+            int[] q = new int[]{i};
+            int t = readTag(udol, q);
+            int l = readLen(udol, q);
+            if (q[0] + l > udol.length) break;
+            if (t == TAG_UN_MSD) return l;
+            i = q[0] + l;
+        }
+        tap("-- udol present but no 9F6A - assuming UN 4");
+        return 4;
+    }
+
     /** Total data length the descriptor asks for, or 4 with no descriptor. */
     private int udolLen() {
         byte[] rec = msdRecord();
@@ -1419,6 +1438,10 @@ public class ShadowApduService extends HostApduService {
      *
      * The data field length is exact, not padded: a strict verifier rejects a
      * short field rather than guessing, so this refuses instead of zero-filling.
+     *
+     * The UN width comes from the descriptor, not from a literal 4. A skeleton
+     * that names a shorter UN would otherwise be sliced at the wrong width and
+     * still sum to 8 - wrong input, valid length, no error anywhere.
      */
     private byte[] ccc(byte[] apdu) {
         if (nRecs == 0) {
@@ -1440,11 +1463,13 @@ public class ShadowApduService extends HostApduService {
         }
 
         int uo = unOffset();
-        if (uo + 4 > d.length) {
-            tap("!! ccc: 9F6A offset " + uo + " past the " + d.length + "B field");
+        int unLen = unLen();
+        if (uo + unLen > d.length) {
+            tap("!! ccc: 9F6A offset " + uo + " len " + unLen
+                    + " past the " + d.length + "B field");
             return SW_MALFORMED;
         }
-        byte[] un = Arrays.copyOfRange(d, uo, uo + 4);
+        byte[] un = Arrays.copyOfRange(d, uo, uo + unLen);
 
         String atc;
         if (atcUsedByCcc) {
@@ -1474,11 +1499,14 @@ public class ShadowApduService extends HostApduService {
             byte[] cvc3 = null;
             byte[] cvc3T1 = null;
             try {
-                // Assembled to exactly 8, so NoPadding is correct. If the UN
-                // width ever changes and the sum is not 8, nothing pads it.
+                // Assembled to exactly 8, so NoPadding is correct. The block is
+                // enciphered raw - it must NOT go through mac(), which would
+                // append a full 0x80 pad block and MAC 16 bytes instead of 8.
                 byte[] block = cat(iv, un, atcB);
                 if (block.length != 8) {
-                    tap("!! ccc: block is " + block.length + "B, must be exactly 8");
+                    tap("!! ccc: block is " + block.length + "B (iv=" + iv.length
+                            + " un=" + un.length + " atc=" + atcB.length + "), must be 8");
+                    return SW_MALFORMED;
                 } else {
                     byte[] e = EmvCrypto.des3(kd, block);
                     cvc3 = Arrays.copyOfRange(e, e.length - 2, e.length);
