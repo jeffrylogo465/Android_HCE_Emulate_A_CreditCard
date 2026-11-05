@@ -66,12 +66,14 @@ public class EmvTest {
     @Test
     public void forceCidOverwrites() {
         byte[] tpl = h("770A" + "8202" + "1900" + "9F270180" + "9404" + "08010100");
-        assertEquals("40", x(new byte[]{Emv.forceCid(tpl, (byte) 0x40)[7]}));
+        // [9] is the 9F27 value; [7] is the low byte of the tag itself.
+        assertEquals("40", x(new byte[]{Emv.forceCid(tpl, (byte) 0x40)[9]}));
     }
 
     @Test
     public void forceCidAppendsWhenAbsent() {
-        byte[] tpl = h("7706" + "8202" + "1900" + "9404" + "08010100");
+        // 770A: the payload is 10 bytes, so a 06 outer length truncates it.
+        byte[] tpl = h("770A" + "8202" + "1900" + "9404" + "08010100");
         assertEquals("770A" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
                 x(Emv.forceCid(tpl, (byte) 0x40)));
     }
@@ -111,7 +113,8 @@ public class EmvTest {
         r.add(new int[]{1, 1});
         r.add(new int[]{1, 2});
         r.add(new int[]{1, 3});
-        assertEquals("0801010300".substring(0, 8), x(Emv.afl(r)));
+        // sfi<<3 = 08, first = 01, last = 03, ODA count = 00.
+        assertEquals("08010300", x(Emv.afl(r)));
     }
 
     @Test
