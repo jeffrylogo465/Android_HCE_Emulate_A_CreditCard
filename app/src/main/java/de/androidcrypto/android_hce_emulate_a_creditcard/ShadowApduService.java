@@ -629,21 +629,34 @@ public class ShadowApduService extends HostApduService {
         return tlv(outer, out.toByteArray());
     }
 
+    /**
+     * Rewrite the 84 inside a captured A5, leaving everything else alone.
+     *
+     * A List walk, not a Map. Two reasons:
+     *
+     * 1. A captured proprietary template may repeat a tag, and a TreeMap keys
+     *    on the tag, so the first copy is silently overwritten and disappears
+     *    from the FCI with no error anywhere.
+     * 2. A Map re-sorts by tag number. The bytes served should be the card's
+     *    own bytes in the card's own order; nothing here needs them sorted.
+     *
+     * Only the top-level A5 is walked - the values are copied verbatim and never
+     * recursed, so a nested 84 inside a sub-template keeps its own value.
+     */
     private byte[] patchA5(byte[] a5, byte[] aid) {
-        TreeMap<Integer, byte[]> tags = new TreeMap<>();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = 0;
         while (i < a5.length) {
             int[] q = new int[]{i};
             int t = readTag(a5, q);
             int l = readLen(a5, q);
             if (q[0] + l > a5.length) break;
-            tags.put(t, Arrays.copyOfRange(a5, q[0], q[0] + l));
+            byte[] v = Arrays.copyOfRange(a5, q[0], q[0] + l);
             i = q[0] + l;
-        }
 
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (Map.Entry<Integer, byte[]> e : tags.entrySet()) {
-            byte[] one = tlv(e.getKey(), e.getValue());
+            if (t == 0x84) v = aid;
+
+            byte[] one = tlv(t, v);
             out.write(one, 0, one.length);
         }
         return out.toByteArray();
