@@ -20,9 +20,16 @@ import java.util.Locale;
  * GPO response format than by one canonical bit. 1880 is what the reference card
  * declares and Amex is mag-stripe by nature, so it stands.
  *
- * There are NO bitmaps. 9F65/9F66/9F67 are Mastercard Kernel 2 only; under Visa
- * and ExpressPay the CSC's position in the DD is fixed by the spec, so the
- * record is 70 [ 57 <track> ] and nothing else. There is no UDOL either.
+ * THE BITMAPS ARE 9F62 AND 9F63, not the Mastercard 9F65/9F66/9F67. ExpressPay
+ * uses PCVC3 to mark the CSC and PUNATC to mark the ATC, exactly as Kernel 2
+ * uses 9F66 and 9F67 for the same job. A record with no bitmaps leaves the
+ * kernel unable to place the CSC against the track, and it quits straight after
+ * the read - the "unable to record" drop on a dispenser. There is still no
+ * UDOL: the CCC data field is the UN alone, which is what udolLen() returning 4
+ * and the 8C 03 9F3704 in the FCI both assume.
+ *
+ * 9F6E is the Form Factor Indicator. Byte 1 bits 8-6 are the form factor, all
+ * zero meaning "no information", so 0000 is safe.
  *
  * 9F2A 04 goes in the directory and the FCI so kernel 4 is picked by identifier.
  * That one is verified: ExpressPay is EMVCo Kernel 4.
@@ -35,8 +42,8 @@ import java.util.Locale;
  *
  * LENGTHS: the AID A00000002501 is SIX bytes, so every 4F and 84 that names it
  * is 06. Both constants previously declared 09 and every outer length was wrong
- * with them. The PPSE closes at 6F34 / A522 / BF0C1F / 611D and the FCI at
- * 6F1F / A515. TlvValidator proves both.
+ * with them. The PPSE closes at 6F34 / A522 / BF0C1F / 611D and the FCI at 6F1F /
+ * A515. TlvValidator proves both.
  */
 public final class ProfileAmex implements CardProfile {
 
@@ -47,6 +54,12 @@ public final class ProfileAmex implements CardProfile {
             "6F1F8406A00000002501A515500C414D455820426173652030318701019F2A0104";
 
     private static final String AIP = "1880";
+
+    /** CSC digits. Amex carries four, like Mastercard. */
+    private static final int CSC_LEN = 4;
+
+    /** ATC digits, always four. */
+    private static final int ATC_LEN = 4;
 
     @Override public String name() { return "AMEX"; }
 
@@ -67,11 +80,16 @@ public final class ProfileAmex implements CardProfile {
     @Override public String defaultIad() { return ""; }
 
     /**
-     * Bare 57 in a 70. CSC is 4 digits at a fixed offset, no bitmap, no UDOL.
+     * 57 in a 70, with the CSC and ATC positions marked by 9F62 and 9F63.
      *
-     * The 37-byte cap keeps both Tlv.t length fields in BER short form, one byte
-     * each. A track past 127 bytes would need the long form, so raising this
-     * without checking Tlv.t breaks the record silently.
+     * The offsets are derived from the PAN length, so the bitmaps cannot drift
+     * from the track layout: the DD begins one separator, four expiry digits and
+     * three service digits after the PAN ends. 9F62 covers the four CSC digits
+     * there, 9F63 the four ATC digits behind them.
+     *
+     * The 37-byte cap on the track keeps both Tlv.t length fields in BER short
+     * form, one byte each. A track past 127 bytes would need the long form, so
+     * raising this without checking Tlv.t breaks the record silently.
      *
      * PAN is checked for digits as well as length - Hex.hex throws on a non-hex
      * character, and a throw here reads as a crash rather than a refusal.
@@ -91,7 +109,14 @@ public final class ProfileAmex implements CardProfile {
 
         byte[] track = Hex.hex(t.toString());
         if (track.length > 37) return null;
-        return Hex.toHex(Tlv.t(0x70, Tlv.t(0x57, track)));
+
+        int ddOff = pan.length() + 1 + 4 + 3;
+
+        return Hex.toHex(Tlv.t(0x70, Tlv.cat(
+                Tlv.t(0x57, track),
+                Tlv.t(0x9F62, Profiles.bits(ddOff, CSC_LEN)),
+                Tlv.t(0x9F63, Profiles.bits(ddOff + CSC_LEN, ATC_LEN)),
+                Tlv.t(0x9F6E, new byte[]{0x00, 0x00}))));
     }
 
     @Override public String selectPpse(String aid) {
