@@ -1,219 +1,381 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-
-import java.util.ArrayList;
+import java.io.ByteArrayOutputStream;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
-
-import org.junit.Test;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
- * Fixtures for every byte-level bug that has actually cost a shop trip.
+ * Pure EMV byte plumbing.
  *
- * These run on the JVM in milliseconds. Before this file, the only way to find
- * out whether stripAcTags corrupted a record was to drive to a terminal.
+ * NOTHING in this class may touch an Android type. That is the whole point: the
+ * service extends HostApduService, so a test that instantiates the service drags
+ * in the Android runtime and needs an emulator or returnDefaultValues. Every
+ * method here runs in plain JUnit in milliseconds instead.
+ *
+ * The service is the only caller, and it holds no copies of these - two
+ * implementations of the same TLV walk is how they drift apart.
  */
-public class EmvTest {
+final class Emv {
 
-    private static byte[] h(String s) { return Emv.hex(s); }
-    private static String x(byte[] b) { return Emv.toHex(b); }
+    private Emv() { }
 
-    // ---- stripAcTags ----
+    /** Tags a GPO replay may carry but a clone must strip. See the service. */
+    static final int[] AC_TAGS = {0x9F26, 0x9F27, 0x9F36, 0x9F10, 0x9F71};
 
-    @Test
-    public void stripLeavesFormat1GpoUntouched() {
-        // Format 1 is AIP then AFL. 08010100 is not TLV - re-encoding it as TLV
-        // returns 0801010000 and the range grows by a record.
-        byte[] tpl = h("8006" + "1900" + "08010100");
-        assertEquals("8006" + "1900" + "08010100", x(Emv.stripAcTags(tpl)));
+    static final byte CID_AAC  = (byte) 0x00;
+    static final byte CID_TC   = (byte) 0x40;
+    static final byte CID_ARQC = (byte) 0x80;
+
+    static byte[] hex(String s) { return Hex.hex(s); }
+
+    static String toHex(byte[] d) { return Hex.toHex(d); }
+
+    /**
+     * TLV writer with a real length encoder.
+     *
+     * FIX: a one-byte length is wrong above 127 bytes, and patchFci() wraps a
+     * whole captured FCI. A wrong outer length on the FCI is exactly "the
+     * terminal read the app then stopped".
+     */
+    static byte[] tlv(int tag, byte[] v) {
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        if ((tag & 0xFF00) != 0) {
+            o.write((tag >> 8) & 0xFF);
+            o.write(tag & 0xFF);
+        } else {
+            o.write(tag & 0xFF);
+        }
+        int n = v.length;
+        if (n < 0x80) {
+            o.write(n);
+        } else if (n <= 0xFF) {
+            o.write(0x81);
+            o.write(n);
+        } else if (n <= 0xFFFF) {
+            o.write(0x82);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        } else {
+            o.write(0x83);
+            o.write((n >> 16) & 0xFF);
+            o.write((n >> 8) & 0xFF);
+            o.write(n & 0xFF);
+        }
+        o.write(v, 0, n);
+        return o.toByteArray();
     }
 
-    @Test
-    public void stripDropsAcTagsFromFormat2() {
-        byte[] tpl = h("771A" + "8202" + "1900" + "9410"
-                + "08010100100103002002030228040400" + "9F270180");
-        assertEquals("7716" + "8202" + "1900" + "9410"
-                        + "08010100100103002002030228040400",
-                x(Emv.stripAcTags(tpl)));
+    static int readTag(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
+        int t = b[pos[0]++] & 0xFF;
+        if ((t & 0x1F) == 0x1F) {
+            if (pos[0] >= b.length) return t;
+            t = (t << 8) | (b[pos[0]++] & 0xFF);
+            while (pos[0] < b.length && (b[pos[0] - 1] & 0x80) != 0) {
+                t = (t << 8) | (b[pos[0]++] & 0xFF);
+            }
+        }
+        return t;
     }
 
-    @Test
-    public void stripRewritesLengthAcrossLongFormBoundary() {
-        // 20 blocks of 13 bytes plus the 4-byte 82/94 head is 264 bytes, which
-        // needs a 0x82 length. %02X is a minimum width, so it would emit "108"
-        // and leave the template one hex digit short - an odd string, which
-        // Hex.hex rejects before stripAcTags ever runs.
-        StringBuilder aip = new StringBuilder("82" + "02" + "1900");
-        for (int i = 0; i < 20; i++) aip.append("9F10").append("0A").append("00112233445566778899");
-        byte[] tpl = h("77" + "82" + String.format("%04X", aip.length() / 2) + aip);
-        assertEquals("7704" + "8202" + "1900", x(Emv.stripAcTags(tpl)));
+    static int readLen(byte[] b, int[] pos) {
+        if (pos[0] >= b.length) return 0;
+        int l = b[pos[0]++] & 0xFF;
+        if ((l & 0x80) != 0) {
+            int n = l & 0x7F, v = 0;
+            for (int k = 0; k < n && pos[0] < b.length; k++) {
+                v = (v << 8) | (b[pos[0]++] & 0xFF);
+            }
+            return v;
+        }
+        return l;
     }
 
-    // ---- weakenAip ----
-
-    @Test
-    public void weakenClearsCdaInFormat1() {
-        byte[] tpl = h("8006" + "1900" + "08010100");
-        Emv.weakenAip(tpl);
-        assertEquals("1800", x(new byte[]{tpl[2], tpl[3]}));
+    /**
+     * Lc of an incoming APDU, extended length included.
+     *
+     * FIX: reading apdu[4] as a plain Lc gives 0 for an extended APDU. Both
+     * consequences were silent: a long SELECT took the empty-name path and
+     * selected the card's own AID, and a long GENERATE AC MACed an empty CDOL.
+     */
+    static int lcOf(byte[] apdu) {
+        if (apdu.length < 5) return 0;
+        int lc = apdu[4] & 0xFF;
+        if (lc != 0x00) return lc;
+        if (apdu.length < 7) return 0;
+        return ((apdu[5] & 0xFF) << 8) | (apdu[6] & 0xFF);
     }
 
-    @Test
-    public void weakenClearsCdaInFormat2() {
-        byte[] tpl = h("770A" + "8202" + "1900" + "9404" + "08010100");
-        Emv.weakenAip(tpl);
-        assertEquals("1800", x(new byte[]{tpl[4], tpl[5]}));
+    static int dataOff(byte[] apdu) {
+        return (apdu.length >= 7 && (apdu[4] & 0xFF) == 0x00) ? 7 : 5;
     }
 
-    // ---- forceCid ----
+    /**
+     * Clear the CDA bit in the AIP of a GPO template, in place.
+     *
+     * FIX: format 1 (outer 80) has NO inner TLVs - the payload is two raw AIP
+     * bytes then the track 2. The old TLV walk found no 82, returned, and left
+     * CDA set in MSD mode.
+     */
+    static void weakenAip(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        readLen(tpl, pos);
 
-    @Test
-    public void forceCidOverwrites() {
-        byte[] tpl = h("770A" + "8202" + "1900" + "9F270180" + "9404" + "08010100");
-        // [9] is the 9F27 value; [7] is the low byte of the tag itself.
-        assertEquals("40", x(new byte[]{Emv.forceCid(tpl, (byte) 0x40)[9]}));
+        if (outer == 0x80) {
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x01;
+            return;
+        }
+
+        int i = pos[0];
+        while (i < tpl.length) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) return;
+            if (t == 0x82 && l >= 1) {
+                tpl[q[0]] &= (byte) ~0x01;
+                return;
+            }
+            i = q[0] + l;
+        }
     }
 
-    @Test
-    public void forceCidAppendsWhenAbsent() {
-        // Appending goes through tlv(), so the outer length is recomputed and
-        // grows 0A -> 0E with the four new bytes.
-        byte[] tpl = h("770A" + "8202" + "1900" + "9404" + "08010100");
-        assertEquals("770E" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
-                x(Emv.forceCid(tpl, (byte) 0x40)));
+    /** Overwrite the CID in a GPO template in place, or append one. */
+    static byte[] forceCid(byte[] tpl, byte cid) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == 0x9F27 && l >= 1) {
+                tpl[q[0]] = cid;
+                return tpl;
+            }
+            i = q[0] + l;
+        }
+
+        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
+        return tlv(outer, concat(content, tlv(0x9F27, new byte[]{cid})));
     }
 
-    // ---- findTag ----
+    /**
+     * Rebuild a GPO template without AC_TAGS, forcing the terminal to ask for a
+     * cryptogram.
+     *
+     * FORMAT 1 IS RETURNED UNTOUCHED. Its payload is two raw AIP bytes followed
+     * by the AFL, which is not a sequence of TLVs and holds no AC tag to begin
+     * with - there is nothing to strip and nothing to rebuild. Walking it as
+     * TLV re-encodes the AFL: 08 01 01 00 reads as tag 08 length 01 value 01,
+     * then a tag 00 with no length, and the entry comes back one byte longer
+     * than it arrived. A four-byte AFL of 08010100 became 08010100 00, which
+     * the terminal reads as a record range that does not exist.
+     *
+     * Format 2 is a real template, so that branch still walks it.
+     */
+    static byte[] stripAcTags(byte[] tpl) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
 
-    @Test
-    public void findTagReturnsNullForFormat1() {
-        assertNull(Emv.findTag(h("800E" + "1900" + "570A" + "6011410636372356D280"), 0x9F10));
+        if (outer == 0x80) return tpl;
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            i = q[0] + l;
+
+            boolean drop = false;
+            for (int d : AC_TAGS) if (d == t) { drop = true; break; }
+            if (drop) continue;
+
+            byte[] one = tlv(t, Arrays.copyOfRange(tpl, q[0], q[0] + l));
+            out.write(one, 0, one.length);
+        }
+        return tlv(outer, out.toByteArray());
     }
 
-    @Test
-    public void findTagReadsValue() {
-        byte[] tpl = h("7710" + "8202" + "1900" + "9F100A" + "011520100300FF01B000" + "9404" + "08010100");
-        assertEquals("011520100300FF01B000", x(Emv.findTag(tpl, 0x9F10)));
+    /** First value of {@code want} inside a template, or null. Null for format 1. */
+    static byte[] findTag(byte[] tpl, int want) {
+        if (tpl == null || tpl.length < 4) return null;
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        if (outer == 0x80) return null;
+        int olen = readLen(tpl, pos);
+        int end  = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == want) return Arrays.copyOfRange(tpl, q[0], q[0] + l);
+            i = q[0] + l;
+        }
+        return null;
     }
 
-    // ---- lcOf / dataOff ----
-
-    @Test
-    public void lcOfReadsShortLength() {
-        assertEquals(0x0E, Emv.lcOf(h("00A404000E325041592E5359532E444446303100")));
-        assertEquals(5, Emv.dataOff(h("00A404000E325041592E5359532E444446303100")));
+    /**
+     * FIX: the format 1 branch used raw[2] and raw[3], right only for a
+     * short-form length. A long-form payload put the AIP two bytes further on.
+     */
+    static byte[] capturedAip(byte[] raw) {
+        if (raw == null || raw.length < 4) return null;
+        int[] pos = new int[1];
+        int outer = readTag(raw, pos);
+        if (outer == 0x80) {
+            int l = readLen(raw, pos);
+            if (l >= 2 && pos[0] + 2 <= raw.length) {
+                return Arrays.copyOfRange(raw, pos[0], pos[0] + 2);
+            }
+            return null;
+        }
+        int len = readLen(raw, pos);
+        int end = Math.min(raw.length, pos[0] + len);
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(raw, q);
+            int l = readLen(raw, q);
+            if (q[0] + l > raw.length) break;
+            if (t == 0x82 && l >= 2) return Arrays.copyOfRange(raw, q[0], q[0] + 2);
+            i = q[0] + l;
+        }
+        return null;
     }
 
-    @Test
-    public void lcOfReadsExtendedLength() {
-        assertEquals(0x1234, Emv.lcOf(h("00A4040000123400000000000000")));
-        assertEquals(7, Emv.dataOff(h("00A4040000123400000000000000")));
+    static byte[] concat(byte[]... arrs) {
+        ByteArrayOutputStream o = new ByteArrayOutputStream();
+        for (byte[] a : arrs) if (a != null) o.write(a, 0, a.length);
+        return o.toByteArray();
     }
 
-    // ---- cccBlock ----
-
-    @Test
-    public void cccBlockSumsToEightForAFourByteUn() {
-        // IVCVC3 2 + UN 4 + ATC 2. Eight is the real width, so a fixture that
-        // passes a two-byte UN is six and the assertion looks wrong.
-        assertEquals(8, Emv.cccBlock(h("1234"), h("ABCDEF12"), h("0001")).length);
+    /**
+     * The CCC block: IVCVC3 || UN || ATC.
+     *
+     * Exactly eight bytes, and that is not a coincidence to be preserved by
+     * hand - the descriptor decides the UN width, so a skeleton naming a
+     * two-byte UN still has to land on eight. ccc() checks the total and
+     * refuses anything else rather than enciphering a short block.
+     */
+    static byte[] cccBlock(byte[] iv, byte[] un, byte[] atc) {
+        return concat(iv, un, atc);
     }
 
-    @Test
-    public void cccBlockGrowsWithALongerUn() {
-        // A descriptor naming a five-byte UN lands on nine, not eight, which is
-        // why ccc() measures the block instead of assuming.
-        assertEquals(9, Emv.cccBlock(h("1234"), h("ABCDEF1234"), h("0001")).length);
+    /**
+     * The GENERATE AC CID, as a pure function so the ladder can be tested.
+     *
+     * Two properties matter more than the rest and both are pinned by tests:
+     *
+     * 1. A requested AAC (0x00) wins over every force. Nothing may approve a
+     *    decline.
+     * 2. An ARQC is never answered without a key, because computeAc would emit
+     *    eight zero bytes and the issuer would judge a cryptogram that verifies
+     *    against nothing. A forced 0x80 with no key is downgraded to TC, and a
+     *    plain 0x80 request with no key falls through to TC as well.
+     *
+     * Order, highest priority first. Each rung names the test that pins it, so
+     * moving a rung without moving its test is visible on one screen. The three
+     * rungs marked "no test" are unreachable today because
+     * ALWAYS_ONLINE_FOR_RECEIPT and FORCE_ONLINE_ARQC are static finals that are
+     * false; the third is the acInGpo catch-all, which only fires for a
+     * requested CID that is neither AAC nor ARQC.
+     *
+     *   1  acInGpo, requested AAC        -> AAC   decideHonoursAacEvenWhenTheAcWasAlreadySent
+     *   2  acInGpo, requested ARQC       -> ARQC  decideEchoesTheRequestWhenTheAcWasAlreadySent
+     *   3  acInGpo, anything else        -> TC    no test
+     *   4  requested AAC                 -> AAC   decideHonoursAacOverEveryForce
+     *   5  forced CID                    -> it    decideKeepsAForcedArqcWithAKey
+     *   6  forced ARQC with no key       -> TC    decideDowngradesAForcedArqcWithoutAKey
+     *   7  alwaysOnline                  -> ARQC  no test
+     *   8  haveKey && forceArqc          -> ARQC  no test
+     *   9  forceTc                       -> TC    decideForceTcBeatsARequestedArqc
+     *  10  requested ARQC && haveKey     -> ARQC  decideAnswersARequestedArqcWhenTcIsNotForced
+     *  11  otherwise                     -> TC    decideNeverAnswersArqcWithoutAKey
+     *
+     * Rung 4 sits above 5 on purpose and is the reason property 1 holds: the
+     * AAC check precedes the force box, so no force can approve a decline.
+     * Rung 9 sits above 10 for the same kind of reason - forceTc has to beat a
+     * terminal that asked for ARQC.
+     */
+    static byte decideCid(boolean acInGpo,
+                          int requested,
+                          boolean haveKey,
+                          boolean hasForce,
+                          byte forcedCid,
+                          boolean alwaysOnline,
+                          boolean forceArqc,
+                          boolean forceTc) {
+        if (acInGpo) {
+            if (requested == 0x00) return CID_AAC;
+            if (requested == 0x80) return CID_ARQC;
+            return CID_TC;
+        }
+        if (requested == 0x00) return CID_AAC;
+        if (hasForce) {
+            return (forcedCid == CID_ARQC && !haveKey) ? CID_TC : forcedCid;
+        }
+        if (alwaysOnline) return CID_ARQC;
+        if (haveKey && forceArqc) return CID_ARQC;
+        if (forceTc) return CID_TC;
+        if (requested == 0x80 && haveKey) return CID_ARQC;
+        return CID_TC;
     }
 
-    // ---- decideCid ----
+    /**
+     * Build an AFL from {sfi, record} pairs.
+     *
+     * Contiguous records collapse into one entry; a gap starts a new one. Get
+     * this wrong and the terminal reads a record that does not exist and gets
+     * 6A83.
+     */
+    static byte[] afl(List<int[]> records) {
+        TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
+        for (int[] r : records) {
+            TreeSet<Integer> set = map.get(r[0]);
+            if (set == null) { set = new TreeSet<>(); map.put(r[0], set); }
+            set.add(r[1]);
+        }
 
-    @Test
-    public void decideHonoursAacOverEveryForce() {
-        assertEquals(Emv.CID_AAC,
-                Emv.decideCid(false, 0x00, true, true, Emv.CID_TC, true, true, true));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (Map.Entry<Integer, TreeSet<Integer>> e : map.entrySet()) {
+            int sfi = e.getKey();
+            int runStart = -1, prev = -1;
+            for (int rec : e.getValue()) {
+                if (runStart < 0) {
+                    runStart = rec;
+                } else if (rec != prev + 1) {
+                    aflEntry(out, sfi, runStart, prev);
+                    runStart = rec;
+                }
+                prev = rec;
+            }
+            if (runStart >= 0) aflEntry(out, sfi, runStart, prev);
+        }
+        return out.toByteArray();
     }
 
-    @Test
-    public void decideHonoursAacEvenWhenTheAcWasAlreadySent() {
-        assertEquals(Emv.CID_AAC,
-                Emv.decideCid(true, 0x00, true, true, Emv.CID_TC, true, true, true));
-    }
-
-    @Test
-    public void decideNeverAnswersArqcWithoutAKey() {
-        assertEquals(Emv.CID_TC,
-                Emv.decideCid(false, 0x80, false, false, (byte) 0, false, false, false));
-    }
-
-    @Test
-    public void decideDowngradesAForcedArqcWithoutAKey() {
-        assertEquals(Emv.CID_TC,
-                Emv.decideCid(false, 0x80, false, true, Emv.CID_ARQC, false, false, false));
-    }
-
-    @Test
-    public void decideKeepsAForcedArqcWithAKey() {
-        assertEquals(Emv.CID_ARQC,
-                Emv.decideCid(false, 0x80, true, true, Emv.CID_ARQC, false, false, false));
-    }
-
-    @Test
-    public void decideForceTcBeatsARequestedArqc() {
-        assertEquals(Emv.CID_TC,
-                Emv.decideCid(false, 0x80, true, false, (byte) 0, false, false, true));
-    }
-
-    @Test
-    public void decideAnswersARequestedArqcWhenTcIsNotForced() {
-        assertEquals(Emv.CID_ARQC,
-                Emv.decideCid(false, 0x80, true, false, (byte) 0, false, false, false));
-    }
-
-    @Test
-    public void decideEchoesTheRequestWhenTheAcWasAlreadySent() {
-        assertEquals(Emv.CID_ARQC,
-                Emv.decideCid(true, 0x80, false, false, (byte) 0, false, false, true));
-    }
-
-    // ---- afl ----
-
-    @Test
-    public void aflCollapsesContiguousRecords() {
-        List<int[]> r = new ArrayList<>();
-        r.add(new int[]{1, 1});
-        r.add(new int[]{1, 2});
-        r.add(new int[]{1, 3});
-        // sfi<<3 = 08, first = 01, last = 03, ODA count = 00.
-        assertEquals("08010300", x(Emv.afl(r)));
-    }
-
-    @Test
-    public void aflSplitsNonContiguousRuns() {
-        List<int[]> r = new ArrayList<>();
-        r.add(new int[]{1, 1});
-        r.add(new int[]{1, 2});
-        r.add(new int[]{1, 4});
-        assertEquals("08010200" + "08040400", x(Emv.afl(r)));
-    }
-
-    @Test
-    public void aflSeparatesSfis() {
-        List<int[]> r = new ArrayList<>();
-        r.add(new int[]{2, 3});
-        r.add(new int[]{2, 4});
-        r.add(new int[]{4, 5});
-        assertEquals("10030400" + "20050500", x(Emv.afl(r)));
-    }
-
-    // ---- tlv ----
-
-    @Test
-    public void tlvUsesLongFormAbove127() {
-        byte[] out = Emv.tlv(0x77, new byte[200]);
-        assertEquals(0x81, out[1] & 0xFF);
-        assertEquals(200, out[2] & 0xFF);
-        assertEquals(203, out.length);
+    private static void aflEntry(ByteArrayOutputStream out, int sfi, int first, int last) {
+        out.write((sfi << 3) & 0xFF);
+        out.write(first & 0xFF);
+        out.write(last & 0xFF);
+        out.write(0x00);
     }
 }
