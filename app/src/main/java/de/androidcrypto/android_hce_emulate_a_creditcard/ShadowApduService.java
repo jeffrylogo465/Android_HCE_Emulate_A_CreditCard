@@ -364,7 +364,7 @@ public class ShadowApduService extends HostApduService {
      *
      * The profile step exists because an Amex card must not inherit the M/Chip
      * default - it has no CVN block and cvn() would read byte 2 of a fabricated
-     * one. Amex returns an empty string, so the tag goes out empty.
+     * one. Amex returns an empty string, which means the tag is omitted.
      */
     private String iadHex() {
         if (capturedIad != null) return bytesToHex(capturedIad);
@@ -1090,8 +1090,8 @@ public class ShadowApduService extends HostApduService {
 
         byte[] body = cat(
                 tlv(0x82, used),
-                tlv(0x94, a),
-                tlv(0x9F10, hex(iad)));
+                tlv(0x94, a));
+        if (!iad.isEmpty()) body = cat(body, tlv(0x9F10, hex(iad)));
 
         if (!STRIP_AC) {
             body = cat(body,
@@ -1610,8 +1610,12 @@ public class ShadowApduService extends HostApduService {
                 + (forced.length() == 2 ? " (forced from the CID box)" : "")
                 + " atc=" + atc + " arqc=" + bytesToHex(ac));
 
-        byte[] body = cat(
-                tlv(0x9F10, hex(iad)),
+        // No IAD means no tag at all. A zero-length 9F10 is legal BER but the
+        // issuer has no CVR or key index to parse, and a kernel that length-
+        // checks can reject outright. Amex is the case that reaches this.
+        byte[] body = new byte[0];
+        if (!iad.isEmpty()) body = cat(body, tlv(0x9F10, hex(iad)));
+        body = cat(body,
                 tlv(0x9F26, ac),
                 tlv(0x9F27, new byte[]{cid}),
                 tlv(0x9F36, hex(atc)));
