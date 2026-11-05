@@ -1977,6 +1977,20 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Expiry must be YYMM, e.g. 2803", Toast.LENGTH_LONG).show();
             return;
         }
+
+        // A card with nothing behind it still serves a PPSE and a GPO, so the
+        // terminal selects and then 6A83s on the first read - which reads as a
+        // terminal fault rather than an empty form. Captured records cover it,
+        // and so does an armed MSD skeleton or a typed AFL.
+        if (recordCountOnCard() == 0
+                && t(etAfl).isEmpty()
+                && prefs.getString(key(current, "msdrec"), "").isEmpty()) {
+            status("Nothing to serve - capture the card, arm a skeleton or type an AFL",
+                    COL_STALE);
+            Toast.makeText(this, "No records, no skeleton and no AFL", Toast.LENGTH_LONG).show();
+            return;
+        }
+
         etPan.setText(pan);
         collect();
         adapter.notifyItemChanged(current);
