@@ -40,9 +40,13 @@ public class EmvTest {
 
     @Test
     public void stripRewritesLengthAcrossLongFormBoundary() {
+        // 20 blocks of 13 bytes plus the 4-byte 82/94 head is 264 bytes, which
+        // needs a 0x82 length. %02X is a minimum width, so it would emit "108"
+        // and leave the template one hex digit short - an odd string, which
+        // Hex.hex rejects before stripAcTags ever runs.
         StringBuilder aip = new StringBuilder("82" + "02" + "1900");
         for (int i = 0; i < 20; i++) aip.append("9F10").append("0A").append("00112233445566778899");
-        byte[] tpl = h("77" + String.format("%02X", aip.length() / 2) + aip);
+        byte[] tpl = h("77" + "82" + String.format("%04X", aip.length() / 2) + aip);
         assertEquals("7704" + "8202" + "1900", x(Emv.stripAcTags(tpl)));
     }
 
@@ -73,9 +77,10 @@ public class EmvTest {
 
     @Test
     public void forceCidAppendsWhenAbsent() {
-        // 770A: the payload is 10 bytes, so a 06 outer length truncates it.
+        // Appending goes through tlv(), so the outer length is recomputed and
+        // grows 0A -> 0E with the four new bytes.
         byte[] tpl = h("770A" + "8202" + "1900" + "9404" + "08010100");
-        assertEquals("770A" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
+        assertEquals("770E" + "8202" + "1900" + "9404" + "08010100" + "9F270140",
                 x(Emv.forceCid(tpl, (byte) 0x40)));
     }
 
