@@ -44,6 +44,31 @@ jobs:
       - name: Unit tests
         run: ./gradlew testDebugUnitTest --stacktrace
 
+      # Gradle writes an assertion failure to the log and nowhere else, and the
+      # log needs a sign-in to read. This republishes every failing test as an
+      # ::error:: annotation, which is visible logged out, and dumps the message
+      # so the reason travels with the name.
+      - name: Report test failures
+        if: failure()
+        run: |
+          shopt -s nullglob
+          found=0
+          for f in app/build/test-results/testDebugUnitTest/*.xml; do
+            found=1
+            cls=$(basename "$f" .xml)
+            grep -B1 '<failure' "$f" \
+              | grep '<testcase' \
+              | sed -E 's/.*name="([^"]*)".*/\1/' \
+              | while read -r name; do
+                  echo "::error title=${cls}::${name}"
+                done
+            echo "----- ${cls} -----"
+            grep -A3 '<failure' "$f" | head -80 || true
+          done
+          if [ "$found" = 0 ]; then
+            echo "::error::no test XML produced - the task failed before running tests"
+          fi
+
       # Reports are only interesting when the tests failed, and the raw output is
       # unreadable on a phone. Without this a red run from mobile says nothing.
       - name: Upload test reports
