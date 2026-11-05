@@ -22,10 +22,11 @@ public class EmvTest {
     // ---- stripAcTags ----
 
     @Test
-    public void stripKeepsFormat1AipVerbatim() {
-        byte[] tpl = h("8012" + "1900" + "570A" + "6011410636372356D280" + "9F270180");
-        assertEquals("800E" + "1900" + "570A" + "6011410636372356D280",
-                x(Emv.stripAcTags(tpl)));
+    public void stripLeavesFormat1GpoUntouched() {
+        // Format 1 is AIP then AFL. 08010100 is not TLV - re-encoding it as TLV
+        // returns 0801010000 and the range grows by a record.
+        byte[] tpl = h("8006" + "1900" + "08010100");
+        assertEquals("8006" + "1900" + "08010100", x(Emv.stripAcTags(tpl)));
     }
 
     @Test
@@ -49,7 +50,7 @@ public class EmvTest {
 
     @Test
     public void weakenClearsCdaInFormat1() {
-        byte[] tpl = h("800E" + "1900" + "570A" + "6011410636372356D280");
+        byte[] tpl = h("8006" + "1900" + "08010100");
         Emv.weakenAip(tpl);
         assertEquals("1800", x(new byte[]{tpl[2], tpl[3]}));
     }
@@ -103,6 +104,70 @@ public class EmvTest {
     public void lcOfReadsExtendedLength() {
         assertEquals(0x1234, Emv.lcOf(h("00A4040000123400000000000000")));
         assertEquals(7, Emv.dataOff(h("00A4040000123400000000000000")));
+    }
+
+    // ---- cccBlock ----
+
+    @Test
+    public void cccBlockSumsToEightForAShortUn() {
+        assertEquals(8, Emv.cccBlock(h("1234"), h("ABCD"), h("0001")).length);
+    }
+
+    @Test
+    public void cccBlockGrowsWithALongerUn() {
+        // A descriptor naming a six-byte UN no longer lands on eight, which is
+        // why ccc() measures the block instead of assuming.
+        assertEquals(9, Emv.cccBlock(h("1234"), h("ABCDEF"), h("0001")).length);
+    }
+
+    // ---- decideCid ----
+
+    @Test
+    public void decideHonoursAacOverEveryForce() {
+        assertEquals(Emv.CID_AAC,
+                Emv.decideCid(false, 0x00, true, true, Emv.CID_TC, true, true, true));
+    }
+
+    @Test
+    public void decideHonoursAacEvenWhenTheAcWasAlreadySent() {
+        assertEquals(Emv.CID_AAC,
+                Emv.decideCid(true, 0x00, true, true, Emv.CID_TC, true, true, true));
+    }
+
+    @Test
+    public void decideNeverAnswersArqcWithoutAKey() {
+        assertEquals(Emv.CID_TC,
+                Emv.decideCid(false, 0x80, false, false, (byte) 0, false, false, false));
+    }
+
+    @Test
+    public void decideDowngradesAForcedArqcWithoutAKey() {
+        assertEquals(Emv.CID_TC,
+                Emv.decideCid(false, 0x80, false, true, Emv.CID_ARQC, false, false, false));
+    }
+
+    @Test
+    public void decideKeepsAForcedArqcWithAKey() {
+        assertEquals(Emv.CID_ARQC,
+                Emv.decideCid(false, 0x80, true, true, Emv.CID_ARQC, false, false, false));
+    }
+
+    @Test
+    public void decideForceTcBeatsARequestedArqc() {
+        assertEquals(Emv.CID_TC,
+                Emv.decideCid(false, 0x80, true, false, (byte) 0, false, false, true));
+    }
+
+    @Test
+    public void decideAnswersARequestedArqcWhenTcIsNotForced() {
+        assertEquals(Emv.CID_ARQC,
+                Emv.decideCid(false, 0x80, true, false, (byte) 0, false, false, false));
+    }
+
+    @Test
+    public void decideEchoesTheRequestWhenTheAcWasAlreadySent() {
+        assertEquals(Emv.CID_ARQC,
+                Emv.decideCid(true, 0x80, false, false, (byte) 0, false, false, true));
     }
 
     // ---- afl ----
