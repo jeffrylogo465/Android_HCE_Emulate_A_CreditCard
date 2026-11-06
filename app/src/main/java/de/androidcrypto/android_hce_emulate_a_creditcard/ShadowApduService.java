@@ -93,7 +93,11 @@ public class ShadowApduService extends HostApduService {
     private static final byte CID_TC   = Emv.CID_TC;
     private static final byte CID_ARQC = Emv.CID_ARQC;
 
-    private static final byte GPO_CID = CID_TC;
+    /**
+     * The GPO CID is no longer a constant - see gpoCidFor(). It follows the key
+     * rather than the build, because a keyless card cannot answer an ARQC and a
+     * keyed one that answers TC never reaches genac().
+     */
 
     private static final boolean ALWAYS_ONLINE_FOR_RECEIPT = false;
 
@@ -112,15 +116,20 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     /**
-     * CDOL1 as advertised in the generated FCI.
+     * The MSD checksum descriptor, 9F37 alone, four bytes.
      *
-     * 9F37 alone, four bytes. The CSC needs the UN and nothing else, and a
-     * four-byte descriptor keeps the CCC field at four bytes - which is what
-     * udolLen() returns with no 9F69 and what unOffset() assumes. A longer
-     * descriptor would put the UN behind other fields.
+     * The CSC needs the UN and nothing else, and a four-byte descriptor keeps
+     * the CCC field at four bytes - which is what udolLen() returns with no
+     * 9F69 and what unOffset() assumes. A longer descriptor would put the UN
+     * behind other fields.
      *
      * Without an 8C in the FCI the terminal has no descriptor for COMPUTE
      * CRYPTOGRAPHIC CHECKSUM and quits after the record.
+     *
+     * EMV DOES NOT USE THIS. select() advertises CDOL1 on the EMV path, because
+     * an ARQC MACed over the UN alone covers no amount, no currency and no
+     * terminal country - the issuer rebuilds a longer input and no key can make
+     * that match.
      */
     private static final String CDOL_MSD = "9F3704";
 
@@ -442,6 +451,11 @@ public class ShadowApduService extends HostApduService {
      * The profile step exists because an Amex card must not inherit the M/Chip
      * default - it has no CVN block and cvn() would read byte 2 of a fabricated
      * one. Amex returns an empty string, which means the tag is omitted.
+     *
+     * ONCE A KEY IS SET THE IAD IS NOT OPTIONAL. It goes into the MAC input, so
+     * an empty one MACs a shorter string than the issuer reconstructs and the
+     * ARQC fails with a correct key - which reads as a wrong key. Capture the
+     * real 9F10 off a live GPO and type it before the tap that matters.
      */
     private String iadHex() {
         if (capturedIad != null) return bytesToHex(capturedIad);
@@ -1072,13 +1086,42 @@ public class ShadowApduService extends HostApduService {
         byte[] prop = cat(
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
-                tlv(0x8C, hex(CDOL_MSD)),
+                // The descriptor follows the flow, not the build. MSD is a
+                // single checksum and wants 9F37 alone; EMV MACs over the CDOL
+                // data, so it needs the full CDOL1 or the ARQC covers no amount.
+                tlv(0x8C, hex(isMsd() ? CDOL_MSD : CDOL1)),
                 tlv(0x9F11, new byte[]{0x01}),
                 tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
                 tlv(0x9F38, hex(PDOL)));
         byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
         return cat(tlv(0x6F, inner), SW_OK);
+    }
+
+    /**
+     * CID for the GPO.
+     *
+     * Follows the key, not a constant. Without a key computeAc emits eight zero
+     * bytes the issuer cannot verify, so a keyless card answers TC and stays
+     * offline. With a key it answers ARQC so the terminal goes online - which is
+     * the only route by which genac() is ever reached.
+     *
+     * The downgrade also has to survive the CID box: a forced 80 on a keyless
+     * card is unsatisfiable for the same reason.
+     *
+     * This cannot live in Emv.decideCid. Its first branch is acInGpo, which
+     * answers ARQC for a requested ARQC without consulting haveKey() - so once
+     * an AC is in the GPO the ladder is bypassed entirely and a zero ARQC goes
+     * on the wire.
+     */
+    private byte gpoCidFor() {
+        byte cid = haveKey() ? CID_ARQC : CID_TC;
+        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (forced.length() == 2) {
+            cid = (byte) Integer.parseInt(forced, 16);
+            if (cid == CID_ARQC && !haveKey()) cid = CID_TC;
+        }
+        return cid;
     }
 
     private byte[] gpo(byte[] apdu) {
@@ -1106,16 +1149,24 @@ public class ShadowApduService extends HostApduService {
                     if (STRIP_AC) {
                         raw = stripAcTags(raw);
                         gpoCid = "(stripped)";
+                    } else if (capMsd) {
+                        // Format 1 is flat, carries no CID, and findTag() refuses
+                        // a 0x80 by design - so forceCid() would staple a 9F27
+                        // TLV into an AIP/AFL payload. A format 1 replay keeps
+                        // the captured bytes untouched.
+                        gpoCid = "";
                     } else {
-                        raw = forceCid(raw, GPO_CID);
-                        gpoCid = String.format("%02X", GPO_CID & 0xFF);
+                        byte rc = gpoCidFor();
+                        raw = forceCid(raw, rc);
+                        gpoCid = String.format("%02X", rc & 0xFF);
                     }
 
                     txnAip = capturedAip(raw);
                     cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
                             + " (" + (STRIP_AC ? "AC tags stripped"
-                                               : "cid forced to " + gpoCid)
+                                    : capMsd ? "format 1 - cid untouched"
+                                             : "cid forced to " + gpoCid)
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
@@ -1158,12 +1209,7 @@ public class ShadowApduService extends HostApduService {
             }
         }
 
-        byte cid = GPO_CID;
-        String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
-        if (forced.length() == 2) {
-            cid = (byte) Integer.parseInt(forced, 16);
-            if (cid == CID_ARQC) cid = CID_TC;
-        }
+        byte cid = gpoCidFor();
         gpoCid = String.format("%02X", cid & 0xFF);
         lastCid = gpoCid;
 
@@ -1655,6 +1701,11 @@ public class ShadowApduService extends HostApduService {
      * zero bytes, so an ARQC is unsatisfiable - decideCid refuses to answer one
      * and falls through to TC instead, which is why a keyless card can still
      * approve offline and can never hand the issuer a cryptogram it will reject.
+     *
+     * That guard only applies when the GPO carried no AC. decideCid's first
+     * branch is acInGpo, which answers ARQC for a requested ARQC without
+     * consulting haveKey() - which is why the keyless downgrade for the GPO CID
+     * lives in gpoCidFor() and not here.
      */
     private byte[] genac(byte[] apdu) {
         int p1 = apdu[2] & 0xFF;
