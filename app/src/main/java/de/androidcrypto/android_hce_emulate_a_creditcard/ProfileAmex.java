@@ -24,9 +24,14 @@ import java.util.Locale;
  * uses PCVC3 to mark the CSC and PUNATC to mark the ATC, exactly as Kernel 2
  * uses 9F66 and 9F67 for the same job. A record with no bitmaps leaves the
  * kernel unable to place the CSC against the track, and it quits straight after
- * the read - the "unable to record" drop on a dispenser. There is still no
- * UDOL: the CCC data field is the UN alone, which is what udolLen() returning 4
- * and the 8C 03 9F3704 in the FCI both assume.
+ * the read - the "unable to record" drop on a dispenser.
+ *
+ * THE UDOL IS 9F69 AND IT IS MANDATORY. Without it the terminal reads the record
+ * and then stops: it has nothing naming the CCC data field, so it never sends
+ * COMPUTE CRYPTOGRAPHIC CHECKSUM and never gets a CSC to judge. The tap ends
+ * with no verdict at all rather than a decline, which is a much harder thing to
+ * read from a till. 9F69 names 9F6A over four digits - the nUN - matching
+ * udolLen() returning 4 and the 8C 03 9F3704 in the FCI.
  *
  * 9F6E is the Form Factor Indicator. Byte 1 bits 8-6 are the form factor, all
  * zero meaning "no information", so 0000 is safe.
@@ -87,6 +92,11 @@ public final class ProfileAmex implements CardProfile {
      * three service digits after the PAN ends. 9F62 covers the four CSC digits
      * there, 9F63 the four ATC digits behind them.
      *
+     * 9F69 follows the bitmaps and names 9F6A over the four nUN digits. The
+     * terminal needs it to build COMPUTE CRYPTOGRAPHIC CHECKSUM - the card does
+     * not volunteer a CCC field, and without the UDOL the terminal stops after
+     * the read with no verdict.
+     *
      * The 37-byte cap on the track keeps both Tlv.t length fields in BER short
      * form, one byte each. A track past 127 bytes would need the long form, so
      * raising this without checking Tlv.t breaks the record silently.
@@ -116,6 +126,7 @@ public final class ProfileAmex implements CardProfile {
                 Tlv.t(0x57, track),
                 Tlv.t(0x9F62, Profiles.bits(ddOff, CSC_LEN)),
                 Tlv.t(0x9F63, Profiles.bits(ddOff + CSC_LEN, ATC_LEN)),
+                Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04})),
                 Tlv.t(0x9F6E, new byte[]{0x00, 0x00}))));
     }
 
