@@ -485,19 +485,30 @@ public class MainActivity extends AppCompatActivity {
                 .setTitle("Script")
                 .setItems(labels, (d, which) -> {
                     boolean auto = Profiles.AUTO.equals(names[which]);
-                    prefs.edit()
-                            .putString(key(current, "profile"), names[which])
-                            .putBoolean(key(current, "profilepin"), !auto)
-                            .apply();
                     appliedProfile = "";
+
                     if (auto) {
+                        prefs.edit()
+                                .putString(key(current, "profile"), names[which])
+                                .putBoolean(key(current, "profilepin"), false)
+                                .apply();
                         status("Script AUTOMATICO - the card number picks the network");
                         maybeProfile();
-                    } else {
-                        appliedProfile = names[which];
-                        applyProfile(digits(t(etPan)), names[which]);
-                        armFromFields();
+                        return;
                     }
+
+                    // The pin is written AFTER the arm, so profilePinned() is
+                    // still false while applyProfile() and armFromFields() run.
+                    // Picking a script is the one moment the profile's own
+                    // shape and script are wanted; once it is pinned, a save or
+                    // a CSC edit must leave the boxes alone.
+                    applyProfile(digits(t(etPan)), names[which]);
+                    armFromFields();
+
+                    prefs.edit()
+                            .putString(key(current, "profile"), names[which])
+                            .putBoolean(key(current, "profilepin"), true)
+                            .apply();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -537,13 +548,19 @@ public class MainActivity extends AppCompatActivity {
      * gets the expiry and service defaults, and no DD, because the CSC is on the
      * plastic and cannot be derived from the number.
      *
-     * AIP, MSD AND CID ARE ONLY WRITTEN WHEN UNTOUCHED - empty, or still equal
-     * to the previous network's own default. They are card shape, not network
-     * key material, and a card held at 0800 / MSD 0 / CID 40 - the EMV shape -
-     * must not be walked back to 1880 / 1 / 80 by a rebind or a save. Comparing
-     * against empty alone is not enough: bindCard() pre-fills all three, so an
-     * isEmpty() gate would be dead on every rebind. IAD and ATC stay on newNet
-     * because both are genuinely network-specific.
+     * AIP, MSD AND CID ARE CARD SHAPE, NOT NETWORK KEY MATERIAL. They are only
+     * written when the network actually changed, or when the selector is not
+     * pinned and the box is still untouched. Comparing against empty alone is
+     * not enough - bindCard() pre-fills all three, so an isEmpty() gate would be
+     * dead on every rebind. Comparing against the previous network's own default
+     * catches a field the user has not moved, and leaves a hand-set 0800 / 0 /
+     * empty alone.
+     *
+     * THE PIN IS THE STRONGER GATE. onSave() runs maybeProfile(), so a save used
+     * to walk an EMV card back to 1880 / MSD 1 / CID 80 through this method. A
+     * pinned card now keeps exactly what is in the boxes and only a network
+     * change re-stamps the shape. IAD and ATC stay on newNet either way - both
+     * are genuinely network-specific and neither is something you hand-hold.
      *
      * THE SERVICE CODE IS THE USER'S. KNOWN carries the plastic's 201; a card
      * held at 200 must not be walked back to it here, or every profile touch
@@ -562,14 +579,16 @@ public class MainActivity extends AppCompatActivity {
         String prevMsd = prev == null ? "" : msdDefault(prevNet);
         String prevCid = prev == null ? "" : cidDefault(prevNet);
 
+        boolean shape = newNet || !profilePinned();
+
         binding = true;
         etLabel.setText(f[0]);
         etAid.setText(f[1]);
-        if (t(etAip).isEmpty() || t(etAip).equalsIgnoreCase(prevAip)) etAip.setText(f[2]);
+        if (shape && (t(etAip).isEmpty() || t(etAip).equalsIgnoreCase(prevAip))) etAip.setText(f[2]);
         if (newNet || t(etIad).isEmpty()) etIad.setText(f[3]);
         if (newNet || t(etAtc).isEmpty()) etAtc.setText(f[4]);
-        if (t(etMsd).isEmpty() || t(etMsd).equals(prevMsd)) etMsd.setText(msdDefault(net));
-        if (t(etCid).isEmpty() || t(etCid).equalsIgnoreCase(prevCid)) etCid.setText(cidDefault(net));
+        if (shape && (t(etMsd).isEmpty() || t(etMsd).equals(prevMsd))) etMsd.setText(msdDefault(net));
+        if (shape && (t(etCid).isEmpty() || t(etCid).equalsIgnoreCase(prevCid))) etCid.setText(cidDefault(net));
         if (newNet) etAfl.setText("");
         if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
@@ -747,7 +766,8 @@ public class MainActivity extends AppCompatActivity {
      *
      * MSD is switched on for all three by the arming, because the reason to
      * paste a dump is to replay the card's own CSC and only the mag-stripe path
-     * serves it.
+     * serves it. On a pinned card the arm leaves the MSD box alone, so a card
+     * held at 0 stays at 0 and the record is served over EMV instead.
      *
      * The AFL and CID are blanked so the AFL follows msdloc instead of whatever
      * a previous card left behind - a stale AFL passes afl()'s length test and
@@ -828,6 +848,14 @@ public class MainActivity extends AppCompatActivity {
      * The ATC is written as atc - 1 for that reason. A dump with no ATC in it (a
      * Visa dCVV is 3 digits and nothing more) pads to 0000, so the served ATC
      * starts at 0001 rather than wrapping to FFFF.
+     *
+     * MSD AND THE SCRIPT BOX ARE ONLY STAMPED ON AN UNPINNED CARD. A pinned card
+     * has the shape the user chose - MSD 0, CID empty, AIP 0800 - and arming
+     * used to undo it: every CSC keystroke and every dump paste put MSD back to
+     * 1 and the profile's script back into the box. The record and the location
+     * are still written, they are what the tap serves; only the two boxes that
+     * decide HOW it is served are left alone. Picking a script still stamps them,
+     * because the pin is written after the arm in showProfilePicker().
      */
     private boolean armMsdCard(String pan, String exp, String svc, String ddRaw) {
         if (pan == null || pan.length() < 12 || pan.length() > 19) {
@@ -889,10 +917,14 @@ public class MainActivity extends AppCompatActivity {
             return false;
         }
 
+        boolean stamp = !profilePinned();
+
         binding = true;
         etAtc.setText(String.format(java.util.Locale.ROOT, "%04X", atcPrev));
-        etScript.setText(script);
-        etMsd.setText("1");
+        if (stamp) {
+            etScript.setText(script);
+            etMsd.setText("1");
+        }
         binding = false;
         collect();
 
@@ -2037,6 +2069,8 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        // maybeProfile() returns early on a pinned card, so nothing here re-stamps
+        // AIP, MSD, CID or the script. The shape boxes are the user's.
         maybeProfile();
 
         String[] hints = BankDirectory.hintsFor(digits(t(etPan)));
