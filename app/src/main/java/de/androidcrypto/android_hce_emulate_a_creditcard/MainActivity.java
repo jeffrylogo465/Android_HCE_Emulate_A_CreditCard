@@ -59,10 +59,17 @@ public class MainActivity extends AppCompatActivity {
      * A picked profile cannot know the card's own data - the CSC lives on the
      * plastic and nothing derives it - so the known dumps carry it. Without an
      * entry here the DD stays empty and the arm serves CSC 0000.
+     *
+     * THE SERVICE CODE HERE IS A DEFAULT, NOT THE PLASTIC'S. It is stamped into
+     * the track at arm time, so it decides whether the terminal asks for a PIN.
+     * The Amex row is 200 rather than the plastic's 201 on purpose: there is no
+     * 9F17 and no 8E on a clone, so a PIN claim nothing can meet only costs a
+     * keypad press. applyDump() prefers this value for a known PAN and
+     * applyProfile() keeps whatever the user has typed over it.
      */
     private static final String[][] KNOWN = {
             {"5287250568943496", "3105", "201", "14129745"},
-            {"371697209091010",  "2803", "201", "23030057800000"},
+            {"371697209091010",  "2803", "200", "23030057800000"},
     };
 
     /**
@@ -429,6 +436,16 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
+    /** The profile's own MSD default: on for the mag-stripe networks, off for Visa. */
+    private static String msdDefault(String net) {
+        return ("AMEX".equals(net) || "MASTERCARD".equals(net)) ? "1" : "0";
+    }
+
+    /** The profile's own CID default. 80 is a TC in MSD, 40 is a TC in qVSDC. */
+    private static String cidDefault(String net) {
+        return "VISA".equals(net) ? "40" : "80";
+    }
+
     private static String[] knownFor(String pan) {
         if (pan == null) return null;
         for (String[] k : KNOWN) if (k[0].equals(pan)) return k;
@@ -510,49 +527,60 @@ public class MainActivity extends AppCompatActivity {
      * screen came back. armFromFields() is called explicitly by paste, by pick
      * and by seedFromPan().
      *
-     * THE DEFAULTS ARE CONDITIONAL. AIP, IAD, ATC, MSD and CID only land when
-     * the network actually changed or the box is empty. They used to be written
-     * unconditionally, which meant a hand-set 1800 / 0 / 40 was stamped back to
-     * 1880 / 1 / 80 on every save and every rebind - the card could not be held
-     * in EMV mode at all. applyProfile runs with appliedProfile still holding
-     * the previous value, so the comparison is honest.
-     *
-     * The capture is wiped on a network change, so an old PPSE or GPO cannot get
-     * in front of the profile. The script box is only blanked when nothing is
-     * armed.
+     * The capture is wiped so an old PPSE or GPO cannot get in front of the
+     * profile. The script box is only blanked when nothing is armed.
      *
      * The CID is a default, not a card value: 80 is a TC in MSD, 40 is a TC in
-     * qVSDC. It follows the network.
+     * qVSDC. It follows the network while it is untouched.
      *
      * A known dump carries its own expiry, service and DD. Anything else only
      * gets the expiry and service defaults, and no DD, because the CSC is on the
      * plastic and cannot be derived from the number.
+     *
+     * AIP, MSD AND CID ARE ONLY WRITTEN WHEN UNTOUCHED - empty, or still equal
+     * to the previous network's own default. They are card shape, not network
+     * key material, and a card held at 0800 / MSD 0 / CID 40 - the EMV shape -
+     * must not be walked back to 1880 / 1 / 80 by a rebind or a save. Comparing
+     * against empty alone is not enough: bindCard() pre-fills all three, so an
+     * isEmpty() gate would be dead on every rebind. IAD and ATC stay on newNet
+     * because both are genuinely network-specific.
+     *
+     * THE SERVICE CODE IS THE USER'S. KNOWN carries the plastic's 201; a card
+     * held at 200 must not be walked back to it here, or every profile touch
+     * re-arms a PIN claim the card cannot meet.
      */
     private void applyProfile(String pan, String net) {
         String[] f = profileFields(net);
         if (f == null) return;
 
-        boolean newNet = !net.equals(appliedProfile);
+        String prevNet = appliedProfile;
+        boolean newNet = !net.equals(prevNet);
         appliedProfile = net;
+
+        String[] prev = prevNet.isEmpty() ? null : profileFields(prevNet);
+        String prevAip = prev == null ? "" : prev[2];
+        String prevMsd = prev == null ? "" : msdDefault(prevNet);
+        String prevCid = prev == null ? "" : cidDefault(prevNet);
 
         binding = true;
         etLabel.setText(f[0]);
         etAid.setText(f[1]);
-        if (newNet || t(etAip).isEmpty()) etAip.setText(f[2]);
+        if (t(etAip).isEmpty() || t(etAip).equalsIgnoreCase(prevAip)) etAip.setText(f[2]);
         if (newNet || t(etIad).isEmpty()) etIad.setText(f[3]);
         if (newNet || t(etAtc).isEmpty()) etAtc.setText(f[4]);
-        if (newNet || t(etMsd).isEmpty())
-            etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
-        if (newNet || t(etCid).isEmpty()) etCid.setText("VISA".equals(net) ? "40" : "80");
+        if (t(etMsd).isEmpty() || t(etMsd).equals(prevMsd)) etMsd.setText(msdDefault(net));
+        if (t(etCid).isEmpty() || t(etCid).equalsIgnoreCase(prevCid)) etCid.setText(cidDefault(net));
         if (newNet) etAfl.setText("");
         if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
         String[] known = knownFor(pan);
         if (known != null) {
+            String svc = t(etService);
+            if (svc.length() != 3) svc = known[2];
             etExpiry.setText(known[1]);
-            etService.setText(known[2]);
+            etService.setText(svc);
             etDiscretionary.setText(known[3]);
-            etTrack2.setText(pan + "D" + known[1] + known[2] + known[3]);
+            etTrack2.setText(pan + "D" + known[1] + svc + known[3]);
         } else if (t(etExpiry).isEmpty()) {
             etExpiry.setText("3112");
             etService.setText("201");
@@ -725,6 +753,10 @@ public class MainActivity extends AppCompatActivity {
      * a previous card left behind - a stale AFL passes afl()'s length test and
      * points the terminal at a record the skeleton is not in.
      *
+     * THE SERVICE CODE IS NOT TAKEN FROM THE DUMP FOR A KNOWN PAN. The plastic
+     * says 201; KNOWN may say 200 because a clone has no 9F17 and no 8E. Pasting
+     * the real dump must not put the PIN claim back.
+     *
      * The CSC is remembered so a later reseed of the same PAN reuses it instead
      * of falling back to zeros.
      */
@@ -746,12 +778,15 @@ public class MainActivity extends AppCompatActivity {
         dumping = true;
         String rawName = nameFromTrack1(raw);
 
+        String[] known = knownFor(d[0]);
+        String svcOut = known != null ? known[2] : d[2];
+
         binding = true;
         etPan.setText(d[0]);
         etExpiry.setText(d[1]);
-        etService.setText(d[2]);
+        etService.setText(svcOut);
         etDiscretionary.setText(d[3]);
-        etTrack2.setText(d[0] + "=" + d[1] + d[2] + d[3]);
+        etTrack2.setText(d[0] + "=" + d[1] + svcOut + d[3]);
         if (!rawName.isEmpty()) etName.setText(rawName);
         binding = false;
         collect();
@@ -1106,6 +1141,14 @@ public class MainActivity extends AppCompatActivity {
     private void bindCard(int i) {
         binding = true;
         current = i;
+
+        // The fallbacks have to come from the profile, not from a constant. The
+        // untouched test in applyProfile() compares against the network's own
+        // default, so a Visa card whose AIP fell back to a hardcoded 1880 would
+        // read as hand-set and never be corrected to 5800.
+        String net0 = profileFor(digits(prefs.getString(key(i, "pan"), "")));
+        String[] pf0 = net0.isEmpty() ? null : profileFields(net0);
+
         etLabel.setText(prefs.getString(key(i, "label"), ""));
         etName.setText(prefs.getString(key(i, "name"), ""));
         etPan.setText(prefs.getString(key(i, "pan"), ""));
@@ -1114,9 +1157,10 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(prefs.getString(key(i, "discretionary"), ""));
         etTrack2.setText(prefs.getString(key(i, "track2"), ""));
         etAid.setText(prefs.getString(key(i, "aid"), ""));
-        etAip.setText(prefs.getString(key(i, "aip"), "1880"));
+        etAip.setText(prefs.getString(key(i, "aip"), pf0 == null ? "1880" : pf0[2]));
         etAfl.setText(prefs.getString(key(i, "afl"), ""));
-        etCid.setText(prefs.getString(key(i, "cid"), ""));
+        etCid.setText(prefs.getString(key(i, "cid"),
+                pf0 == null ? "" : cidDefault(net0)));
         etAtc.setText(prefs.getString(key(i, "atc"), "001B"));
         etArqc.setText(prefs.getString(key(i, "arqc"), ""));
         etIad.setText(prefs.getString(key(i, "iad"), ""));
@@ -1135,16 +1179,17 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
+        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"),
+                pf0 == null ? 0 : Integer.parseInt(msdDefault(net0)))));
         etScript.setText(prefs.getString(key(i, "script"), ""));
         chkForceTc.setChecked(!"0".equals(prefs.getString(key(i, "forcetc"), "1")));
         binding = false;
         updateCount();
         status("");
 
-        // Seed appliedProfile from the card before the profile calls, or
-        // maybeProfile re-applies the profile on every rebind and stamps the
-        // hand-set AIP, MSD and CID back to the network defaults.
+        // The profile is already the card's own on a bind, so seed appliedProfile
+        // with it: maybeProfile() then returns early and does not re-stamp the
+        // shape fields or wipe the capture every time the screen comes back.
         appliedProfile = profileFor(digits(t(etPan)));
         autoFill();
         maybeProfile();
@@ -1963,7 +2008,25 @@ public class MainActivity extends AppCompatActivity {
     private void onSave() {
         String diff = boxDiff(digits(t(etPan)));
 
+        // syncFieldsFromTrack2() below reads the service back out of the track 2
+        // box, which still holds the plastic's 201, so it undoes a deliberate
+        // edit before anything else runs. Take the field first, then re-assert it
+        // over the track after the sync, so the two agree and the pref keeps what
+        // the user set. The pin does not help here - the sync is not behind it.
+        String svcWanted = t(etService);
+
         syncFieldsFromTrack2();
+
+        if (svcWanted.length() == 3) {
+            String t2 = normaliseTrack2(t(etTrack2));
+            int sep = t2.indexOf('D');
+            if (sep > 0 && t2.length() >= sep + 8) {
+                binding = true;
+                etService.setText(svcWanted);
+                etTrack2.setText(t2.substring(0, sep + 5) + svcWanted + t2.substring(sep + 8));
+                binding = false;
+            }
+        }
 
         if (diff != null) {
             String trackPan = panFromTrack2();
