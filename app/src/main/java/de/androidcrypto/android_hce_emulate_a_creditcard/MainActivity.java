@@ -510,11 +510,19 @@ public class MainActivity extends AppCompatActivity {
      * screen came back. armFromFields() is called explicitly by paste, by pick
      * and by seedFromPan().
      *
-     * The capture is wiped so an old PPSE or GPO cannot get in front of the
-     * profile. The script box is only blanked when nothing is armed.
+     * THE DEFAULTS ARE CONDITIONAL. AIP, IAD, ATC, MSD and CID only land when
+     * the network actually changed or the box is empty. They used to be written
+     * unconditionally, which meant a hand-set 1800 / 0 / 40 was stamped back to
+     * 1880 / 1 / 80 on every save and every rebind - the card could not be held
+     * in EMV mode at all. applyProfile runs with appliedProfile still holding
+     * the previous value, so the comparison is honest.
+     *
+     * The capture is wiped on a network change, so an old PPSE or GPO cannot get
+     * in front of the profile. The script box is only blanked when nothing is
+     * armed.
      *
      * The CID is a default, not a card value: 80 is a TC in MSD, 40 is a TC in
-     * qVSDC. It follows the network and is overwritten on every call.
+     * qVSDC. It follows the network.
      *
      * A known dump carries its own expiry, service and DD. Anything else only
      * gets the expiry and service defaults, and no DD, because the CSC is on the
@@ -524,17 +532,19 @@ public class MainActivity extends AppCompatActivity {
         String[] f = profileFields(net);
         if (f == null) return;
 
+        boolean newNet = !net.equals(appliedProfile);
         appliedProfile = net;
 
         binding = true;
         etLabel.setText(f[0]);
         etAid.setText(f[1]);
-        etAip.setText(f[2]);
-        etIad.setText(f[3]);
-        if (t(etAtc).isEmpty()) etAtc.setText(f[4]);
-        etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
-        etCid.setText("VISA".equals(net) ? "40" : "80");
-        etAfl.setText("");
+        if (newNet || t(etAip).isEmpty()) etAip.setText(f[2]);
+        if (newNet || t(etIad).isEmpty()) etIad.setText(f[3]);
+        if (newNet || t(etAtc).isEmpty()) etAtc.setText(f[4]);
+        if (newNet || t(etMsd).isEmpty())
+            etMsd.setText("AMEX".equals(net) || "MASTERCARD".equals(net) ? "1" : "0");
+        if (newNet || t(etCid).isEmpty()) etCid.setText("VISA".equals(net) ? "40" : "80");
+        if (newNet) etAfl.setText("");
         if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
         String[] known = knownFor(pan);
@@ -549,7 +559,7 @@ public class MainActivity extends AppCompatActivity {
         }
         binding = false;
 
-        wipeCapture(current);
+        if (newNet) wipeCapture(current);
 
         collect();
         adapter.notifyItemChanged(current);
@@ -1096,7 +1106,6 @@ public class MainActivity extends AppCompatActivity {
     private void bindCard(int i) {
         binding = true;
         current = i;
-        appliedProfile = "";
         etLabel.setText(prefs.getString(key(i, "label"), ""));
         etName.setText(prefs.getString(key(i, "name"), ""));
         etPan.setText(prefs.getString(key(i, "pan"), ""));
@@ -1132,6 +1141,11 @@ public class MainActivity extends AppCompatActivity {
         binding = false;
         updateCount();
         status("");
+
+        // Seed appliedProfile from the card before the profile calls, or
+        // maybeProfile re-applies the profile on every rebind and stamps the
+        // hand-set AIP, MSD and CID back to the network defaults.
+        appliedProfile = profileFor(digits(t(etPan)));
         autoFill();
         maybeProfile();
 
