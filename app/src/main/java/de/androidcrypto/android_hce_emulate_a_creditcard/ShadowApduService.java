@@ -174,6 +174,8 @@ public class ShadowApduService extends HostApduService {
 
     private byte[] txnAip;
     private String txnAtc;
+    /** ATC staged for this tap, not yet written. Committed at cryptogram emission. */
+    private String pendingAtc;
     /** Hex, cached with txnAtc so the two can never disagree. */
     private String txnAc;
     private boolean cryptogramSent;
@@ -388,14 +390,23 @@ public class ShadowApduService extends HostApduService {
             if (!cur.isEmpty()) atc = Integer.parseInt(cur, 16);
         } catch (Exception ignored) { }
         atc = (atc + 1) & 0xFFFF;
-        String h = String.format("%04X", atc);
-        put("atc", h);
-        return h;
+        pendingAtc = String.format("%04X", atc);
+        return pendingAtc;
     }
 
     private String txnAtc() {
         if (txnAtc == null) txnAtc = nextAtc();
         return txnAtc;
+    }
+
+    /** Write the staged ATC synchronously, at cryptogram emission and only there. */
+    private void commitAtc() {
+        if (pendingAtc == null) return;
+        putNow("atc", pendingAtc);
+    }
+
+    private void putNow(String k, String v) {
+        prefs().edit().putString(sel() + k, v).commit();
     }
 
     private String txnAcHex() {
@@ -423,6 +434,7 @@ public class ShadowApduService extends HostApduService {
 
         txnAip = null;
         txnAtc = null;
+        pendingAtc = null;
         txnAc = null;
         cryptogramSent = false;
         scriptHits = 0;
@@ -1015,6 +1027,7 @@ public class ShadowApduService extends HostApduService {
                     tap("-- script served the GPO | ac in gpo: "
                             + (cryptogramSent ? "yes cid " + gpoCid
                                               : "no, it comes in GENERATE AC"));
+                    if (cryptogramSent) commitAtc();
                 }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
@@ -1245,6 +1258,7 @@ public class ShadowApduService extends HostApduService {
                     tlv(0x9F36, hex(atc)));
         }
 
+        commitAtc();
         watchForStall();
         return cat(tlv(0x77, body), SW_OK);
     }
@@ -1681,6 +1695,7 @@ public class ShadowApduService extends HostApduService {
         }
 
         body = cat(body, tlv(0x9F36, atcB));
+        commitAtc();
         return cat(tlv(0x77, body), SW_OK);
     }
 
