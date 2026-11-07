@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="true" />
+
+    <uses-feature
+        android:name="android.hardware.nfc.hce"
+        android:required="true" />
+
+    <!--
+        allowBackup = FALSE.
+
+        hce_card.xml holds every PAN, every track 2 and any MK-AC found, all in
+        plaintext, in the app-private directory. With backup on, the whole card
+        wallet leaves the device into Google's cloud and returns on any restore
+        or device transfer - on a phone you are cloning cards with, that is the
+        one dataset worth keeping local.
+
+        The two @xml references are kept because they document intent if backup
+        is ever turned back on; with allowBackup false neither is consulted.
+    -->
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Android_HCE_Emulate_A_CreditCard"
+        tools:targetApi="31">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ReaderActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".CaptureActivity"
+            android:exported="false" />
+
+        <!-- Only ONE HCE service may be declared here. If you ever add the
+             Mastercard variant back, it needs its own aid-group with different
+             AIDs or the two will fight over the same ones. -->
+        <service
+            android:name=".ShadowApduService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
+                <!-- category required!!! this was not included in official android HCE documentation -->
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apduservice" />
+        </service>
+
+    </application>
+</manifest>

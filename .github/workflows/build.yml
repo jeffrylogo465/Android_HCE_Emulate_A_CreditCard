@@ -1,0 +1,88 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK platform 34
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$(command -v sdkmanager)"; fi
+          echo "using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - name: Verify the platform jar carries the HCE classes
+        run: |
+          ls -1 "$ANDROID_HOME/platforms" || true
+          echo "--- cardEmulation entries in android-34/android.jar:"
+          unzip -l "$ANDROID_HOME/platforms/android-34/android.jar" | grep -c 'cardEmulation' || true
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # Runs before the build on purpose. assembleDebug only proves the code
+      # compiles; these tests are the ones that prove the bytes are well formed,
+      # and a malformed directory or FCI is a green build that a terminal still
+      # refuses. Failing here stops the APK being published as an artifact.
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      # Gradle writes an assertion failure to the log and nowhere else, and the
+      # log needs a sign-in to read. This republishes every failing test as an
+      # ::error:: annotation, which is visible logged out, and dumps the message
+      # so the reason travels with the name.
+      - name: Report test failures
+        if: failure()
+        run: |
+          shopt -s nullglob
+          found=0
+          for f in app/build/test-results/testDebugUnitTest/*.xml; do
+            found=1
+            cls=$(basename "$f" .xml)
+            grep -B1 '<failure' "$f" \
+              | grep '<testcase' \
+              | sed -E 's/.*name="([^"]*)".*/\1/' \
+              | while read -r name; do
+                  echo "::error title=${cls}::${name}"
+                done
+            echo "----- ${cls} -----"
+            grep -A3 '<failure' "$f" | head -80 || true
+          done
+          if [ "$found" = 0 ]; then
+            echo "::error::no test XML produced - the task failed before running tests"
+          fi
+
+      # Reports are only interesting when the tests failed, and the raw output is
+      # unreadable on a phone. Without this a red run from mobile says nothing.
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
