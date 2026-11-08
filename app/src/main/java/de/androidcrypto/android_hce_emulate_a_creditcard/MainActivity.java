@@ -436,14 +436,28 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    /** The profile's own MSD default: on for the mag-stripe networks, off for Visa. */
+    /**
+     * The profile's own MSD default. Off for Mastercard and Visa, on for Amex.
+     *
+     * Mastercard is capable of MSD, but the record and script path is a replay:
+     * the script carries the cryptogram, so ccc() never runs and the ATC is
+     * driven by the DD field instead of by the tap. qVSDC is the default
+     * because it is what a modern terminal does and what the ATC patch is
+     * about. Amex stays on MSD - ExpressPay has no qVSDC shape here.
+     */
     private static String msdDefault(String net) {
-        return ("AMEX".equals(net) || "MASTERCARD".equals(net)) ? "1" : "0";
+        return "AMEX".equals(net) ? "1" : "0";
     }
 
-    /** The profile's own CID default. 80 is a TC in MSD, 40 is a TC in qVSDC. */
+    /**
+     * The profile's own CID default. 80 is an ARQC, 40 is a TC.
+     *
+     * 40 everywhere but Amex: a TC is approved offline and never verified, so
+     * a card with no real issuer key still gets a receipt. Amex keeps 80
+     * because its MSD path is script-driven and the script supplies the AC.
+     */
     private static String cidDefault(String net) {
-        return "VISA".equals(net) ? "40" : "80";
+        return "AMEX".equals(net) ? "80" : "40";
     }
 
     private static String[] knownFor(String pan) {
@@ -540,9 +554,6 @@ public class MainActivity extends AppCompatActivity {
      *
      * The capture is wiped so an old PPSE or GPO cannot get in front of the
      * profile. The script box is only blanked when nothing is armed.
-     *
-     * The CID is a default, not a card value: 80 is a TC in MSD, 40 is a TC in
-     * qVSDC. It follows the network while it is untouched.
      *
      * A known dump carries its own expiry, service and DD. Anything else only
      * gets the expiry and service defaults, and no DD, because the CSC is on the
@@ -2294,6 +2305,19 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         claimPaymentRole();
         maybeAskDefault();
+        // The service commits the ATC, but this activity holds the same value in
+        // a box and rewrites it on every collect() - including onPause, which a
+        // tap triggers. That stomped each committed counter back to its old value
+        // and the next tap reused it. "atccommitted" is only ever written by the
+        // service, so it is the one value the box cannot overwrite.
+        String committedAtc = prefs.getString(key(current, "atccommitted"), "");
+        if (!committedAtc.isEmpty() && !committedAtc.equals(t(etAtc))) {
+            binding = true;
+            etAtc.setText(committedAtc);
+            binding = false;
+            collect();
+        }
+
         if (suppressResumeStatus) {
             suppressResumeStatus = false;
             return;

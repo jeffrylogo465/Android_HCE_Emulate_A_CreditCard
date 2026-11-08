@@ -403,6 +403,7 @@ public class ShadowApduService extends HostApduService {
     private void commitAtc() {
         if (pendingAtc == null) return;
         putNow("atc", pendingAtc);
+        putNow("atccommitted", pendingAtc);
     }
 
     private void putNow(String k, String v) {
@@ -1775,6 +1776,10 @@ public class ShadowApduService extends HostApduService {
         tap("-- genac body=" + body.length + "B iad=" + hex(iad).length
                 + "B arqc=" + ac.length + "B");
 
+        // The cryptogram is in this response, so the counter is spent here. This
+        // is the EMV exit - ccc() is only reached in MSD, where the AC comes back
+        // as a CVC3 in a 770A body instead.
+        commitAtc();
         return cat(tlv(0x77, body), SW_OK);
     }
 
