@@ -264,7 +264,7 @@ public class MainActivity extends AppCompatActivity {
         snapHelper.attachToRecyclerView(pager);
 
         loadAll();
-        bindCard(Math.min(Math.max(prefs.getInt("selected", 0), 0), cards.size() - 1));
+        bindCard(Math.min(Math.max(intPref("selected", 0), 0), cards.size() - 1));
         pager.post(this::applyTransforms);
 
         pager.addOnScrollListener(new RecyclerView.OnScrollListener() {
@@ -283,7 +283,7 @@ public class MainActivity extends AppCompatActivity {
                     collect();
                     current = pos;
                     bindCard(pos);
-                    prefs.edit().putInt("selected", pos).apply();
+                    prefs.edit().putString("selected", String.valueOf(pos)).apply();
                 }
             }
         });
@@ -1098,6 +1098,37 @@ public class MainActivity extends AppCompatActivity {
         return s.replaceAll("[^0-9]", "");
     }
 
+    /**
+     * A pref that used to be an int, read as one.
+     *
+     * 'selected', 'msd' and 'usescript' are strings now because step 5 moves the
+     * store to EncryptedSharedPreferences and the service reads them through a
+     * getString helper - an int stored under those keys throws there. This reads
+     * the string form, and falls back to getInt() so cards already written by an
+     * older build keep their values instead of silently snapping to the default.
+     *
+     * getString() is used first on purpose: it is one key, not a getAll(), which
+     * is the whole point of the conversion.
+     */
+    private int intPref(String k, int def) {
+        String v;
+        try {
+            v = prefs.getString(k, null);
+        } catch (ClassCastException oldInt) {
+            try {
+                return prefs.getInt(k, def);
+            } catch (ClassCastException alsoNotInt) {
+                return def;
+            }
+        }
+        if (v == null || v.isEmpty()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
     private String panFromTrack2() {
         String track2 = normaliseTrack2(t(etTrack2));
         int d = track2.indexOf('D');
@@ -1153,11 +1184,11 @@ public class MainActivity extends AppCompatActivity {
             c.pan = prefs.getString(key(i, "pan"), "");
             c.expiry = prefs.getString(key(i, "expiry"), "");
             c.aid = prefs.getString(key(i, "aid"), "");
-            c.msd = prefs.getInt(key(i, "msd"), 0);
+            c.msd = intPref(key(i, "msd"), 0);
             cards.add(c);
 
-            e.putInt(key(i, "usescript"),
-                    armedLines(prefs.getString(key(i, "script"), "")) > 0 ? 1 : 0);
+            e.putString(key(i, "usescript"),
+                    armedLines(prefs.getString(key(i, "script"), "")) > 0 ? "1" : "0");
         }
         e.apply();
         if (cards.isEmpty()) cards.add(new CardAdapter.CardModel());
@@ -1189,11 +1220,11 @@ public class MainActivity extends AppCompatActivity {
         e.putString(key(i, "cdol2"), t(etCdol2).toUpperCase());
         e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
         e.putString(key(i, "script"), t(etScript));
-        e.putInt(key(i, "msd"), t(etMsd).startsWith("1") ? 1 : 0);
+        e.putString(key(i, "msd"), t(etMsd).startsWith("1") ? "1" : "0");
         e.putString(key(i, "forcetc"), chkForceTc.isChecked() ? "1" : "0");
-        e.putInt(key(i, "usescript"), armedLines(t(etScript)) > 0 ? 1 : 0);
+        e.putString(key(i, "usescript"), armedLines(t(etScript)) > 0 ? "1" : "0");
         e.putInt("card_count", cards.size());
-        e.putInt("selected", i);
+        e.putString("selected", String.valueOf(i));
         e.apply();
 
         if (i < cards.size()) {
@@ -1247,7 +1278,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"),
+        etMsd.setText(String.valueOf(intPref(key(i, "msd"),
                 pf0 == null ? 0 : Integer.parseInt(msdDefault(net0)))));
         etScript.setText(prefs.getString(key(i, "script"), ""));
         chkForceTc.setChecked(!"0".equals(prefs.getString(key(i, "forcetc"), "1")));
@@ -1266,7 +1297,7 @@ public class MainActivity extends AppCompatActivity {
         // armed values back so a rebind does not disarm the card.
         binding = true;
         etScript.setText(prefs.getString(key(i, "script"), ""));
-        etMsd.setText(String.valueOf(prefs.getInt(key(i, "msd"), 0)));
+        etMsd.setText(String.valueOf(intPref(key(i, "msd"), 0)));
         binding = false;
         collect();
     }
@@ -1430,7 +1461,7 @@ public class MainActivity extends AppCompatActivity {
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(p)) e.remove(k);
         }
-        e.putInt(key(i, "msd"), 0);
+        e.putString(key(i, "msd"), "0");
         e.apply();
     }
 
@@ -2179,7 +2210,7 @@ public class MainActivity extends AppCompatActivity {
         current = cards.size() - 1;
         pager.smoothScrollToPosition(current);
         bindCard(current);
-        prefs.edit().putInt("selected", current).apply();
+        prefs.edit().putString("selected", String.valueOf(current)).apply();
     }
 
     private void onDelete() {
@@ -2218,7 +2249,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         e.putInt("card_count", n - 1);
-        e.putInt("selected", Math.max(0, Math.min(index, n - 2)));
+        e.putString("selected", String.valueOf(Math.max(0, Math.min(index, n - 2))));
         e.apply();
 
         cards.clear();
@@ -2444,7 +2475,7 @@ public class MainActivity extends AppCompatActivity {
 
         adapter.notifyItemChanged(current);
         pager.smoothScrollToPosition(current);
-        prefs.edit().putInt("selected", current).apply();
+        prefs.edit().putString("selected", String.valueOf(current)).apply();
 
         int recs = recordCountOnCard();
         status(recs == 0
