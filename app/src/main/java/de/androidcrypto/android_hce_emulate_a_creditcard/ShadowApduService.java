@@ -33,7 +33,18 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
     private static final String DEFAULT_AIP = "1880";
-    private static final byte AIP_KEEP_MASK = (byte) 0xD9;
+
+    /**
+     * Keeps RFU 0x80, CV 0x10, TRM 0x08. Clears SDA 0x40, DDA 0x20, issuer
+     * auth 0x04, on-device CVM 0x02 and CDA 0x01 - none of the five is
+     * answerable by a clone with no certificates, and an AIP that claims them
+     * buys a failed ODA attempt and a TVR bit instead of a clean start.
+     *
+     * The old value was 0xD9 = 0x80|0x40|0x10|0x08|0x01, which kept exactly
+     * SDA and CDA - the two a clone provably cannot perform - and cleared only
+     * DDA.
+     */
+    private static final byte AIP_KEEP_MASK = (byte) 0x98;
 
     /**
      * MSD AIP mask, MASTERCARD PATH ONLY.
@@ -1156,6 +1167,9 @@ public class ShadowApduService extends HostApduService {
             boolean capMsd = (outer == 0x80);
 
             if (capMsd == msd) {
+                // A captured card's own ODA bits survive a replay untouched
+                // otherwise, and every one of them is a check we cannot pass.
+                if (!capMsd) Emv.clearOda(raw);
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
