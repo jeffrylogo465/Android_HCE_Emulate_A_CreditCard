@@ -31,6 +31,7 @@ import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
+    /** The plaintext file. Prefs owns it now; kept here as documentation. */
     private static final String PREF = "hce_card";
     private static final int MAX_CARDS = 20;
     private static final int REQ_CLONE = 4711;
@@ -215,7 +216,7 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
-        prefs = getSharedPreferences(PREF, MODE_PRIVATE);
+        prefs = Prefs.get(this);
 
         pager = findViewById(R.id.pager);
         txtCount = findViewById(R.id.txtCount);
