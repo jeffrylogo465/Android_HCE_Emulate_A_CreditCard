@@ -1010,7 +1010,10 @@ public class MainActivity extends AppCompatActivity {
         etAtc.setText(String.format(java.util.Locale.ROOT, "%04X", atcPrev));
         if (stamp) {
             etScript.setText(script);
-            etMsd.setText("1");
+            // Was hardcoded "1", which made every new card MSD by default and
+            // ignored the network. Mastercard and Visa want 0 here; only Amex
+            // is genuinely magstripe.
+            etMsd.setText(msdDefault(net));
         }
         binding = false;
         collect();
