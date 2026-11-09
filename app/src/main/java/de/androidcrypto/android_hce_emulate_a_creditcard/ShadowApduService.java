@@ -394,15 +394,66 @@ public class ShadowApduService extends HostApduService {
         return s.length() > 16 ? s.substring(0, 16) : s;
     }
 
+    /**
+     * Highest ATC ever seen from the plastic. Our counter never drops below it.
+     *
+     * A clone that starts at 001B and counts up regresses against any card that
+     * has been used, and the issuer's ATC-window check declines a regression no
+     * matter how good the cryptogram is. This is the floor that stops it.
+     */
+    private int atcFloor() {
+        String f = p("atcfloor", "").replaceAll("[^0-9A-Fa-f]", "");
+        if (f.length() != 4) return 0;
+        try { return Integer.parseInt(f, 16); } catch (NumberFormatException e) { return 0; }
+    }
+
     private String nextAtc() {
-        int atc = 0x001B;
+        int cur = 0x001B;
         try {
-            String cur = p("atc", "001B").replaceAll("[^0-9A-Fa-f]", "");
-            if (!cur.isEmpty()) atc = Integer.parseInt(cur, 16);
+            String c = p("atc", "001B").replaceAll("[^0-9A-Fa-f]", "");
+            if (c.length() == 4) cur = Integer.parseInt(c, 16);
         } catch (Exception ignored) { }
-        atc = (atc + 1) & 0xFFFF;
-        pendingAtc = String.format("%04X", atc);
+        int next = Math.max(cur + 1, atcFloor() + 1);
+        pendingAtc = String.format("%04X", next & 0xFFFF);
         return pendingAtc;
+    }
+
+    /**
+     * Raise the ATC floor from the current capture, if it carries one.
+     *
+     * Runs on every PPSE and only ever raises, so re-reading the plastic after
+     * using it keeps the floor current without a sync button to forget about.
+     * A commit() only happens when the value actually moves.
+     */
+    private void seedAtcFromCapture() {
+        byte[] atc = null;
+        byte[] g = rawGpo();
+        if (g != null) atc = findTag(g, 0x9F36);
+        if (atc == null) {
+            byte[] r = rawRec(1, 1);
+            if (r != null) atc = findTag(r, 0x9F36);
+        }
+        if (atc == null || atc.length != 2) return;
+
+        int seen = ((atc[0] & 0xFF) << 8) | (atc[1] & 0xFF);
+        if (seen > atcFloor()) {
+            putNow("atcfloor", bytesToHex(atc));
+            tap("-- atc floor raised to " + bytesToHex(atc) + " from the capture");
+        }
+    }
+
+    /** Name a stale counter at tap time, because it is otherwise silent. */
+    private void warnIfAtcStale() {
+        int floor = atcFloor();
+        if (floor == 0) return;
+        int cur;
+        try {
+            cur = Integer.parseInt(p("atc", "0").replaceAll("[^0-9A-Fa-f]", ""), 16);
+        } catch (Exception e) { return; }
+        if (cur + 0x10 < floor) {
+            tap("!! atc " + String.format("%04X", cur) + " trails the card's "
+                    + String.format("%04X", floor) + " by more than 0x10");
+        }
     }
 
     private String txnAtc() {
@@ -975,6 +1026,8 @@ public class ShadowApduService extends HostApduService {
                         tapLog.setLength(0);
                         resetTransaction();
                         sawPpse = true;
+                        seedAtcFromCapture();
+                        warnIfAtcStale();
                         termLog("=== tap "
                                 + new java.text.SimpleDateFormat("HH:mm:ss",
                                         java.util.Locale.US).format(new java.util.Date())
@@ -984,7 +1037,9 @@ public class ShadowApduService extends HostApduService {
                                 + " | script " + n + " line(s), gate="
                                 + (useScript() ? "ON" : "OFF")
                                 + " | msd=" + isMsd()
-                                + " | forcetc=" + forceOfflineTc());
+                                + " | forcetc=" + forceOfflineTc()
+                                + " | atc=" + p("atc", "001B")
+                                + " floor=" + p("atcfloor", "-"));
                         if (isMsd()) msdSanity();
                         popup(nameLine());
                     }
