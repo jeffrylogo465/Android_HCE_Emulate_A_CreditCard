@@ -310,12 +310,19 @@ public class ShadowApduService extends HostApduService {
     }
 
     private String sel() {
-        return "card" + prefs().getInt("selected", 0) + "_";
+        return "card" + p("selected", "0") + "_";
     }
 
+    /**
+     * A pref value, or the default.
+     *
+     * getString, not getAll().get(). getAll() decrypts every value in the file
+     * to build a map, and this is called dozens of times per tap - which was
+     * free on a plaintext store and is not on an encrypted one. It only works
+     * now because every key read here is stored as a string.
+     */
     private String p(String k, String d) {
-        Object o = prefs().getAll().get(sel() + k);
-        String v = (o == null) ? null : o.toString();
+        String v = prefs().getString(sel() + k, null);
         return (v == null || v.isEmpty()) ? d : v;
     }
 
@@ -667,12 +674,8 @@ public class ShadowApduService extends HostApduService {
 
     private boolean useScript() {
         if (p("script", "").trim().isEmpty()) return scriptLines() > 0;
-
-        Object o = prefs().getAll().get(sel() + "usescript");
-        if (o instanceof Number) return ((Number) o).intValue() != 0;
-        if (o == null) return true;
-        String v = o.toString().trim();
-        return v.equals("1") || v.equalsIgnoreCase("true") || v.equalsIgnoreCase("on");
+        String v = p("usescript", "1").trim();
+        return !v.equals("0");
     }
 
     private int scriptLines() {
