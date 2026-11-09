@@ -11,6 +11,7 @@ import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -196,6 +197,7 @@ public class EmvTest {
      * Contiguous records collapse into ONE entry spanning first to last.
      *
      * The last byte is the run end, not the run start - 1 to 3 is 08 01 03 00.
+     * This is the only case where first and last differ.
      */
     @Test
     public void aflCollapsesContiguousRecords() {
@@ -203,11 +205,17 @@ public class EmvTest {
         assertArrayEquals(Emv.hex("08010300"), a);
     }
 
-    /** A gap starts a new entry, or the terminal reads a record that is absent. */
+    /**
+     * A gap starts a new entry, or the terminal reads a record that is absent.
+     *
+     * BOTH entries here are single-record, so each encodes first == last: record
+     * 1 alone is 08 01 01 00 and record 3 alone is 08 03 03 00. The second
+     * entry is not 08 01 03 00 - that would claim a run of 1 to 3.
+     */
     @Test
     public void aflSplitsOnAGap() {
         byte[] a = Emv.afl(Arrays.asList(new int[]{1, 1}, new int[]{1, 3}));
-        assertArrayEquals(Emv.hex("0801010008010300"), a);
+        assertArrayEquals(Emv.hex("0801010008030300"), a);
     }
 
     /** Every entry is four bytes: SFI/rec-to-rec/none. */
@@ -229,8 +237,17 @@ public class EmvTest {
      */
     @Test
     public void everyAdvertisedAidHasAFilter() throws Exception {
-        String xml = new String(Files.readAllBytes(
-                Paths.get("src/main/res/xml/apduservice.xml")), StandardCharsets.UTF_8);
+        String xml = null;
+        for (String root : new String[]{"src/main/res/xml/apduservice.xml",
+                                        "app/src/main/res/xml/apduservice.xml"}) {
+            Path p = Paths.get(root);
+            if (Files.exists(p)) {
+                xml = new String(Files.readAllBytes(p), StandardCharsets.UTF_8);
+                break;
+            }
+        }
+        assertNotNull("apduservice.xml not found from "
+                + Paths.get("").toAbsolutePath(), xml);
 
         Set<String> filters = new HashSet<>();
         Matcher f = Pattern.compile("aid-filter android:name=\"([0-9A-Fa-f]+)\"").matcher(xml);
