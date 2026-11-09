@@ -27,6 +27,7 @@ import android.widget.Toast;
  *   - GPO framing disagreeing with the MSD flag (the capture is thrown away and
  *     the built path runs)
  *   - no records at all (terminal gets one synthetic and 6A83 after it)
+ *   - an ATC behind the card's own (the issuer declines on the window check)
  *
  * The MSD line also used to throw: 'msd' is written with putInt and this screen
  * read it with getString, which SharedPreferences does not coerce.
@@ -35,7 +36,7 @@ public class CaptureActivity extends Activity {
 
     public static final String EXTRA_CARD_INDEX = "card_index";
 
-    /** Must match HceCcEmulationServiceVisa.TERM_LOG. */
+    /** Must match ShadowApduService.TERM_LOG. */
     private static final String TERM_LOG = "term_log.txt";
 
     private SharedPreferences prefs;
@@ -67,7 +68,8 @@ public class CaptureActivity extends Activity {
         findViewById(R.id.btnCapClear).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 clear();
-                Toast.makeText(CaptureActivity.this, "Cleared capture and tap log", Toast.LENGTH_SHORT).show();
+                Toast.makeText(CaptureActivity.this, "Cleared capture, ATC and tap log",
+                        Toast.LENGTH_SHORT).show();
                 txtInfo.setText(build());
             }
         });
@@ -108,11 +110,25 @@ public class CaptureActivity extends Activity {
         }
     }
 
+    /**
+     * Drop the capture AND the counter state.
+     *
+     * The ATC floor belongs to the plastic that was in the slot. Leaving it
+     * behind means a new card in a recycled slot inherits a stranger's counter
+     * and either regresses or jumps a thousand ahead for no reason. atc and
+     * atccommitted go with it for the same reason.
+     *
+     * The terminal log is still one global file, so this takes every card's tap
+     * history with it. That is a known wart, not a decision.
+     */
     private void clear() {
         SharedPreferences.Editor e = prefs.edit();
         for (String k : prefs.getAll().keySet()) {
             if (k.startsWith(slot + "cap_") || k.startsWith("cap_")) e.remove(k);
         }
+        e.remove(slot + "atc");
+        e.remove(slot + "atccommitted");
+        e.remove(slot + "atcfloor");
         e.apply();
         try {
             java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
@@ -157,7 +173,7 @@ public class CaptureActivity extends Activity {
     }
 
     /**
-     * NEW. Every dependency the tap needs, with the missing ones counted.
+     * Every dependency the tap needs, with the missing ones counted.
      * Nothing here is guessed: it is read straight out of the slot.
      */
     private String readiness() {
@@ -222,6 +238,24 @@ public class CaptureActivity extends Activity {
             bad++;
         } else {
             sb.append("RECORDS   : ").append(recs).append(" captured\n");
+        }
+
+        // The counter, against the floor the capture set. A clone behind the
+        // plastic regresses and the issuer declines on the window check.
+        String atcCur = hexOnly(get("atc"));
+        String atcFloor = hexOnly(get("atcfloor"));
+        if (atcFloor.isEmpty()) {
+            sb.append("ATC       : no floor captured - counter starts at 001B\n");
+        } else {
+            sb.append("ATC       : next ").append(atcCur.isEmpty() ? "001B" : atcCur)
+              .append("   floor ").append(atcFloor).append('\n');
+            try {
+                if (Integer.parseInt(atcCur.isEmpty() ? "001B" : atcCur, 16) + 0x10
+                        < Integer.parseInt(atcFloor, 16)) {
+                    sb.append("            <- BEHIND the card, re-read the plastic\n");
+                    bad++;
+                }
+            } catch (NumberFormatException ignored) { }
         }
 
         String cid = get("cid").toUpperCase();
