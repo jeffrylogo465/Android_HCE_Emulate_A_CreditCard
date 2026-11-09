@@ -1,7 +1,5 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
@@ -203,27 +201,16 @@ public class ShadowApduService extends HostApduService {
     private String lastCid = "";
 
     private boolean sawError;
+    /** Warn-once guards: these fields are read several times per tap. */
+    private boolean psnWarned;
+    private boolean expiryWarned;
 
-    private static final String TERM_LOG = "term_log.txt";
-
+    /**
+     * Buffered, per slot. TapLog holds the lines and writes them once when the
+     * tap ends - the old version opened a file per APDU, on the binder thread.
+     */
     private void termLog(String s) {
-        try {
-            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
-            java.io.FileWriter w = new java.io.FileWriter(f, true);
-            w.write(s + "\n");
-            w.close();
-
-            if (f.length() > 60000) {
-                long keep = 30000;
-                byte[] buf = new byte[(int) keep];
-                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
-                raf.seek(f.length() - keep);
-                raf.readFully(buf);
-                raf.setLength(0);
-                raf.write(buf);
-                raf.close();
-            }
-        } catch (Throwable ignored) { }
+        TapLog.append(this, sel(), s);
     }
 
     private void tap(String s) {
@@ -382,12 +369,36 @@ public class ShadowApduService extends HostApduService {
         return s.isEmpty() ? "4111111111111111" : s;
     }
 
+    /**
+     * PAN sequence number, two digits.
+     *
+     * PSN is concatenated with the PAN and the rightmost sixteen nibbles of that
+     * pair become the ICC master key input. A truncated or padded PSN therefore
+     * derives a completely different key, and the only symptom is a wrong ARQC -
+     * which reads as a wrong master key and sends you off brute-forcing a key
+     * that was correct all along.
+     */
     private String psn() {
-        String s = p("psn", "00").replaceAll("[^0-9]", "");
-        if (s.isEmpty()) return "00";
-        if (s.length() > 2) s = s.substring(0, 2);
-        if (s.length() == 1) s = "0" + s;
-        return s;
+        String raw = p("psn", "00").replaceAll("[^0-9]", "");
+
+        if (raw.isEmpty()) {
+            if (!psnWarned) tap("!! psn is empty - using 00");
+            psnWarned = true;
+            return "00";
+        }
+        if (raw.length() == 1) {
+            if (!psnWarned) tap("!! psn \"" + raw + "\" is one digit - padding to 0" + raw);
+            psnWarned = true;
+            return "0" + raw;
+        }
+        if (raw.length() > 2) {
+            String cut = raw.substring(0, 2);
+            if (!psnWarned) tap("!! psn \"" + raw + "\" is " + raw.length()
+                    + " digits - truncating to " + cut);
+            psnWarned = true;
+            return cut;
+        }
+        return raw;
     }
 
     private String labelText() {
@@ -425,6 +436,10 @@ public class ShadowApduService extends HostApduService {
      * Runs on every PPSE and only ever raises, so re-reading the plastic after
      * using it keeps the floor current without a sync button to forget about.
      * A commit() only happens when the value actually moves.
+     *
+     * The GENERATE AC capture is the last resort: 9F36 only ever appears there
+     * on a card whose GPO and record both omit it, which is what the bundled
+     * reader app stages.
      */
     private void seedAtcFromCapture() {
         byte[] atc = null;
@@ -433,6 +448,10 @@ public class ShadowApduService extends HostApduService {
         if (atc == null) {
             byte[] r = rawRec(1, 1);
             if (r != null) atc = findTag(r, 0x9F36);
+        }
+        if (atc == null) {
+            byte[] ga = cap("rawgenac");
+            if (ga != null) atc = findTag(ga, 0x9F36);
         }
         if (atc == null || atc.length != 2) return;
 
@@ -507,6 +526,8 @@ public class ShadowApduService extends HostApduService {
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
         sawError = false;
+        psnWarned = false;
+        expiryWarned = false;
         capturedIad = null;
         gpoCid = "";
     }
@@ -899,17 +920,41 @@ public class ShadowApduService extends HostApduService {
         out.write(0x00);
     }
 
+    /**
+     * YYMMDD, six digits.
+     *
+     * Every branch below that invents a digit is a guess, and a wrong expiry in
+     * track 2 is a decline at the issuer with no local symptom. The last resort
+     * is 311201 - a card expiring in December 2031 - which is plausible enough
+     * to pass unnoticed, so it is worth saying out loud.
+     */
     private String expiry6() {
         String d = p("expiry", "3112").replaceAll("[^0-9]", "");
+
         if (d.length() >= 6) return d.substring(0, 6);
-        if (d.length() == 5) return d.substring(0, 4) + "01";
-        if (d.length() == 4) return d + "01";
+
+        if (d.length() == 4) {
+            if (!expiryWarned) tap("!! expiry \"" + d + "\" has no day - using " + d + "01");
+            expiryWarned = true;
+            return d + "01";
+        }
+        if (d.length() == 5) {
+            String out = d.substring(0, 4) + "01";
+            if (!expiryWarned) tap("!! expiry \"" + d + "\" is five digits - using " + out);
+            expiryWarned = true;
+            return out;
+        }
         if (d.length() == 2) {
             String yy = String.format("%02d", Calendar.getInstance().get(Calendar.YEAR) % 100);
             int v = Integer.parseInt(d);
-            if (v >= 1 && v <= 12) return yy + d + "01";
-            return d + "0101";
+            String out = (v >= 1 && v <= 12) ? yy + d + "01" : d + "0101";
+            if (!expiryWarned) tap("!! expiry \"" + d + "\" is a bare month - using " + out);
+            expiryWarned = true;
+            return out;
         }
+
+        if (!expiryWarned) tap("!! expiry \"" + d + "\" unusable - using 311201");
+        expiryWarned = true;
         return "311201";
     }
 
@@ -2017,12 +2062,12 @@ public class ShadowApduService extends HostApduService {
         resetTransaction();
 
         if (!t.isEmpty()) termLog("!! verdict: " + v);
+        TapLog.flush(this);
 
         if (!t.isEmpty()) {
-            try {
-                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("tap log", t));
-            } catch (Exception ignored) { }
+            // No clipboard write here any more: it fired on every tap and pushed
+            // a full log, PAN included, into whatever app you pasted into next.
+            // CaptureActivity's copy button is the explicit route.
             try {
                 prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
             } catch (Exception ignored) { }
