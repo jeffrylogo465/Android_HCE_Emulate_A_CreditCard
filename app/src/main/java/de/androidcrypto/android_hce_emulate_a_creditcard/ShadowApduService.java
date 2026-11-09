@@ -1,6 +1,5 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
-import android.content.Context;
 import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
@@ -305,8 +304,16 @@ public class ShadowApduService extends HostApduService {
         return (s == null || s.isEmpty()) ? null : hex(s);
     }
 
+    /**
+     * The store, through the one factory.
+     *
+     * Prefs.get() hands back the encrypted file, or the plaintext mirror when
+     * the Keystore is unavailable. It caches, so the Keystore is not touched
+     * per call - which matters here because this runs on the binder thread
+     * dozens of times per tap.
+     */
     private SharedPreferences prefs() {
-        return getSharedPreferences("hce_card", Context.MODE_PRIVATE);
+        return Prefs.get(this);
     }
 
     private String sel() {
@@ -2076,6 +2083,6 @@ public class ShadowApduService extends HostApduService {
             } catch (Exception ignored) { }
             popup(v);
         }
-        Log.d("HCE", "onDeactivated reason=" + reason + " | " + v);
+        Log.d("HCE", "onHCE" + "" + " | " + v);
     }
 }
