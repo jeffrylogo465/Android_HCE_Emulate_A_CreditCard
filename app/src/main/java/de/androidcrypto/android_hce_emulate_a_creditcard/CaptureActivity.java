@@ -51,7 +51,7 @@ public class CaptureActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_capture);
-        prefs = getSharedPreferences("hce_card", MODE_PRIVATE);
+        prefs = Prefs.get(this);
         txtInfo = (TextView) findViewById(R.id.txtCapture);
 
         resolveSlot();
