@@ -21,6 +21,12 @@ public final class Profiles {
     private static final String AIP_MC = "1880";
 
     // Visa 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM.
+    //
+    // qVSDC STAYS SET even though 0x40 is also the SDA bit and no certificate
+    // exists to satisfy SDA. A Visa kernel needs qVSDC or it rejects the app, so
+    // the bit cannot be cleared the way Mastercard's can. The consequence is a
+    // failed ODA attempt, the TVR bit, and the CTQ's b6 sending the tap online -
+    // which is why the CID below follows the key rather than a constant.
     private static final String AIP_VISA = "5800";
 
     // One AFL entry, TLV-wrapped: SFI 1, rec 1 to 1, none for offline auth.
@@ -173,11 +179,20 @@ public final class Profiles {
     // Visa qVSDC GPO: AIP, AFL, AC, IAD and CTQ. qVSDC folds the decision into
     // the GPO, so the cryptogram and CID belong here and there is no GENERATE
     // AC round trip. Both lengths are computed.
+    //
+    // THE CID FOLLOWS THE CRYPTOGRAM. It used to be a hardcoded 9F270140 - TC
+    // always - even when a real ARQC was being carried in the same template. A
+    // qVSDC kernel treats a TC from a card with no DDA bit as a failed offline
+    // authentication and has no TVR/TAC path to fall back on, so the tap died
+    // with a correct ARQC sitting right next to it. Eight zero bytes mean no
+    // key, and only then is TC the honest answer.
     static String gpoVisa(String iad, String atc, String arqc) {
+        boolean keyed = arqc != null && arqc.length() == 16 && !arqc.matches("0{16}");
+        String cid = keyed ? "80" : "40";
         String body = "8202" + AIP_VISA
                 + AFL_ONE
                 + "9F2608" + arqc
-                + "9F270140"
+                + "9F2701" + cid
                 + "9F3602" + atc
                 + "9F10" + String.format("%02X", iad.length() / 2) + iad
                 + CTQ_VISA;
