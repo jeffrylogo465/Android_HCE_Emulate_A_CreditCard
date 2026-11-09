@@ -45,6 +45,17 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
 
+    // The card store holds PANs, track 2 data, the issuer key and the DD. It is
+    // plaintext today, which means it is readable off a rooted device or an
+    // adb backup. EncryptedSharedPreferences moves it behind a Keystore-held
+    // AES key.
+    //
+    // 1.1.0-alpha06 rather than 1.0.0: alpha01 is the first release that runs
+    // on API 21 and 22, and this app is minSdk 21. 1.0.0 would force a minSdk
+    // bump. It is an alpha, so the API can still move - the whole point of
+    // Prefs.java is that only one file has to change if it does.
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
