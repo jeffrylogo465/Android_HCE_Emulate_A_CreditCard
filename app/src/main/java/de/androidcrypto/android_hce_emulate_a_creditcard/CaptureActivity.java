@@ -29,8 +29,11 @@ import android.widget.Toast;
  *   - no records at all (terminal gets one synthetic and 6A83 after it)
  *   - an ATC behind the card's own (the issuer declines on the window check)
  *
- * The MSD line also used to throw: 'msd' is written with putInt and this screen
- * read it with getString, which SharedPreferences does not coerce.
+ * THE INT-SHAPED PREFS ARE STRINGS NOW. 'selected' and 'msd' are written with
+ * putString by MainActivity and read by the service through a getString helper,
+ * so a bare getInt() on either throws. Both go through readers that try the
+ * string form first and fall back to the old int, so a slot written by an older
+ * build still opens.
  */
 public class CaptureActivity extends Activity {
 
@@ -88,10 +91,33 @@ public class CaptureActivity extends Activity {
     private void resolveSlot() {
         Intent in = getIntent();
         int idx = (in == null) ? -1 : in.getIntExtra(EXTRA_CARD_INDEX, -1);
-        if (idx < 0) idx = prefs.getInt("selected", 0);
+        if (idx < 0) idx = selected();
         if (idx < 0) idx = 0;
         cardIndex = idx;
         slot = "card" + idx + "_";
+    }
+
+    /**
+     * The selected slot. 'selected' is a string; a build before the conversion
+     * left an int, so fall back to it rather than throwing.
+     */
+    private int selected() {
+        String v;
+        try {
+            v = prefs.getString("selected", null);
+        } catch (ClassCastException oldInt) {
+            try {
+                return prefs.getInt("selected", 0);
+            } catch (ClassCastException alsoNotInt) {
+                return 0;
+            }
+        }
+        if (v == null || v.isEmpty()) return 0;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /** Card-slot value, falling back to the bare staging key. */
@@ -101,11 +127,25 @@ public class CaptureActivity extends Activity {
         return v == null ? "" : v;
     }
 
-    /** Typed read. 'msd' is an int and getString on it throws. */
+    /**
+     * Typed read. 'msd' is a string now, so getInt() throws on it; the string
+     * form is tried first and the old int is the fallback.
+     */
     private int getInt(String k, int def) {
+        String v;
         try {
-            return prefs.getInt(slot + k, def);
-        } catch (ClassCastException e) {
+            v = prefs.getString(slot + k, null);
+        } catch (ClassCastException oldInt) {
+            try {
+                return prefs.getInt(slot + k, def);
+            } catch (ClassCastException alsoNotInt) {
+                return def;
+            }
+        }
+        if (v == null || v.isEmpty()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
             return def;
         }
     }
