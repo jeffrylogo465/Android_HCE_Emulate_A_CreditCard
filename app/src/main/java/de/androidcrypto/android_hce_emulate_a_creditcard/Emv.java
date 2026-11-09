@@ -114,19 +114,26 @@ final class Emv {
     }
 
     /**
-     * Clear the CDA bit in the AIP of a GPO template, in place.
+     * Clear the ODA bits in the AIP of a GPO template, in place.
+     *
+     * SDA 0x40, DDA 0x20 and CDA 0x01 together, as one mask of 0x61. A clone
+     * with no certificates can pass none of the three, and an AIP that claims
+     * one buys a failed ODA attempt and a TVR bit rather than a clean start.
+     *
+     * FIX: this used to clear 0x01 only, so SDA and DDA survived and a captured
+     * card replayed its own claims verbatim.
      *
      * FIX: format 1 (outer 80) has NO inner TLVs - the payload is two raw AIP
      * bytes then the track 2. The old TLV walk found no 82, returned, and left
      * CDA set in MSD mode.
      */
-    static void weakenAip(byte[] tpl) {
+    static void clearOda(byte[] tpl) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x01;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x61;
             return;
         }
 
@@ -137,7 +144,7 @@ final class Emv {
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~0x01;
+                tpl[q[0]] &= (byte) ~0x61;
                 return;
             }
             i = q[0] + l;
@@ -290,9 +297,29 @@ final class Emv {
      *    against nothing. A forced 0x80 with no key is downgraded to TC, and a
      *    plain 0x80 request with no key falls through to TC as well.
      *
-     * Order, highest priority first: an AC already sent in the GPO, the
-     * requested AAC, the forced CID box, always-online, forced ARQC, forced
-     * offline TC, then the terminal's own request.
+     * Order, highest priority first. Each rung names the test that pins it, so
+     * moving a rung without moving its test is visible on one screen. The three
+     * rungs marked "no test" are unreachable today because
+     * ALWAYS_ONLINE_FOR_RECEIPT and FORCE_ONLINE_ARQC are static finals that are
+     * false; the third is the acInGpo catch-all, which only fires for a
+     * requested CID that is neither AAC nor ARQC.
+     *
+     *   1  acInGpo, requested AAC        -> AAC   decideHonoursAacEvenWhenTheAcWasAlreadySent
+     *   2  acInGpo, requested ARQC       -> ARQC  decideEchoesTheRequestWhenTheAcWasAlreadySent
+     *   3  acInGpo, anything else        -> TC    no test
+     *   4  requested AAC                 -> AAC   decideHonoursAacOverEveryForce
+     *   5  forced CID                    -> it    decideKeepsAForcedArqcWithAKey
+     *   6  forced ARQC with no key       -> TC    decideDowngradesAForcedArqcWithoutAKey
+     *   7  alwaysOnline                  -> ARQC  no test
+     *   8  haveKey && forceArqc          -> ARQC  no test
+     *   9  forceTc                       -> TC    decideForceTcBeatsARequestedArqc
+     *  10  requested ARQC && haveKey     -> ARQC  decideAnswersARequestedArqcWhenTcIsNotForced
+     *  11  otherwise                     -> TC    decideNeverAnswersArqcWithoutAKey
+     *
+     * Rung 4 sits above 5 on purpose and is the reason property 1 holds: the
+     * AAC check precedes the force box, so no force can approve a decline.
+     * Rung 9 sits above 10 for the same kind of reason - forceTc has to beat a
+     * terminal that asked for ARQC.
      */
     static byte decideCid(boolean acInGpo,
                           int requested,
