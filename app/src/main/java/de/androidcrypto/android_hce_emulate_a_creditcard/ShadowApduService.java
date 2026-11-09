@@ -106,7 +106,7 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * The GPO CID is no longer a constant - see gpoCidFor(). It follows the key
-     * rather than the build, because a keyless card cannot answer an ARQC and a
+     * and the force-TC pref, because a keyless card cannot answer an ARQC and a
      * keyed one that answers TC never reaches genac().
      */
 
@@ -364,7 +364,8 @@ public class ShadowApduService extends HostApduService {
      * not per build. "0" is the only value that turns it off, so any other
      * string - including an empty one - leaves the safe default.
      *
-     * Row 8 of Emv.decideCid, so a requested AAC above it still wins.
+     * Read by gpoCidFor() for the GPO and by Emv.decideCid for GENERATE AC, so
+     * a requested AAC above it still wins in both.
      */
     private boolean forceOfflineTc() {
         String v = p("forcetc", "1").trim();
@@ -1181,13 +1182,12 @@ public class ShadowApduService extends HostApduService {
     /**
      * CID for the GPO.
      *
-     * Follows the key, not a constant. Without a key computeAc emits eight zero
-     * bytes the issuer cannot verify, so a keyless card answers TC and stays
-     * offline. With a key it answers ARQC so the terminal goes online - which is
-     * the only route by which genac() is ever reached.
+     * THE PREF COMES FIRST, above the key check. It used to sit below it, so
+     * forcing TC on a keyed card did nothing and the box was inert - a keyed
+     * card answered ARQC and went online whether you wanted it to or not.
      *
-     * The downgrade also has to survive the CID box: a forced 80 on a keyless
-     * card is unsatisfiable for the same reason.
+     * A forced 0x80 on a keyless card is still downgraded: computeAc would emit
+     * eight zero bytes and the issuer cannot verify those.
      *
      * This cannot live in Emv.decideCid. Its first branch is acInGpo, which
      * answers ARQC for a requested ARQC without consulting haveKey() - so once
@@ -1195,13 +1195,13 @@ public class ShadowApduService extends HostApduService {
      * on the wire.
      */
     private byte gpoCidFor() {
-        byte cid = haveKey() ? CID_ARQC : CID_TC;
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
         if (forced.length() == 2) {
-            cid = (byte) Integer.parseInt(forced, 16);
-            if (cid == CID_ARQC && !haveKey()) cid = CID_TC;
+            byte c = (byte) Integer.parseInt(forced, 16);
+            return (c == CID_ARQC && !haveKey()) ? CID_TC : c;
         }
-        return cid;
+        if (forceOfflineTc()) return CID_TC;
+        return haveKey() ? CID_ARQC : CID_TC;
     }
 
     private byte[] gpo(byte[] apdu) {
