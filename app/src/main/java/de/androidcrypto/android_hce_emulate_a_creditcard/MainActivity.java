@@ -172,6 +172,31 @@ public class MainActivity extends AppCompatActivity {
 
     private String appliedProfile = "";
 
+    /**
+     * Debounced prefs flush.
+     *
+     * Twenty-two fields were written on EVERY keystroke - sixteen writes for a
+     * PAN. That is invisible on a plaintext store and becomes the bottleneck
+     * once the store is encrypted, because each write is a decrypt-encrypt
+     * cycle. 250 ms coalesces a typed PAN into one write and is short enough
+     * that the wallet card updates before you look at it.
+     *
+     * Only the generic field watcher is debounced. Save, Clone, the profile
+     * picker and the arm path still write immediately - they are one-shot and
+     * everything downstream reads the boxes, not prefs.
+     */
+    private final android.os.Handler ui =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    private final Runnable collectNow = new Runnable() {
+        @Override public void run() { collect(); }
+    };
+
+    private void scheduleCollect() {
+        ui.removeCallbacks(collectNow);
+        ui.postDelayed(collectNow, 250);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -294,7 +319,7 @@ public class MainActivity extends AppCompatActivity {
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
             public void afterTextChanged(Editable s) {
                 if (!binding) {
-                    collect();
+                    scheduleCollect();
                     adapter.notifyItemChanged(current);
                 }
             }
@@ -2295,6 +2320,10 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
+        // Flush the debounce before the activity goes away, or the last thing
+        // typed is lost. onPause is also what a tap triggers, so this is the
+        // path that matters.
+        ui.removeCallbacks(collectNow);
         releasePaymentRole();
         super.onPause();
         collect();
