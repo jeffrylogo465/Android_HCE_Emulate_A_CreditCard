@@ -28,10 +28,15 @@ import java.util.Map;
  *   - The mirror is only ever written in plaintext mode, so it cannot drift
  *     while the encrypted store is healthy.
  *
+ * A FAILURE IS REMEMBERED. FORCE_PLAIN goes into the mirror on the first failed
+ * open and every later start reads it and goes straight to plaintext. Without
+ * that flag a device whose Keystore is broken re-attempts create() on every
+ * launch, throws on every launch, and the app is unusable rather than merely
+ * unencrypted. reset() clears the flag if the Keystore is ever fixed.
+ *
  * ON A FALLBACK THE ENCRYPTED FILE IS DELETED. Otherwise the app comes up,
  * reads the mirror, writes to it, and the moment the Keystore recovers the stale
- * encrypted file wins and the edits are gone. Dropping it means the next
- * successful start migrates the mirror again.
+ * encrypted file wins and the edits are gone.
  *
  * THIS IS NOT DEFENCE AGAINST A LIVE ATTACKER. Anyone with code execution as the
  * app can call these getters. It stops the XML from being a plaintext dump.
@@ -47,45 +52,69 @@ final class Prefs {
     /** Set in the encrypted store once the mirror has been copied across. */
     private static final String MIGRATED = "store_migrated";
 
+    /** Set in the MIRROR when the encrypted store has failed at least once. */
+    private static final String FORCE_PLAIN = "store_plain";
+
     private static SharedPreferences cached;
-    private static boolean encrypted;
+    private static volatile boolean encrypted;
 
     private Prefs() { }
 
     /**
-     * The store. Encrypted when the Keystore works, plaintext when it does not.
+     * The store. Encrypted when the Keystore works, plaintext when it does not,
+     * and plaintext for good once it has failed.
      *
      * Synchronised and cached: create() does Keystore work, and get() is called
      * from the service on a binder thread as well as from every UI read. Without
      * the cache a single tap would rebuild the master key dozens of times.
+     *
+     * NOTHING ESCAPES. Every failure path ends at the mirror, because this is
+     * called from processCommandApdu() where an exception becomes a 6F00 and a
+     * dead tap with no explanation.
      */
     static synchronized SharedPreferences get(Context ctx) {
         if (cached != null) return cached;
 
-        Context app = ctx.getApplicationContext();
+        final Context app = ctx.getApplicationContext();
+        final SharedPreferences plain = app.getSharedPreferences(PLAIN, Context.MODE_PRIVATE);
 
+        if (plain.getBoolean(FORCE_PLAIN, false)) {
+            cached = plain;
+            encrypted = false;
+            return cached;
+        }
+
+        SharedPreferences enc = null;
         try {
             MasterKey key = new MasterKey.Builder(app)
                     .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                     .build();
 
-            SharedPreferences enc = EncryptedSharedPreferences.create(
+            enc = EncryptedSharedPreferences.create(
                     app,
                     ENCRYPTED,
                     key,
                     EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM);
 
+            // A store that opens but cannot be read is worse than one that
+            // throws, so the migration is inside the try as well.
             migrateOnce(app, enc);
 
             cached = enc;
             encrypted = true;
             return cached;
         } catch (Throwable t) {
-            // Keystore unavailable, key invalidated, or the encrypted file is
-            // unreadable. Drop it so the next start rebuilds from the mirror.
+            android.util.Log.w("Prefs", "encrypted store unusable, using the mirror", t);
+
+            // Remember it before anything else, so the next launch does not
+            // repeat this. The mirror is still intact and holds every card.
+            try {
+                plain.edit().putBoolean(FORCE_PLAIN, true).apply();
+            } catch (Throwable ignored) { }
+
             deleteEncrypted(app);
-            cached = app.getSharedPreferences(PLAIN, Context.MODE_PRIVATE);
+            cached = plain;
             encrypted = false;
             return cached;
         }
@@ -97,6 +126,24 @@ final class Prefs {
     }
 
     /**
+     * Forget the failure and try the Keystore again on the next call.
+     *
+     * Only useful when the encrypted store was never successfully written, so
+     * the mirror is still authoritative. Everything written in plaintext mode
+     * is re-migrated on the next open.
+     */
+    static synchronized void reset(Context ctx) {
+        Context app = ctx.getApplicationContext();
+        try {
+            app.getSharedPreferences(PLAIN, Context.MODE_PRIVATE).edit()
+                    .remove(FORCE_PLAIN).apply();
+        } catch (Throwable ignored) { }
+        deleteEncrypted(app);
+        cached = null;
+        encrypted = false;
+    }
+
+    /**
      * Copy the mirror across, once.
      *
      * The ints that the service reads through a getString helper are written as
@@ -104,6 +151,9 @@ final class Prefs {
      * encrypted store is uniformly string-typed on those and nothing has to lean
      * on the ClassCastException fallbacks afterwards. Everything else keeps its
      * type; card_count stays an int.
+     *
+     * FORCE_PLAIN is skipped so it does not travel into the encrypted store,
+     * where a stale true would send the next launch back to the mirror.
      */
     private static void migrateOnce(Context app, SharedPreferences enc) {
         if (enc.getBoolean(MIGRATED, false)) return;
@@ -111,10 +161,13 @@ final class Prefs {
         SharedPreferences plain = app.getSharedPreferences(PLAIN, Context.MODE_PRIVATE);
         Map<String, ?> all = plain.getAll();
 
+        SharedPreferences.Editor e = enc.edit();
+
         if (!all.isEmpty()) {
-            SharedPreferences.Editor e = enc.edit();
             for (Map.Entry<String, ?> en : all.entrySet()) {
                 String k = en.getKey();
+                if (FORCE_PLAIN.equals(k)) continue;
+
                 Object v = en.getValue();
                 if (v == null) continue;
 
@@ -132,10 +185,11 @@ final class Prefs {
                     e.putString(k, v.toString());
                 }
             }
-            // commit(), not apply(): the caller is about to read straight back.
-            e.putBoolean(MIGRATED, true).commit();
-        } else {
-            enc.edit().putBoolean(MIGRATED, true).apply();
+        }
+
+        // commit(), not apply(): the caller is about to read straight back.
+        if (!e.putBoolean(MIGRATED, true).commit()) {
+            throw new IllegalStateException("migration did not commit");
         }
     }
 
