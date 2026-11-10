@@ -205,6 +205,29 @@ public class ShadowApduService extends HostApduService {
     private boolean expiryWarned;
 
     /**
+     * Install the file crash logger and OPEN THE STORE HERE, on the main thread.
+     *
+     * Both are deliberate. A tap arrives on a binder thread, and if the store
+     * has never been opened the Keystore build and the migration would run
+     * there instead - inside the APDU path, on the thread with the tightest
+     * budget. Doing it in onCreate moves that to service start, where it costs
+     * a few hundred milliseconds once and nothing afterwards.
+     *
+     * onCreate is also the only place in this class that is guaranteed to run
+     * before the first APDU, so the crash logger cannot miss a tap crash.
+     */
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        CrashLog.install(this);
+        try {
+            Prefs.get(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "store open at service start failed", t);
+        }
+    }
+
+    /**
      * Buffered, per slot. TapLog holds the lines and writes them once when the
      * tap ends - the old version opened a file per APDU, on the binder thread.
      */
@@ -309,8 +332,7 @@ public class ShadowApduService extends HostApduService {
      *
      * Prefs.get() hands back the encrypted file, or the plaintext mirror when
      * the Keystore is unavailable. It caches, so the Keystore is not touched
-     * per call - which matters here because this runs on the binder thread
-     * dozens of times per tap.
+     * per call - and onCreate has already opened it once before any APDU.
      */
     private SharedPreferences prefs() {
         return Prefs.get(this);
@@ -2059,6 +2081,15 @@ public class ShadowApduService extends HostApduService {
         return v + " | script armed " + armed + " line(s) but never matched";
     }
 
+    /**
+     * The tap is over.
+     *
+     * THE TAIL IS WRAPPED. Everything after resetTransaction() - the verdict
+     * line, the log flush and the pref write - used to run bare, so a throw in
+     * any of it killed the process at exactly the moment the phone is pulled
+     * away, which reads to the user as "the app closed". Nothing here is worth
+     * a crash: the tap has already happened.
+     */
     @Override
     public void onDeactivated(int reason) {
         final String t = tapLog.toString();
@@ -2066,23 +2097,29 @@ public class ShadowApduService extends HostApduService {
         String v;
         try {
             v = verdict();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             v = "TAP: verdict failed - " + e;
         }
-        resetTransaction();
 
-        if (!t.isEmpty()) termLog("!! verdict: " + v);
-        TapLog.flush(this);
+        try {
+            resetTransaction();
+        } catch (Throwable ignored) { }
 
-        if (!t.isEmpty()) {
-            // No clipboard write here any more: it fired on every tap and pushed
-            // a full log, PAN included, into whatever app you pasted into next.
-            // CaptureActivity's copy button is the explicit route.
-            try {
+        try {
+            if (!t.isEmpty()) termLog("!! verdict: " + v);
+            TapLog.flush(this);
+
+            if (!t.isEmpty()) {
+                // No clipboard write here any more: it fired on every tap and
+                // pushed a full log, PAN included, into whatever app you pasted
+                // into next. CaptureActivity's copy button is the explicit route.
                 prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
-            } catch (Exception ignored) { }
-            popup(v);
+                popup(v);
+            }
+        } catch (Throwable e) {
+            Log.w(TAG, "deactivate tail failed", e);
         }
-        Log.d("HCE", "onHCE" + "" + " | " + v);
+
+        Log.d(TAG, "onDeactivated reason=" + reason + " | " + v);
     }
 }
