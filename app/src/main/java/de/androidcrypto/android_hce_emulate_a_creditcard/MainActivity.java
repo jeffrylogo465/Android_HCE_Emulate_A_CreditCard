@@ -202,16 +202,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
-            String s = android.util.Log.getStackTraceString(e);
-            try {
-                android.content.ClipboardManager cm = (android.content.ClipboardManager)
-                        getSystemService(CLIPBOARD_SERVICE);
-                cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", s));
-            } catch (Exception ignored) { }
-            try { Thread.sleep(400); } catch (Exception ignored) { }
-            android.os.Process.killProcess(android.os.Process.myPid());
-        });
+        // File, not clipboard. The old inline handler wrote the trace to the
+        // clipboard and killed the process, which works while this activity is
+        // in front - but a tap crash happens on the way to the background, when
+        // the process is often dead before the clip write lands. See CrashLog.
+        CrashLog.install(this);
 
         setContentView(R.layout.activity_main);
         if (getSupportActionBar() != null) getSupportActionBar().hide();
@@ -2350,15 +2345,35 @@ public class MainActivity extends AppCompatActivity {
         promptDefault();
     }
 
+    /**
+     * The tap starts here, on the way to the background.
+     *
+     * THE COLLECT IS WRAPPED. It used to run bare, and it is the last thing that
+     * happens before the terminal takes over - so a throw in any of its thirty
+     * pref writes killed the activity at exactly the moment the phone was
+     * coupled, which reads as "the app closed when I tapped". A failed flush is
+     * survivable; a crash here is not.
+     */
     @Override
     protected void onPause() {
         // Flush the debounce before the activity goes away, or the last thing
         // typed is lost. onPause is also what a tap triggers, so this is the
         // path that matters.
-        ui.removeCallbacks(collectNow);
-        releasePaymentRole();
+        try {
+            ui.removeCallbacks(collectNow);
+        } catch (Throwable ignored) { }
+
+        try {
+            releasePaymentRole();
+        } catch (Throwable ignored) { }
+
         super.onPause();
-        collect();
+
+        try {
+            collect();
+        } catch (Throwable t) {
+            android.util.Log.w("HCE", "collect on pause failed", t);
+        }
     }
 
     @Override
