@@ -230,15 +230,34 @@ public class ShadowApduService extends HostApduService {
     /**
      * Buffered, per slot. TapLog holds the lines and writes them once when the
      * tap ends - the old version opened a file per APDU, on the binder thread.
+     *
+     * Guarded. This runs on the binder thread inside the APDU path, and it is
+     * reached from tap(), which is itself the error handler - a throw in here
+     * would escape processCommandApdu and kill the process on the tap that was
+     * already going wrong.
      */
     private void termLog(String s) {
-        TapLog.append(this, sel(), s);
+        try {
+            TapLog.append(this, sel(), s);
+        } catch (Throwable ignored) { }
     }
 
+    /**
+     * Guarded, both halves. THE FIRST HALF CANNOT THROW PAST THIS METHOD.
+     *
+     * tap() is called from the catch block of processCommandApdu, so anything
+     * that escapes here goes out of processCommandApdu - which HostApduService
+     * does not wrap - and takes the process down. That is exactly "the app
+     * closed when I tapped". Nothing in a log line is worth a crash.
+     */
     private void tap(String s) {
-        tapLog.append(s).append('\n');
-        if (tapLog.length() > 32000) tapLog.delete(0, 16000);
-        termLog(s);
+        try {
+            tapLog.append(s).append('\n');
+            if (tapLog.length() > 32000) tapLog.delete(0, 16000);
+        } catch (Throwable ignored) { }
+        try {
+            termLog(s);
+        } catch (Throwable ignored) { }
     }
 
     private void popup(final String s) {
@@ -338,8 +357,24 @@ public class ShadowApduService extends HostApduService {
         return Prefs.get(this);
     }
 
+    /**
+     * The slot prefix, with a floor.
+     *
+     * Guarded because it sits in front of EVERY log line and of every pref key
+     * the service builds. If 'selected' is stored as an int - which is what the
+     * plaintext mirror holds, since Prefs.migrateOnce() only stringifies keys on
+     * the way into the encrypted store - a bare getString throws here and takes
+     * the whole tap with it, including the line that would have explained why.
+     *
+     * card0_ is the honest fallback: slot 0 is what bindCard() clamps to and
+     * what every default in this class already assumes.
+     */
     private String sel() {
-        return "card" + p("selected", "0") + "_";
+        try {
+            return "card" + p("selected", "0") + "_";
+        } catch (Throwable t) {
+            return "card0_";
+        }
     }
 
     /**
@@ -349,10 +384,33 @@ public class ShadowApduService extends HostApduService {
      * to build a map, and this is called dozens of times per tap - which was
      * free on a plaintext store and is not on an encrypted one. It only works
      * now because every key read here is stored as a string.
+     *
+     * "ONLY WORKS" IS THE POINT. A key written by an older build, or by the
+     * plaintext mirror, may be an int or a boolean, and getString throws a
+     * ClassCastException on those. MainActivity.intPref() and
+     * CaptureActivity.getInt() have carried a CCE fallback for that; the service
+     * did not, so the same value was survivable in the UI and fatal here.
+     *
+     * The fallback reads the single key out of getAll() and stringifies it, and
+     * it only runs on the throw, so the cost stays where it belongs. Any other
+     * failure returns the default rather than propagating - a pref read is never
+     * worth an APDU.
      */
     private String p(String k, String d) {
-        String v = prefs().getString(sel() + k, null);
-        return (v == null || v.isEmpty()) ? d : v;
+        String key = sel() + k;
+        try {
+            String v = prefs().getString(key, null);
+            return (v == null || v.isEmpty()) ? d : v;
+        } catch (ClassCastException e) {
+            try {
+                Object o = prefs().getAll().get(key);
+                return o == null ? d : String.valueOf(o);
+            } catch (Throwable t) {
+                return d;
+            }
+        } catch (Throwable t) {
+            return d;
+        }
     }
 
     private void put(String k, String v) {
