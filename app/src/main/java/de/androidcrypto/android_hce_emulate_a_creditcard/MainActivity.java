@@ -2376,29 +2376,57 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * The other half of the tap: the phone comes back and this runs.
+     *
+     * WRAPPED FOR THE SAME REASON ONPAUSE IS. Everything here used to run bare,
+     * including two typed pref reads - getString on 'atccommitted' and getLong
+     * on 'lastverdict_at' - that throw a ClassCastException if either key was
+     * ever stored as another type. onResume is the first thing to run after a
+     * tap, so a throw here kills the activity at exactly the moment the user
+     * looks at the screen, which is indistinguishable from the tap crashing it.
+     */
     @Override
     protected void onResume() {
         super.onResume();
-        claimPaymentRole();
-        maybeAskDefault();
+
+        try {
+            claimPaymentRole();
+        } catch (Throwable ignored) { }
+
+        try {
+            maybeAskDefault();
+        } catch (Throwable t) {
+            android.util.Log.w("HCE", "default-payment check failed", t);
+        }
+
         // The service commits the ATC, but this activity holds the same value in
         // a box and rewrites it on every collect() - including onPause, which a
         // tap triggers. That stomped each committed counter back to its old value
         // and the next tap reused it. "atccommitted" is only ever written by the
         // service, so it is the one value the box cannot overwrite.
-        String committedAtc = prefs.getString(key(current, "atccommitted"), "");
-        if (!committedAtc.isEmpty() && !committedAtc.equals(t(etAtc))) {
-            binding = true;
-            etAtc.setText(committedAtc);
-            binding = false;
-            collect();
+        try {
+            String committedAtc = prefs.getString(key(current, "atccommitted"), "");
+            if (!committedAtc.isEmpty() && !committedAtc.equals(t(etAtc))) {
+                binding = true;
+                etAtc.setText(committedAtc);
+                binding = false;
+                collect();
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("HCE", "atc restore failed", t);
         }
 
         if (suppressResumeStatus) {
             suppressResumeStatus = false;
             return;
         }
-        showLastVerdict();
+
+        try {
+            showLastVerdict();
+        } catch (Throwable t) {
+            android.util.Log.w("HCE", "verdict restore failed", t);
+        }
     }
 
     // ---------- clone from reader ----------
