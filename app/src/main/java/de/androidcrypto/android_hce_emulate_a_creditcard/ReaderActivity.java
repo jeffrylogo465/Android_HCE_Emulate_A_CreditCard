@@ -43,7 +43,6 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     public static final String EXTRA_ATC = "atc";
     public static final String EXTRA_AIP = "aip";
 
-    private static final String PREF = "hce_card";
     private static final String PPSE = "325041592E5359532E4444463031";
     private static final String TTQ_KEY = "readerttq";
     private static final String CURSOR_KEY = "sweepcursor";
@@ -109,7 +108,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        prefs = getSharedPreferences(PREF, MODE_PRIVATE);
+        // THE STORE, not getSharedPreferences("hce_card"). Everything that reads
+        // this staging back - copyStagingToCard(), recordCountOnCard(),
+        // msdFromCapture(), scanForKey() - goes through Prefs.get(), which is the
+        // ENCRYPTED store whenever the Keystore works. Writing the capture to the
+        // plaintext mirror put it somewhere nothing was looking: the read itself
+        // looked fine and USE CARD produced an empty card. It only ever worked on
+        // a device where Prefs had already fallen back to plaintext.
+        prefs = Prefs.get(this);
         ttq = prefs.getString(TTQ_KEY, "7600");
         if (!Arrays.asList(TTQ_CYCLE).contains(ttq)) ttq = TTQ_CYCLE[0];
         cursor = prefs.getInt(CURSOR_KEY, 0);
@@ -377,7 +383,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                 int sfi = (afl[i] & 0xFF) >> 3;
                 int first = afl[i + 1] & 0xFF;
                 int last = afl[i + 2] & 0xFF;
-                if (sfi < 1 || sfi > 10 || first < 1 || first > 31) continue;
+                // SFI runs to 30 in EMV and the service's own afl() accepts 1-30.
+                // Capping at 10 here dropped every record above it, so a card
+                // that files its data high was read by the service and never
+                // captured by the reader.
+                if (sfi < 1 || sfi > 30 || first < 1 || first > 31) continue;
                 if (last < first || last > 31) last = first;
                 for (int r = first; r <= last; r++) {
                     try {
@@ -451,7 +461,10 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int d = rTrack2.indexOf('D');
             if (d >= 12 && d <= 19) rPan = rTrack2.substring(0, d);
         }
-        if (rService.length() != 3) rService = "201";
+        if (rService.length() != 3) {
+            log("   !! no service code on the track - defaulting to 201 (claims a PIN)");
+            rService = "201";
+        }
         if (rPsn.length() > 2) rPsn = rPsn.substring(0, 2);
         if (rExpiry.length() > 4) rExpiry = rExpiry.substring(0, 4);
 
@@ -498,7 +511,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             int first = b[i + 1] & 0xFF;
             int last = b[i + 2] & 0xFF;
             if ((b[i] & 0x07) != 0) return false;
-            if (sfi < 1 || sfi > 10) return false;
+            if (sfi < 1 || sfi > 30) return false;
             if (first < 1 || first > 31) return false;
             if (last < first || last > 31) return false;
         }
@@ -784,6 +797,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
      * FIX: the extended branch wrote THREE trailing bytes after the data. An
      * extended APDU is CLA INS P1 P2 00 LcHi LcLo <data> LeHi LeLo - Le is two
      * bytes. The stray third byte sat where the card expected nothing.
+     *
+     * FIX: an empty data field used to emit five-plus-one bytes with a 00 Lc,
+     * which announces extended length and then supplies no length bytes at all.
+     * The empty probe now sends 00 00 00 so the card reads a real extended
+     * header with Lc 0 and Le 0.
      */
     private static byte[] apdu(int cla, int ins, int p1, int p2, byte[] data, int le) {
         if (data == null) {
@@ -794,7 +812,11 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         o.write(ins & 0xFF);
         o.write(p1 & 0xFF);
         o.write(p2 & 0xFF);
-        if (data.length > 255) {
+        if (data.length == 0) {
+            o.write(0x00);
+            o.write(0x00);
+            o.write(0x00);
+        } else if (data.length > 255) {
             o.write(0x00);
             o.write((data.length >> 8) & 0xFF);
             o.write(data.length & 0xFF);
@@ -811,6 +833,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private byte[] send(IsoDep iso, byte[] apdu) throws IOException {
         byte[] rsp = iso.transceive(apdu);
+        if (rsp == null || rsp.length < 2) {
+            throw new IOException("short response (" + (rsp == null ? "null" : rsp.length) + "B)");
+        }
         int code = sw(rsp);
 
         if ((code & 0xFF00) == 0x6C00 && apdu.length >= 1) {
@@ -819,6 +844,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             if (ext) retry[retry.length - 2] = 0x00;
             retry[retry.length - 1] = (byte) (code & 0xFF);
             rsp = iso.transceive(retry);
+            if (rsp == null || rsp.length < 2) throw new IOException("short response on Le retry");
             code = sw(rsp);
         }
 
@@ -829,6 +855,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             while ((code & 0xFF00) == 0x6100 && guard++ < 16) {
                 byte[] more = iso.transceive(new byte[]{
                         0x00, (byte) 0xC0, 0x00, 0x00, (byte) (code & 0xFF)});
+                if (more == null || more.length < 2) throw new IOException("short response on GET RESPONSE");
                 code = sw(more);
                 if (code == 0x9000 || (code & 0xFF00) == 0x6100) {
                     acc.write(more, 0, more.length - 2);
