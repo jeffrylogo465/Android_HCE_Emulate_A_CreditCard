@@ -234,6 +234,22 @@ public class ShadowApduService extends HostApduService {
     /** True once a checksum has consumed this tap's ATC, so a second one climbs. */
     private boolean atcUsedByCcc;
 
+    /**
+     * EMV transaction state, driven by what the service actually answered.
+     *
+     * txnAfl is null until a GPO succeeds, and a null AFL means "no GPO yet":
+     * READ RECORD then keeps its old behaviour. Once a GPO has answered, only
+     * the records that AFL names are readable.
+     *
+     * Cleared by a new application SELECT (see startApplication), so a second
+     * tap or a second AID begins clean, and by resetTransaction().
+     */
+    private byte[] txnAid;
+    private boolean gpoOk;
+    private byte[] txnAfl;
+    private int curSfi, curRec;
+    private int recsSinceSelect;
+
     private boolean sawPpse;
     private int nSelects, nGpos, nRecs, nGens, nCccs;
     private String lastCid = "";
@@ -909,6 +925,7 @@ public class ShadowApduService extends HostApduService {
         scriptHits = 0;
         atcUsedByCcc = false;
         sawPpse = false;
+        clearApplicationState();
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
         sawError = false;
@@ -919,6 +936,70 @@ public class ShadowApduService extends HostApduService {
         gpoCid = "";
         keyCache = null;
         slotPrefix = null;
+    }
+
+    private void clearApplicationState() {
+        txnAid = null;
+        gpoOk = false;
+        txnAfl = null;
+        curSfi = curRec = 0;
+        recsSinceSelect = 0;
+    }
+
+    /** True when the AFL names this SFI and record. Each entry is 4 bytes. */
+    private static boolean aflContains(byte[] afl, int sfi, int rec) {
+        for (int i = 0; i + 4 <= afl.length; i += 4) {
+            if (((afl[i] & 0xFF) >> 3) == sfi
+                    && rec >= (afl[i + 1] & 0xFF) && rec <= (afl[i + 2] & 0xFF)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The AFL out of a GPO response without its status word, or empty. */
+    private static byte[] aflOfGpo(byte[] body) {
+        if (body == null || body.length < 4) return new byte[0];
+        int[] pos = new int[1];
+        int outer = readTag(body, pos);
+        byte[] afl;
+        if (outer == 0x80) {
+            int l = readLen(body, pos);
+            int end = Math.min(body.length, pos[0] + l);
+            afl = (pos[0] + 2 <= end) ? Arrays.copyOfRange(body, pos[0] + 2, end) : null;
+        } else {
+            afl = findTag(body, 0x94);
+        }
+        return afl == null ? new byte[0] : afl;
+    }
+
+    /**
+     * Follow the EMV sequence from what was actually answered, on both the
+     * script path and the generated path. Only a 9000 moves the state.
+     */
+    private void trackState(byte[] apdu, int ins, byte[] out) {
+        if (out == null || out.length < 2
+                || (out[out.length - 2] & 0xFF) != 0x90 || out[out.length - 1] != 0x00) {
+            return;
+        }
+        byte[] body = Arrays.copyOf(out, out.length - 2);
+
+        if (ins == 0xA4) {
+            int lc = lcOf(apdu), off = dataOff(apdu);
+            if (apdu.length < off + lc) return;
+            byte[] name = Arrays.copyOfRange(apdu, off, off + lc);
+            if (Arrays.equals(name, PPSE)) return;
+            clearApplicationState();
+            txnAid = name;
+        } else if (ins == 0xA8) {
+            gpoOk = true;
+            txnAfl = aflOfGpo(body);
+            curSfi = curRec = 0;
+        } else if (ins == 0xB2) {
+            recsSinceSelect++;
+            curSfi = (apdu[3] & 0xFF) >> 3;
+            curRec = apdu[2] & 0xFF;
+        }
     }
 
     private byte[] aipForMac() {
@@ -1548,6 +1629,15 @@ public class ShadowApduService extends HostApduService {
 
             tap(">> " + bytesToHex(apdu));
 
+            // READ RECORD walks the AFL the GPO handed out. Before any GPO there
+            // is no AFL and the old behaviour stands.
+            if (ins == 0xB2 && txnAfl != null
+                    && !aflContains(txnAfl, (p2 >> 3), p1)) {
+                tap("-- rec sfi=" + (p2 >> 3) + " rec=" + p1 + " is outside the AFL");
+                tap("<< " + bytesToHex(SW_NO_RECORD));
+                return SW_NO_RECORD;
+            }
+
             if (isSelect)         nSelects++;
             else if (ins == 0xA8) nGpos++;
             else if (ins == 0xB2) nRecs++;
@@ -1631,6 +1721,7 @@ public class ShadowApduService extends HostApduService {
                 if (ins == 0xA8) watchForStall();
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
+                trackState(apdu, ins, out);
                 return out;
             }
 
@@ -1659,6 +1750,7 @@ public class ShadowApduService extends HostApduService {
             }
 
             tap("<< " + bytesToHex(out));
+            trackState(apdu, ins, out);
             return out;
         } catch (Throwable e) {
             // THROWABLE, not Exception. An APDU answered from a stack that has
@@ -2374,7 +2466,7 @@ public class ShadowApduService extends HostApduService {
      * used to be re-read and re-hex-parsed three times on the response path.
      */
     private byte[] ccc(byte[] apdu) {
-        if (nRecs == 0) {
+        if (!gpoOk && recsSinceSelect == 0) {
             tap("!! ccc: no record read this tap - a strict verifier refuses the checksum");
             return SW_CONDITIONS;
         }

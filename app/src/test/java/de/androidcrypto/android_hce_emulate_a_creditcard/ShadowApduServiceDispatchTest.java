@@ -95,6 +95,51 @@ public class ShadowApduServiceDispatchTest {
                 Hex.toHex(send("802A8E8004000000000000")));
     }
 
+    private static final String SELECT_PPSE = "00A404000E325041592E5359532E4444463031";
+    private static final String SELECT_AID = "00A4040007A000000003101000";
+    private static final String GPO = "80A8000002830000";
+    // The default GPO advertises one AFL entry, 08010100: SFI 1, record 1 only.
+    private static final String READ_SFI1_REC1 = "00B2010C00";
+    private static final String READ_SFI1_REC2 = "00B2020C00";
+    private static final String CCC = "802A8E8004000000000000";
+
+    @Test
+    public void transaction_happyPath_everyStepSucceeds() {
+        assertEquals("9000", Hex.toHex(sw(send(SELECT_PPSE))));
+        assertEquals("9000", Hex.toHex(sw(send(SELECT_AID))));
+        assertEquals("9000", Hex.toHex(sw(send(GPO))));
+        // The AFL in that GPO is a single record.
+        assertEquals("9000", Hex.toHex(sw(send(READ_SFI1_REC1))));
+        assertEquals("9000", Hex.toHex(sw(send(CCC))));
+    }
+
+    @Test
+    public void computeCryptographicChecksum_beforeGpo_returns6985() {
+        send(SELECT_PPSE);
+        send(SELECT_AID);
+        assertEquals("6985", Hex.toHex(send(CCC)));
+    }
+
+    @Test
+    public void readRecord_outsideAfl_returns6A83() {
+        send(SELECT_PPSE);
+        send(SELECT_AID);
+        send(GPO);
+        assertEquals("6A83", Hex.toHex(send(READ_SFI1_REC2)));
+    }
+
+    @Test
+    public void selectSecondAid_clearsState_computeCryptographicChecksumReturns6985() {
+        send(SELECT_PPSE);
+        send(SELECT_AID);
+        send(GPO);
+        send(READ_SFI1_REC1);
+        assertEquals("9000", Hex.toHex(sw(send(CCC))));
+
+        send(SELECT_AID);
+        assertEquals("6985", Hex.toHex(send(CCC)));
+    }
+
     @Test
     public void getData_unknownTag_returns6A88() {
         assertEquals("6A88", Hex.toHex(send("80CA9F1700")));
