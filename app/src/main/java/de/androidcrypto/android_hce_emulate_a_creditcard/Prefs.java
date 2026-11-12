@@ -408,9 +408,14 @@ final class Prefs {
         /**
          * One editor, both stores.
          *
-         * live.edit() CAN THROW, so a null live editor is a normal case here,
-         * not a broken one: the editor is still built and every write goes to
-         * the shadow alone.
+         * BOTH edit() CALLS CAN THROW and neither is fatal. `plain` here is the
+         * plaintext STORE, not an editor, so it has to be asked for its own -
+         * passing the store straight to ShadowEditor is a type error, and a cast
+         * would not have helped.
+         *
+         * A null editor on either side is handled by ShadowEditor: the live side
+         * drops out on its first failure, the plain side marks itself broken,
+         * and the write still lands on whichever side is alive.
          */
         @Override public Editor edit() {
             SharedPreferences.Editor le = null;
@@ -421,7 +426,13 @@ final class Prefs {
                     dead(t);
                 }
             }
-            return new ShadowEditor(this, le, plain);
+
+            SharedPreferences.Editor pe = null;
+            try {
+                pe = plain.edit();
+            } catch (Throwable ignored) { }
+
+            return new ShadowEditor(this, le, pe);
         }
 
         @Override public void registerOnSharedPreferenceChangeListener(
