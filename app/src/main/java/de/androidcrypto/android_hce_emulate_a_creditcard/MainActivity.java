@@ -54,6 +54,9 @@ public class MainActivity extends AppCompatActivity {
      */
     private static final String CVMLIST = "00000000000000001F031E03";
 
+    /** Eight zero DD bytes, for the menu-driven skeleton builder. */
+    private static final String DD_ZERO = "0000000000000000";
+
     /**
      * Dumps that are already known, keyed by PAN: 1 expiry, 2 service, 3 DD.
      *
@@ -184,6 +187,11 @@ public class MainActivity extends AppCompatActivity {
      *
      * Cleared on every bind: a different slot has a different baseline, and
      * carrying values across would skip the writes that switch cards.
+     *
+     * ALSO CLEARED BY wipeCapture(). A wipe writes prefs directly, so the
+     * baseline is no longer what is in the store - leaving it in place made the
+     * next collect() skip the msd write and leave the box saying 1 while the
+     * pref said 0.
      */
     private final Map<String, String> written = new java.util.HashMap<>();
 
@@ -192,6 +200,14 @@ public class MainActivity extends AppCompatActivity {
         if (prev != null && prev.equals(v)) return;
         written.put(k, v);
         e.putString(k, v);
+    }
+
+    private void putIfChanged(SharedPreferences.Editor e, String k, int v) {
+        String prev = written.get(k);
+        String now = String.valueOf(v);
+        if (prev != null && prev.equals(now)) return;
+        written.put(k, now);
+        e.putInt(k, v);
     }
 
     /**
@@ -430,6 +446,21 @@ public class MainActivity extends AppCompatActivity {
         long h = m / 60;
         if (h < 24) return h + " h";
         return (h / 24) + " d";
+    }
+
+    /**
+     * Say it out loud when the store is the plaintext shadow.
+     *
+     * A fallback is completely silent otherwise: the app works, the wallet looks
+     * the same, and the only copy of every PAN is an unencrypted XML file. Runs
+     * after showLastVerdict() so it never hides a verdict, and only fills an
+     * otherwise empty line.
+     */
+    private void warnIfPlaintext() {
+        if (Prefs.isEncrypted()) return;
+        if (txtStatus.getText().length() > 0) return;
+        status("PLAINTEXT store - the Keystore failed once. Long-press the key box"
+                + " for a retry.", COL_STALE);
     }
 
     // ---------- pages ----------
@@ -1213,6 +1244,13 @@ public class MainActivity extends AppCompatActivity {
         updateCount();
     }
 
+    /**
+     * Write the boxes to the current slot.
+     *
+     * card_count and selected go through the same change-skip as the rest. They
+     * were written unconditionally on every call, so a sixteen-key PAN still
+     * paid two encrypted writes per keystroke for values that had not moved.
+     */
     private void collect() {
         int i = current;
         SharedPreferences.Editor e = prefs.edit();
@@ -1240,8 +1278,8 @@ public class MainActivity extends AppCompatActivity {
         putIfChanged(e, key(i, "msd"), t(etMsd).startsWith("1") ? "1" : "0");
         putIfChanged(e, key(i, "forcetc"), chkForceTc.isChecked() ? "1" : "0");
         putIfChanged(e, key(i, "usescript"), armedLines(t(etScript)) > 0 ? "1" : "0");
-        e.putInt("card_count", cards.size());
-        e.putString("selected", String.valueOf(i));
+        putIfChanged(e, "card_count", cards.size());
+        putIfChanged(e, "selected", String.valueOf(i));
         e.apply();
 
         if (i < cards.size()) {
@@ -1476,14 +1514,26 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /**
+     * Drop the slot's capture and force msd to 0.
+     *
+     * written IS CLEARED. This writes prefs directly, so the in-memory baseline
+     * stops matching the store; leaving it made the next collect() skip the msd
+     * write and leave the box saying 1 while the pref said 0.
+     *
+     * The bare cap_ staging keys go too. They are only a mid-read fallback, but
+     * the service reads them, so a stale one from a different card still answers
+     * a tap.
+     */
     private void wipeCapture(int i) {
         SharedPreferences.Editor e = prefs.edit();
         String p = key(i, "cap_");
         for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith(p)) e.remove(k);
+            if (k.startsWith(p) || k.startsWith("cap_")) e.remove(k);
         }
         e.putString(key(i, "msd"), "0");
         e.apply();
+        written.clear();
     }
 
     private static String hexOf(String s) {
@@ -1530,7 +1580,7 @@ public class MainActivity extends AppCompatActivity {
         String aid = t(etAid).toUpperCase();
         List<String> check = new ArrayList<>();
         check.add("325041592E5359532E4444463031");
-        if (!aid.isEmpty()) check.add(aid);
+        if (!aid.isEmpty() && !check.contains(aid)) check.add(aid);
         if (!"A0000000031010".equals(aid)) check.add("A0000000031010");
         if (!"A0000000041010".equals(aid)) check.add("A0000000041010");
 
@@ -1575,7 +1625,7 @@ public class MainActivity extends AppCompatActivity {
                                 "Seed vector card", "Run CVC3 harness",
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
                                 "MSD: set record", "MSD: set location",
-                                "Check profile constants"},
+                                "Check profile constants", "Store: retry encryption"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1583,11 +1633,11 @@ public class MainActivity extends AppCompatActivity {
                             else if (w == 4) runSkdVector();
                             else if (w == 5) runCskVector();
                             else if (w == 6) runCvc3Vector();
-                            else if (w == 7) status(VectorSeed.apply(this));
+                            else if (w == 7) seedVector();
                             else if (w == 8) status(Cvc3Vector.run());
-                            else if (w == 9) setHexPref("imkcvc3", "IMKCVC3",
-                                    "32 or 48 hex. A different key from IMK-AC.", 32);
-                            else if (w == 10) setHexPref("ivcvc3", "IVCVC3",
+                            else if (w == 9) setHexPrefExact("imkcvc3", "IMKCVC3",
+                                    "32 or 48 hex. A different key from IMK-AC.", 32, 48);
+                            else if (w == 10) setHexPrefExact("ivcvc3", "IVCVC3",
                                     "4 hex. From the dump, usually tag DD.", 4);
                             else if (w == 11) buildMsdRecord();
                             else if (w == 12) setHexPref("msdrec", "MSD record",
@@ -1595,10 +1645,37 @@ public class MainActivity extends AppCompatActivity {
                             else if (w == 13) setHexPref("msdloc", "MSD record location",
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else if (w == 14) checkProfiles();
+                            else if (w == 15) retryEncryption();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /**
+     * Seed the CVC3 vector, then REBIND.
+     *
+     * VectorSeed writes prefs, not boxes, and collect() runs on the next pause
+     * and on every keystroke - so a seed that is not followed by a rebind is
+     * overwritten by the old boxes at the first tap. bindCard() reloads from
+     * prefs into the boxes, and the collect() at the end of it writes the same
+     * values straight back.
+     */
+    private void seedVector() {
+        status(VectorSeed.apply(this));
+        bindCard(current);
+    }
+
+    /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */
+    private void retryEncryption() {
+        Prefs.reset(this);
+        prefs = Prefs.get(this);
+        written.clear();
+        bindCard(current);
+        status(Prefs.isEncrypted()
+                ? "Keystore works again - the store is re-encrypted"
+                : "Still plaintext - the Keystore is not usable on this device",
+                Prefs.isEncrypted() ? COL_FRESH : COL_STALE);
     }
 
     private void setHexPref(String name, String title, String hint, int minLen) {
@@ -1616,6 +1693,45 @@ public class MainActivity extends AppCompatActivity {
                             .replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
                     if (h.length() < minLen) {
                         Toast.makeText(this, title + " needs at least " + minLen + " hex",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    prefs.edit().putString(key(current, name), h).apply();
+                    status(title + " set, " + (h.length() / 2) + " bytes");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /**
+     * As setHexPref, but the length has to be one of {@code lens} exactly.
+     *
+     * imkcvc3 is the case: kdCvc3() accepts 32 or 48 and nothing else, but the
+     * "at least 32" check here let 33 through, so a stray nibble saved fine and
+     * then made every CSC 0000 with no complaint at the point of entry.
+     */
+    private void setHexPrefExact(String name, String title, String hint, final int... lens) {
+        final EditText e = new EditText(this);
+        e.setText(prefs.getString(key(current, name), ""));
+        e.setHint(hint);
+        e.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(e)
+                .setPositiveButton("Save", (d, w) -> {
+                    String h = e.getText().toString()
+                            .replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+                    boolean ok = false;
+                    for (int len : lens) if (h.length() == len) { ok = true; break; }
+                    if (!ok) {
+                        StringBuilder want = new StringBuilder();
+                        for (int len : lens) {
+                            if (want.length() > 0) want.append(" or ");
+                            want.append(len);
+                        }
+                        Toast.makeText(this, title + " must be exactly " + want + " hex",
                                 Toast.LENGTH_SHORT).show();
                         return;
                     }
@@ -1665,12 +1781,10 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Build the MSD skeleton, at SFI 1 rec 1.
      *
-     * TWO SHAPES. Mastercard Kernel 2 marks where the terminal patches CSC, ATC
-     * and nUN with bitmaps: 9F65 over the PAN, 9F66 over the DD region, 9F67 for
-     * nUN, and a 9F69 UDOL naming 9F6A. Visa and ExpressPay define none of that
-     * - the CSC position is fixed by the spec - so they get a bare 57.
-     *
-     * The DD is eight zeros in both: CSC 2, ATC 2, nUN 2, two spare.
+     * Delegates to the profile rather than re-deriving the layout here. The old
+     * copy switched on profileFor(pan), so a pinned AMEX card holding a 5413
+     * number got a Mastercard skeleton with the wrong bitmaps - the one thing
+     * the pin exists to prevent. effectiveProfile() is what the service runs.
      *
      * armMsdCard() supersedes this for the dump path, because it keeps the
      * dump's own DD instead of zeroing it. This stays for the menu.
@@ -1683,28 +1797,20 @@ public class MainActivity extends AppCompatActivity {
         String svc = prefs.getString(key(current, "service"), "").replaceAll("[^0-9]", "");
         while (svc.length() < 3) svc = "0" + svc;
 
-        byte[] track = EmvCrypto.msdTrack2(pan, exp.substring(0, 4),
-                svc.substring(0, 3), 8);
+        CardProfile prof = Profiles.byName(effectiveProfile());
+        if (prof == null) { status("no profile for this card"); return; }
 
-        byte[] rec;
-        if ("MASTERCARD".equals(profileFor(pan))) {
-            int ddOff = pan.length() + 1 + 4 + 3;
-            rec = Tlv.t(0x70, Tlv.cat(
-                    Tlv.t(0x9F6B, track),
-                    Tlv.t(0x9F65, Profiles.bits(0, pan.length())),
-                    Tlv.t(0x9F66, Profiles.bits(ddOff, 4)),
-                    Tlv.t(0x9F67, new byte[]{0x02}),
-                    Tlv.t(0x9F69, Tlv.t(0x9F6A, new byte[]{0x04}))));
-        } else {
-            rec = Tlv.t(0x70, Tlv.t(0x57, track));
+        String rec = prof.msdRecord(pan, exp.substring(0, 4), svc.substring(0, 3), DD_ZERO);
+        if (rec == null) {
+            status(prof.name() + " has no MSD record shape for this card");
+            return;
         }
 
         prefs.edit()
-                .putString(key(current, "msdrec"), Hex.toHex(rec))
+                .putString(key(current, "msdrec"), rec)
                 .putString(key(current, "msdloc"), "0101")
                 .apply();
-        status("skeleton built, " + rec.length + "B - "
-                + ("MASTERCARD".equals(profileFor(pan)) ? "bitmaps + UDOL" : "bare 57"));
+        status("skeleton built for " + prof.name() + ", " + (rec.length() / 2) + "B");
     }
 
     private void pickKeyVariant() {
@@ -1892,6 +1998,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * Dictionary-scan candidate keys against a reference ARQC.
+     *
+     * THE TYPED REFERENCE READS THE AIP BOX, NOT THE PDOL BOX. It read etPdol,
+     * so the four-hex-character test below only ever passed if the PDOL field
+     * happened to be four nibbles - a real PDOL is eighteen bytes - and the AIP
+     * box, which exists for exactly this, was only consulted as a fallback.
+     * Typed-reference scanning was effectively dead.
+     */
     private void scanForKey(boolean announce) {
         String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
         String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
@@ -1899,7 +2014,7 @@ public class MainActivity extends AppCompatActivity {
 
         String typedArqc = t(etArqc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
         String typedCdol = t(etCdol1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        String typedAip  = t(etPdol).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        String typedAip  = t(etAip).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
         String typedAtc  = t(etAtc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
         boolean typedRef = cmdHex.isEmpty() && rspHex.isEmpty()
                 && typedArqc.length() == 16 && typedCdol.length() >= 16
@@ -1911,7 +2026,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (!typedRef && (cmdHex.isEmpty() || rspHex.isEmpty())) {
             if (announce) {
-                Toast.makeText(this, "No reference - fill the ARQC, CDOL1, PDOL and ATC boxes",
+                Toast.makeText(this, "No reference - fill the ARQC, CDOL1, AIP and ATC boxes",
                         Toast.LENGTH_LONG).show();
             }
             return;
@@ -2245,27 +2360,36 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
+    /**
+     * Delete a slot and shift everything above it down.
+     *
+     * prefs.getAll() IS SNAPSHOTTED ONCE. It was called inside both loops - the
+     * remove loop and copyBlock - so a twenty-card wallet decrypted the whole
+     * file from the Keystore around forty times for a single delete.
+     */
     private void doDelete(int index) {
         SharedPreferences.Editor e = prefs.edit();
         int n = Math.min(prefs.getInt("card_count", 0), MAX_CARDS);
         if (n <= 0) return;
 
+        Map<String, ?> all = prefs.getAll();
+
         String victim = key(index, "");
-        for (String k : prefs.getAll().keySet()) {
+        for (String k : all.keySet()) {
             if (k.startsWith(victim)) e.remove(k);
         }
 
         for (int i = index; i < n - 1; i++) {
             String from = key(i + 1, "");
             String to = key(i, "");
-            for (String k : prefs.getAll().keySet()) {
+            for (String k : all.keySet()) {
                 if (k.startsWith(to)) e.remove(k);
             }
-            copyBlock(e, from, to);
+            copyBlock(e, all, from, to);
         }
 
         String last = key(n - 1, "");
-        for (String k : prefs.getAll().keySet()) {
+        for (String k : all.keySet()) {
             if (k.startsWith(last)) e.remove(k);
         }
 
@@ -2281,8 +2405,8 @@ public class MainActivity extends AppCompatActivity {
         showPage(0);
     }
 
-    private void copyBlock(SharedPreferences.Editor e, String from, String to) {
-        for (Map.Entry<String, ?> en : prefs.getAll().entrySet()) {
+    private void copyBlock(SharedPreferences.Editor e, Map<String, ?> all, String from, String to) {
+        for (Map.Entry<String, ?> en : all.entrySet()) {
             String k = en.getKey();
             if (!k.startsWith(from)) continue;
             String nk = to + k.substring(from.length());
@@ -2452,6 +2576,13 @@ public class MainActivity extends AppCompatActivity {
         } catch (Throwable t) {
             android.util.Log.w("HCE", "verdict restore failed", t);
         }
+
+        // After the verdict, so it never hides one - only fills an empty line.
+        try {
+            warnIfPlaintext();
+        } catch (Throwable t) {
+            android.util.Log.w("HCE", "plaintext check failed", t);
+        }
     }
 
     // ---------- clone from reader ----------
@@ -2515,8 +2646,17 @@ public class MainActivity extends AppCompatActivity {
         etExpiry.setText(expiry);
         etService.setText(service);
         etTrack2.setText(track2);
+
+        // THE DD BOX IS KEPT. It used to be set to "" whenever a track 2 came
+        // back - which is every real clone - and collect() then persisted the
+        // empty string. The record was still built from `disc`, so the tap
+        // worked, but everything reading the box afterwards was wrong: the
+        // preview said "no DD at all - the arm will guess zeros", onCscTyped()
+        // could never fire because it needs dd.length() >= cscLen, and any later
+        // armFromFields() rebuilt the skeleton with an all-zero DD and threw the
+        // captured CSC away.
+        etDiscretionary.setText(disc);
         etAid.setText(aid);
-        etDiscretionary.setText(track2.isEmpty() ? disc : "");
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
@@ -2604,27 +2744,33 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * Move the bare staging keys into the slot and clear them.
+     *
+     * prefs.getAll() is snapshotted once - it used to be walked three times, and
+     * each walk decrypts the whole file.
+     */
     private void copyStagingToCard(int index) {
         SharedPreferences.Editor e = prefs.edit();
         String dst = key(index, "cap_");
+        Map<String, ?> all = prefs.getAll();
 
         List<String> stale = new ArrayList<>();
-        for (String k : prefs.getAll().keySet()) {
+        for (String k : all.keySet()) {
             if (k.startsWith(dst)) stale.add(k);
         }
         for (String k : stale) e.remove(k);
 
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("cap_")) {
-                e.putString(dst + k.substring(4), prefs.getString(k, ""));
-            }
-        }
-
-        for (String k : prefs.getAll().keySet()) {
-            if (k.startsWith("cap_")) e.remove(k);
+        for (Map.Entry<String, ?> en : all.entrySet()) {
+            String k = en.getKey();
+            if (!k.startsWith("cap_")) continue;
+            Object v = en.getValue();
+            if (v != null) e.putString(dst + k.substring(4), v.toString());
+            e.remove(k);
         }
 
         e.apply();
+        written.clear();
     }
 
     private static String nz(String s) {
