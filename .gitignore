@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+.claude-stop-count
+.claude-in-progress
