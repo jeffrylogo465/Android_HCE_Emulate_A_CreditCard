@@ -154,6 +154,18 @@ final class Prefs {
      *
      * FORCE_PLAIN is skipped so it does not travel into the encrypted store,
      * where a stale true would send the next launch back to the mirror.
+     *
+     * APPLY, NOT COMMIT. This runs on whatever thread opened the store - and in
+     * the service that is the main thread, during onCreate, with a terminal
+     * already waiting on the first APDU. commit() is a synchronous rewrite of
+     * the whole encrypted file and the single biggest reason a first tap froze
+     * the app. apply() returns immediately; reads still see every value because
+     * they come out of the editor's in-memory map.
+     *
+     * The cost of losing the boolean that commit() returned: the caller no
+     * longer learns the write failed. That is acceptable - get() is wrapped in
+     * try/catch by every caller and falls back to the mirror on any throw, and a
+     * migration that silently does not land just re-runs on the next open.
      */
     private static void migrateOnce(Context app, SharedPreferences enc) {
         if (enc.getBoolean(MIGRATED, false)) return;
@@ -187,10 +199,8 @@ final class Prefs {
             }
         }
 
-        // commit(), not apply(): the caller is about to read straight back.
-        if (!e.putBoolean(MIGRATED, true).commit()) {
-            throw new IllegalStateException("migration did not commit");
-        }
+        e.putBoolean(MIGRATED, true);
+        e.apply();
     }
 
     /** Keys the service reads as strings, whatever they were stored as. */
