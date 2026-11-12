@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Edit(app/src/main/java/**)",
+      "Edit(app/src/test/java/**)",
+      "Edit(app/src/main/res/**)",
+      "Edit(app/build.gradle.kts)",
+      "Edit(gradle/libs.versions.toml)",
+      "Bash(./gradlew testDebugUnitTest:*)",
+      "Bash(./gradlew :app:testDebugUnitTest:*)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(./gradlew lintDebug)",
+      "Bash(./gradlew --stop)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)",
+      "Read(local.properties)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": ".claude/stop-guard.sh" } ] }
+    ]
+  }
+}
