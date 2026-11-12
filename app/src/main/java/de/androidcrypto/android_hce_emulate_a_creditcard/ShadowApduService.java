@@ -205,26 +205,38 @@ public class ShadowApduService extends HostApduService {
     private boolean expiryWarned;
 
     /**
-     * Install the file crash logger and OPEN THE STORE HERE, on the main thread.
+     * Install the file crash logger and OPEN THE STORE HERE - but on a worker.
      *
-     * Both are deliberate. A tap arrives on a binder thread, and if the store
-     * has never been opened the Keystore build and the migration would run
-     * there instead - inside the APDU path, on the thread with the tightest
-     * budget. Doing it in onCreate moves that to service start, where it costs
-     * a few hundred milliseconds once and nothing afterwards.
+     * CrashLog first: onCreate is the only place in this class guaranteed to run
+     * before the first APDU, so the handler cannot miss a tap crash.
      *
-     * onCreate is also the only place in this class that is guaranteed to run
-     * before the first APDU, so the crash logger cannot miss a tap crash.
+     * THE STORE OPEN IS OFF THE MAIN THREAD. It used to be inline, which is
+     * correct for ordering and wrong for latency: EncryptedSharedPreferences
+     * .create() is a Keystore round trip, and the migration that may follow
+     * re-encrypts the whole wallet. onCreate runs on the main thread, so a cold
+     * tap paid all of it before the first APDU was answered - with the UI frozen
+     * and a terminal counting down.
+     *
+     * prefs() still calls Prefs.get() and still blocks if the store is not open,
+     * but it now blocks a binder thread that has one APDU to answer rather than
+     * the main thread that has to draw. On a warm app the call is cached and this
+     * thread is a no-op.
      */
     @Override
     public void onCreate() {
         super.onCreate();
         CrashLog.install(this);
-        try {
-            Prefs.get(this);
-        } catch (Throwable t) {
-            Log.w(TAG, "store open at service start failed", t);
-        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Prefs.get(ShadowApduService.this);
+                } catch (Throwable t) {
+                    Log.w(TAG, "store open at service start failed", t);
+                }
+            }
+        }, "store-open").start();
     }
 
     /**
@@ -351,7 +363,7 @@ public class ShadowApduService extends HostApduService {
      *
      * Prefs.get() hands back the encrypted file, or the plaintext mirror when
      * the Keystore is unavailable. It caches, so the Keystore is not touched
-     * per call - and onCreate has already opened it once before any APDU.
+     * per call - and onCreate has already started opening it on a worker.
      */
     private SharedPreferences prefs() {
         return Prefs.get(this);
@@ -2171,7 +2183,11 @@ public class ShadowApduService extends HostApduService {
                 // No clipboard write here any more: it fired on every tap and
                 // pushed a full log, PAN included, into whatever app you pasted
                 // into next. CaptureActivity's copy button is the explicit route.
-                prefs().edit().putString("taplog", t).putString("lastverdict", v).apply();
+                prefs().edit()
+                        .putString("taplog", t)
+                        .putString("lastverdict", v)
+                        .putLong("lastverdict_at", System.currentTimeMillis())
+                        .apply();
                 popup(v);
             }
         } catch (Throwable e) {
