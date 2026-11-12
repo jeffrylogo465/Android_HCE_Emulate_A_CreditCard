@@ -72,9 +72,23 @@ public final class ProfileVisa implements CardProfile {
         return Profiles.selectPpse(Profiles.hex(Profiles.oneAppPpse(aid)));
     }
 
+    /**
+     * The SELECT for this card's own AID.
+     *
+     * THE Lc IS COMPUTED, NOT TYPED. It was a literal 07, right only while the
+     * AID is seven bytes - and matchesAid() accepts the whole A000000003 RID,
+     * which includes the eight-byte A00000000386980701. Typing that put eight
+     * AID bytes behind a seven-byte Lc, and the card read the last one as Le.
+     *
+     * A null or empty aid falls back to the profile's own, because the caller
+     * (aidFor) can hand back an empty string when the box is blank.
+     */
     @Override public String[] selectApp(String aid, String label) {
+        String a = (aid == null || aid.isEmpty()) ? defaultAid() : aid;
+        byte[] name = Hex.hex(a);
         return new String[]{
-                "00A4040007" + aid + "=" + Profiles.hex(Profiles.labelFci(aid, label)) + "9000",
+                "00A40400" + String.format(Locale.US, "%02X", name.length) + a
+                        + "=" + Profiles.hex(Profiles.labelFci(a, label)) + "9000",
         };
     }
 
