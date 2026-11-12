@@ -17,9 +17,9 @@ import android.widget.Toast;
  * Reads card<N>_cap_* - MainActivity.copyStagingToCard() moves bare cap_* into
  * the slot and deletes the bare ones, so bare keys are only a mid-read fallback.
  *
- * NEW in this revision: a READINESS block at the top. The screen used to list
- * the capture and leave you to work out whether it was usable. Every one of the
- * following silently costs you a tap, and none of them were visible:
+ * A READINESS block sits at the top. The screen used to list the capture and
+ * leave you to work out whether it was usable. Every one of the following
+ * silently costs you a tap, and none of them were visible:
  *
  *   - no captured PPSE (service generates a one-entry directory instead)
  *   - cap_aid not matching the card's own AID (terminal picks an applet we
@@ -28,6 +28,12 @@ import android.widget.Toast;
  *     the built path runs)
  *   - no records at all (terminal gets one synthetic and 6A83 after it)
  *   - an ATC behind the card's own (the issuer declines on the window check)
+ *
+ * THE TAP LOG IS PER SLOT AND LIVES IN TapLog. This class used to hold its own
+ * "term_log.txt" constant, which stopped matching the moment TapLog started
+ * writing term_<slot>log.txt - so the section was always empty and clear() was
+ * a no-op. Reading and clearing now go through TapLog, which also flushes the
+ * buffer first and leaves other cards alone.
  *
  * THE INT-SHAPED PREFS ARE STRINGS NOW. 'selected' and 'msd' are written with
  * putString by MainActivity and read by the service through a getString helper,
@@ -38,9 +44,6 @@ import android.widget.Toast;
 public class CaptureActivity extends Activity {
 
     public static final String EXTRA_CARD_INDEX = "card_index";
-
-    /** Must match ShadowApduService.TERM_LOG. */
-    private static final String TERM_LOG = "term_log.txt";
 
     private SharedPreferences prefs;
     private TextView txtInfo;
@@ -63,7 +66,7 @@ public class CaptureActivity extends Activity {
         findViewById(R.id.btnCapCopy).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("capture", build()));
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("capture", safeBuild()));
                 Toast.makeText(CaptureActivity.this, "Copied", Toast.LENGTH_SHORT).show();
             }
         });
@@ -73,18 +76,27 @@ public class CaptureActivity extends Activity {
                 clear();
                 Toast.makeText(CaptureActivity.this, "Cleared capture, ATC and tap log",
                         Toast.LENGTH_SHORT).show();
-                txtInfo.setText(build());
+                txtInfo.setText(safeBuild());
             }
         });
 
-        txtInfo.setText(build());
+        txtInfo.setText(safeBuild());
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         resolveSlot();
-        if (txtInfo != null) txtInfo.setText(build());
+        if (txtInfo != null) txtInfo.setText(safeBuild());
+    }
+
+    /** Nothing on this screen is worth taking the activity down for. */
+    private String safeBuild() {
+        try {
+            return build();
+        } catch (Throwable t) {
+            return "capture screen failed: " + t + "\n";
+        }
     }
 
     /** The card we were launched for, else whatever is selected. */
@@ -122,8 +134,20 @@ public class CaptureActivity extends Activity {
 
     /** Card-slot value, falling back to the bare staging key. */
     private String get(String k) {
-        String v = prefs.getString(slot + k, "");
-        if (v == null || v.isEmpty()) v = prefs.getString(k, "");
+        String v;
+        try {
+            v = prefs.getString(slot + k, "");
+        } catch (ClassCastException oldInt) {
+            v = safeInt(slot + k, Integer.MIN_VALUE) == Integer.MIN_VALUE
+                    ? "" : String.valueOf(safeInt(slot + k, 0));
+        }
+        if (v == null || v.isEmpty()) {
+            try {
+                v = prefs.getString(k, "");
+            } catch (ClassCastException oldInt) {
+                v = "";
+            }
+        }
         return v == null ? "" : v;
     }
 
@@ -136,16 +160,28 @@ public class CaptureActivity extends Activity {
         try {
             v = prefs.getString(slot + k, null);
         } catch (ClassCastException oldInt) {
-            try {
-                return prefs.getInt(slot + k, def);
-            } catch (ClassCastException alsoNotInt) {
-                return def;
-            }
+            return safeInt(slot + k, def);
         }
         if (v == null || v.isEmpty()) return def;
         try {
             return Integer.parseInt(v.trim());
         } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    /** getInt that never throws, whatever shape the value is in. */
+    private int safeInt(String k, int def) {
+        try {
+            return prefs.getInt(k, def);
+        } catch (ClassCastException notInt) {
+            try {
+                String s = prefs.getString(k, null);
+                return (s == null || s.isEmpty()) ? def : Integer.parseInt(s.trim());
+            } catch (Throwable t) {
+                return def;
+            }
+        } catch (Throwable t) {
             return def;
         }
     }
@@ -158,8 +194,8 @@ public class CaptureActivity extends Activity {
      * and either regresses or jumps a thousand ahead for no reason. atc and
      * atccommitted go with it for the same reason.
      *
-     * The terminal log is still one global file, so this takes every card's tap
-     * history with it. That is a known wart, not a decision.
+     * The tap log is per slot now, so clearing card B no longer takes card A's
+     * history with it.
      */
     private void clear() {
         SharedPreferences.Editor e = prefs.edit();
@@ -170,10 +206,7 @@ public class CaptureActivity extends Activity {
         e.remove(slot + "atccommitted");
         e.remove(slot + "atcfloor");
         e.apply();
-        try {
-            java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
-            if (f.exists()) f.delete();
-        } catch (Exception ignored) { }
+        TapLog.clear(this, slot);
     }
 
     private static String dash(String s) {
@@ -337,7 +370,7 @@ public class CaptureActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append("SLOT: ").append(slot)
                 .append("   (card ").append(cardIndex + 1)
-                .append(" of ").append(prefs.getInt("card_count", 0)).append(')').append('\n');
+                .append(" of ").append(safeInt("card_count", 0)).append(')').append('\n');
         sb.append('\n');
 
         sb.append("LABEL: ").append(dash(get("label"))).append('\n');
@@ -383,36 +416,29 @@ public class CaptureActivity extends Activity {
     }
 
     /**
-     * The tail of the terminal tap log - what a real till sent us and what we
-     * answered. Capped at the last 8 KB so the TextView stays usable.
+     * The tail of this slot's terminal tap log - what a real till sent us and
+     * what we answered. TapLog flushes its buffer first and caps at 8 KB so the
+     * TextView stays usable.
      */
     private String termLogSection() {
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n========================================\n");
-        sb.append("TERMINAL TAP LOG  (last 8 KB)\n");
+        sb.append("TERMINAL TAP LOG  (last 8 KB, slot ").append(slot).append(")\n");
         sb.append(">> 80A8 = GPO    >> 00B2 = READ RECORD    >> 80AE = GENERATE AC\n");
         sb.append("If it stops after 80A8 there is no READ RECORD.\n");
         sb.append("The !! verdict line names where it quit.\n");
         sb.append("========================================\n\n");
 
-        java.io.File f = new java.io.File(getExternalFilesDir(null), TERM_LOG);
-        if (!f.exists() || f.length() == 0) {
-            sb.append("(empty - tap a real terminal, then come back here)\n");
-            return sb.toString();
-        }
-
+        String tail;
         try {
-            long keep = Math.min(f.length(), 8192);
-            byte[] buf = new byte[(int) keep];
-            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
-            raf.seek(f.length() - keep);
-            raf.readFully(buf);
-            raf.close();
-
-            if (f.length() > keep) sb.append("...(").append(f.length() - keep).append(" bytes trimmed)\n");
-            sb.append(new String(buf, "UTF-8"));
-        } catch (Exception e) {
-            sb.append("could not read the log: ").append(e).append('\n');
+            tail = TapLog.readTail(this, slot, 8192);
+        } catch (Throwable t) {
+            tail = "could not read the log: " + t + "\n";
+        }
+        if (tail == null || tail.isEmpty()) {
+            sb.append("(empty - tap a real terminal, then come back here)\n");
+        } else {
+            sb.append(tail);
         }
         return sb.toString();
     }
