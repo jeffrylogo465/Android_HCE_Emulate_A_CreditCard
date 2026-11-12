@@ -110,7 +110,7 @@ final class Prefs {
             migrateOnce(app, enc);
 
             // From here on every write is mirrored. See Shadow.
-            cached = new Shadow(enc, plain);
+            cached = new Shadow(app, enc, plain);
             encrypted = true;
             return cached;
         } catch (Throwable t) {
@@ -145,8 +145,8 @@ final class Prefs {
     /**
      * Whether the live store is the encrypted one. For the status line.
      *
-     * Nothing calls this yet. It exists so the UI can say "plaintext" out loud -
-     * a fallback is otherwise completely silent, and the user has no way to know
+     * MainActivity reads this on resume to say "PLAINTEXT store" out loud - a
+     * fallback is otherwise completely silent, and the user has no way to know
      * the wallet is unprotected.
      */
     static boolean isEncrypted() {
@@ -162,8 +162,7 @@ final class Prefs {
      * resetting after a fallback would have thrown away everything written in
      * plaintext mode.
      *
-     * Nothing calls this yet either. Wire it to a button once the UI can show
-     * isEncrypted().
+     * Wired to the key-tools menu item "Store: retry encryption".
      */
     static synchronized void reset(Context ctx) {
         Context app = ctx.getApplicationContext();
@@ -266,33 +265,26 @@ final class Prefs {
      * the shadow on the spot and mark the store dead, rather than throwing into
      * a caller that does not expect it. MainActivity.loadAll() has no try/catch
      * around its reads and would otherwise take the activity down.
+     *
+     * THE APP CONTEXT IS HELD, not an Activity one. dead() needs a Context to
+     * hand to Prefs.fallBack(), and an application Context cannot leak.
      */
     private static final class Shadow implements SharedPreferences {
 
+        private final Context app;
         private final SharedPreferences live;
         private final SharedPreferences plain;
 
-        Shadow(SharedPreferences live, SharedPreferences plain) {
+        Shadow(Context app, SharedPreferences live, SharedPreferences plain) {
+            this.app = app;
             this.live = live;
             this.plain = plain;
         }
 
         /** Called from a read that threw. Returns the store to use from now on. */
         private SharedPreferences dead(Throwable t) {
-            Prefs.fallBack(liveContext(), plain, t);
+            Prefs.fallBack(app, plain, t);
             return plain;
-        }
-
-        /**
-         * The Context is not held, so rebuild it from the one thing that always
-         * has it: the plain store's own file path is not enough, and passing a
-         * Context into every Shadow would keep an Activity alive. The application
-         * context is fetched from the EncryptedSharedPreferences instance's
-         * class loader is not possible either - so the Shadow is constructed with
-         * the app Context instead.
-         */
-        private Context liveContext() {
-            return appContext;
         }
 
         // ------------------------------------------------------------- reads
