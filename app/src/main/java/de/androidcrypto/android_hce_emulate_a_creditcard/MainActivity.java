@@ -31,8 +31,6 @@ import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
-    /** The plaintext file. Prefs owns it now; kept here as documentation. */
-    private static final String PREF = "hce_card";
     private static final int MAX_CARDS = 20;
     private static final int REQ_CLONE = 4711;
 
@@ -111,10 +109,10 @@ public class MainActivity extends AppCompatActivity {
     private static final String ASKED_DEFAULT = "asked_default";
 
     private static final String[][] VARIANTS = {
-            {"0", "CDOL, AIP, ATC, IAD  -  option 0"},
-            {"1", "CDOL, AIP, ATC, IAD  -  option 1"},
-            {"2", "AIP, ATC, IAD, CDOL  -  option 0"},
-            {"3", "AIP, ATC, IAD, CDOL  -  option 1"},
+            {"0", "CDOL, AIP, ATC, IAD  -  input order 0"},
+            {"1", "CDOL, AIP, ATC, IAD  -  input order 1"},
+            {"2", "AIP, ATC, IAD, CDOL  -  input order 0"},
+            {"3", "AIP, ATC, IAD, CDOL  -  input order 1"},
     };
 
     private static final String[][] AID_PRESETS = {
@@ -175,6 +173,11 @@ public class MainActivity extends AppCompatActivity {
     private boolean suppressResumeStatus = false;
 
     private String appliedProfile = "";
+
+    /** One scan at a time. A second press cancels instead of stacking threads. */
+    private volatile boolean scanning = false;
+    private volatile boolean scanCancel = false;
+    private int scanEpoch = 0;
 
     /**
      * What was last written, by pref key, so collect() can skip the rest.
@@ -1337,6 +1340,17 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        // PSN IS NOT A BOX, so nothing collects it. Seed it once, or the ICC key
+        // derivation falls back to a default that used to disagree with the key
+        // scan (service 00, scan 01) and a correct key could never match on a
+        // hand-built card. 01 is the real PSN on a first card; a clone has
+        // already written its own and this leaves it alone.
+        try {
+            if (prefs.getString(key(i, "psn"), "").isEmpty()) {
+                prefs.edit().putString(key(i, "psn"), "01").apply();
+            }
+        } catch (Throwable ignored) { }
+
         etMsd.setText(String.valueOf(intPref(key(i, "msd"),
                 pf0 == null ? 0 : Integer.parseInt(msdDefault(net0)))));
         etScript.setText(prefs.getString(key(i, "script"), ""));
@@ -1625,7 +1639,8 @@ public class MainActivity extends AppCompatActivity {
                                 "Seed vector card", "Run CVC3 harness",
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
                                 "MSD: set record", "MSD: set location",
-                                "Check profile constants", "Store: retry encryption"},
+                                "Check profile constants", "Store: retry encryption",
+                                "Copy crash log", "Share crash log", "Clear crash log"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1646,6 +1661,9 @@ public class MainActivity extends AppCompatActivity {
                                     "ssrr hex, e.g. 0201 = SFI 2 record 1.", 4);
                             else if (w == 14) checkProfiles();
                             else if (w == 15) retryEncryption();
+                            else if (w == 16) copyCrashLog();
+                            else if (w == 17) shareCrashLog();
+                            else if (w == 18) { CrashLog.clear(this); status("Crash log cleared"); }
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1676,6 +1694,47 @@ public class MainActivity extends AppCompatActivity {
                 ? "Keystore works again - the store is re-encrypted"
                 : "Still plaintext - the Keystore is not usable on this device",
                 Prefs.isEncrypted() ? COL_FRESH : COL_STALE);
+    }
+
+    /**
+     * Get the crash trace out of the app.
+     *
+     * The clipboard route only works from a live process, which is exactly why
+     * it is the wrong transport for the crash handler itself - but it is the
+     * right one here, because the user is pressing a button in a running app.
+     *
+     * Read first, then say how big it was. An empty result is the useful answer
+     * most of the time, so it is not a toast nobody reads.
+     */
+    private void copyCrashLog() {
+        String log = CrashLog.read(this);
+        if (log.isEmpty()) {
+            status("No crash log - nothing has crashed");
+            return;
+        }
+        android.content.ClipboardManager cm =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(
+                android.content.ClipData.newPlainText("crash log", log));
+        status("Crash log copied, " + log.length() + " chars");
+    }
+
+    /** Same text, into whatever the user picks. No FileProvider needed. */
+    private void shareCrashLog() {
+        String log = CrashLog.read(this);
+        if (log.isEmpty()) {
+            status("No crash log - nothing has crashed");
+            return;
+        }
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_SUBJECT, "crash log");
+        send.putExtra(Intent.EXTRA_TEXT, log);
+        try {
+            startActivity(Intent.createChooser(send, "Share crash log"));
+        } catch (ActivityNotFoundException e) {
+            status("No app to share to - use Copy instead");
+        }
     }
 
     private void setHexPref(String name, String title, String hint, int minLen) {
@@ -1818,7 +1877,7 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < VARIANTS.length; i++) labels[i] = VARIANTS[i][0] + " - " + VARIANTS[i][1];
 
         new AlertDialog.Builder(this)
-                .setTitle("MAC input variant")
+                .setTitle("MAC input order")
                 .setItems(labels, (d, w) -> {
                     prefs.edit().putString(key(current, "keyvar"), VARIANTS[w][0]).apply();
                     status("MAC variant " + VARIANTS[w][0] + " - " + VARIANTS[w][1]);
@@ -2001,40 +2060,78 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Dictionary-scan candidate keys against a reference ARQC.
      *
-     * THE TYPED REFERENCE READS THE AIP BOX, NOT THE PDOL BOX. It read etPdol,
-     * so the four-hex-character test below only ever passed if the PDOL field
-     * happened to be four nibbles - a real PDOL is eighteen bytes - and the AIP
-     * box, which exists for exactly this, was only consulted as a fallback.
-     * Typed-reference scanning was effectively dead.
+     * TWO THINGS THAT WERE WRONG HERE.
+     *
+     * The typed reference read etPdol. It tested length() == 4 against an
+     * eighteen-byte PDOL, so the branch could never fire and the AIP box - which
+     * exists for exactly this - was only consulted as a fallback. Worse, the
+     * branch also required BOTH capture keys to be empty, so even after the box
+     * was corrected it stayed dead for anyone who had cloned a card, which is
+     * everyone who has a reference at all. A complete typed set now wins over
+     * the capture; the capture is only the fallback.
+     *
+     * FOUR VARIANTS WERE TWO. variant & 1 is passed as `option` to
+     * sessionKeySkd()/sessionKeyAc(), and EmvCrypto documents option as carried
+     * and unused - the key scheme does not vary with it. Only variant & 2 (the
+     * MAC input order) does anything, so half of every scan was recomputing
+     * cryptograms it had already rejected. Two orders now.
+     *
+     * THE CVN DECIDES THE SCHEME AND IT MAY BE UNREADABLE. cvnFromIad() returns
+     * -1 for an empty or short IAD, which used to mean "SKD" and silently made
+     * every CSK card unmatchable. Unknown now tries both, and the IAD being
+     * empty is named out loud - it goes into the MAC input, so an empty one
+     * fails against a correct key no matter what.
+     *
+     * Cancellable and single-flight: up to 200k keys x 2 orders is minutes, and
+     * a second press used to start a second thread over the same boxes.
      */
     private void scanForKey(boolean announce) {
-        String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
-        String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
-        String pan = digits(t(etPan));
+        if (scanning) {
+            scanCancel = true;
+            status("Stopping the scan...");
+            return;
+        }
 
-        String typedArqc = t(etArqc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        String typedCdol = t(etCdol1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        String typedAip  = t(etAip).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        String typedAtc  = t(etAtc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
-        boolean typedRef = cmdHex.isEmpty() && rspHex.isEmpty()
-                && typedArqc.length() == 16 && typedCdol.length() >= 16
-                && typedAip.length() == 4 && typedAtc.length() == 4;
+        final String cmdHex = prefs.getString(key(current, "cap_genaccmd"), "");
+        final String rspHex = prefs.getString(key(current, "cap_rawgenac"), "");
 
-        String aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
-        if (typedRef) aipHex = typedAip;
-        else if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
+        String panBox = digits(t(etPan));
+        if (panBox.isEmpty()) panBox = panFromTrack2();
 
-        if (!typedRef && (cmdHex.isEmpty() || rspHex.isEmpty())) {
+        final String typedArqc = t(etArqc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        final String typedCdol = t(etCdol1).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        final String typedAip  = t(etAip).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        final String typedAtc  = t(etAtc).replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+
+        final boolean typedComplete = typedArqc.length() == 16
+                && typedCdol.length() >= 16
+                && typedAip.length() == 4
+                && typedAtc.length() == 4;
+
+        String aipHex;
+        if (typedComplete) {
+            aipHex = typedAip;
+        } else {
+            aipHex = aipFromGpo(prefs.getString(key(current, "cap_rawgpo"), ""));
+            if (aipHex.isEmpty()) aipHex = t(etAip).toUpperCase();
+        }
+
+        if (!typedComplete && (cmdHex.isEmpty() || rspHex.isEmpty())) {
             if (announce) {
                 Toast.makeText(this, "No reference - fill the ARQC, CDOL1, AIP and ATC boxes",
                         Toast.LENGTH_LONG).show();
             }
             return;
         }
-        if (pan.isEmpty() || aipHex.length() < 4) {
+        if (panBox.isEmpty()) {
             if (announce) {
-                Toast.makeText(this, "Need PAN and reference AIP set on the card",
-                        Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Need a PAN - the box or the track 2", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+        if (aipHex.length() != 4) {
+            if (announce) {
+                Toast.makeText(this, "Need a two-byte reference AIP", Toast.LENGTH_LONG).show();
             }
             return;
         }
@@ -2043,22 +2140,42 @@ public class MainActivity extends AppCompatActivity {
         final byte[] arqcRef;
         final String atc;
 
-        if (typedRef) {
+        if (typedComplete) {
             cdol = hexToBytes(typedCdol);
             arqcRef = hexToBytes(typedArqc);
             atc = typedAtc;
         } else {
             byte[] cmd = hexToBytes(cmdHex);
             byte[] rsp = hexToBytes(rspHex);
-            if (cmd.length < 6) return;
+
+            if (cmd.length < 6) {
+                if (announce) {
+                    Toast.makeText(this, "Reference GENERATE AC is truncated",
+                            Toast.LENGTH_LONG).show();
+                }
+                return;
+            }
+
             int lc = cmd[4] & 0xFF;
             int off = 5;
             if (lc == 0x00) {
-                if (cmd.length < 7) return;
+                if (cmd.length < 7) {
+                    if (announce) {
+                        Toast.makeText(this, "Reference GENERATE AC has no length",
+                                Toast.LENGTH_LONG).show();
+                    }
+                    return;
+                }
                 lc = ((cmd[5] & 0xFF) << 8) | (cmd[6] & 0xFF);
                 off = 7;
             }
-            if (off + lc > cmd.length) return;
+            if (off + lc > cmd.length) {
+                if (announce) {
+                    Toast.makeText(this, "Reference CDOL data runs past the command",
+                            Toast.LENGTH_LONG).show();
+                }
+                return;
+            }
 
             cdol = Arrays.copyOfRange(cmd, off, off + lc);
             arqcRef = tagOf(rsp, 0x9F26);
@@ -2075,7 +2192,10 @@ public class MainActivity extends AppCompatActivity {
 
         final byte[] aip = hexToBytes(aipHex);
         final byte[] iadRef = hexToBytes(t(etIad));
+        final boolean iadEmpty = iadRef.length == 0;
         final String psn = prefs.getString(key(current, "psn"), "01");
+        final String fpan = panBox;
+        final String fatc = atc;
         final List<String> keys = candidateKeys();
 
         if (keys.isEmpty()) {
@@ -2086,59 +2206,105 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        final int cvn = cvnFromIad(t(etIad));
-        final boolean csk = (cvn == 20 || cvn == 21);
+        int cvn = cvnFromIad(t(etIad));
+        final boolean unknownScheme = cvn < 0;
+        final boolean[] schemes = unknownScheme
+                ? new boolean[]{false, true}
+                : new boolean[]{cvn == 20 || cvn == 21};
 
-        status("Scanning " + keys.size() + " keys x 4 variants...");
+        final int epoch = ++scanEpoch;
+        scanCancel = false;
+        scanning = true;
+
+        final int total = keys.size() * 2 * schemes.length;
+        status("Scanning " + keys.size() + " keys"
+                + (unknownScheme ? ", both schemes" : "")
+                + (iadEmpty ? " - IAD empty, MAC input will be short" : "")
+                + ". Press again to stop.");
 
         new Thread(() -> {
             int tried = 0;
-            for (String k : keys) {
-                for (int variant = 0; variant < 4; variant++) {
-                    tried++;
-                    try {
-                        byte[] macIn = ((variant & 2) != 0)
-                                ? cat(aip, hexToBytes(atc), iadRef, cdol)
-                                : cat(cdol, aip, hexToBytes(atc), iadRef);
-                        byte[] un = cdol.length < 4
-                                ? new byte[4]
-                                : Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
+            boolean found = false;
 
-                        byte[] ac = csk
-                                ? EmvCrypto.arqc(k, pan, psn, atc, macIn, variant & 1)
-                                : EmvCrypto.arqcSkd(k, pan, psn, atc, un, macIn, variant & 1);
+            try {
+                outer:
+                for (boolean csk : schemes) {
+                    for (String k : keys) {
+                        for (int variant = 0; variant < 2; variant++) {
+                            if (scanCancel || epoch != scanEpoch) break outer;
+                            tried++;
 
-                        if (Arrays.equals(ac, arqcRef)) {
-                            final String fk = k;
-                            final int fv = variant;
-                            runOnUiThread(() -> {
-                                etMkac.setText(fk);
-                                prefs.edit().putString(key(current, "keyvar"),
-                                        String.valueOf(fv)).apply();
+                            try {
+                                byte[] macIn = variant == 1
+                                        ? cat(aip, hexToBytes(fatc), iadRef, cdol)
+                                        : cat(cdol, aip, hexToBytes(fatc), iadRef);
+                                byte[] un = cdol.length < 4
+                                        ? new byte[4]
+                                        : Arrays.copyOfRange(cdol, cdol.length - 4, cdol.length);
 
-                                String bin6 = digits(t(etPan));
-                                if (bin6.length() >= 6) {
-                                    prefs.edit().putString("keyfor_" + bin6.substring(0, 6),
-                                            fk).apply();
+                                byte[] ac = csk
+                                        ? EmvCrypto.arqc(k, fpan, psn, fatc, macIn, 0)
+                                        : EmvCrypto.arqcSkd(k, fpan, psn, fatc, un, macIn, 0);
+
+                                if (Arrays.equals(ac, arqcRef)) {
+                                    found = true;
+                                    final String fk = k;
+                                    final int fv = variant;
+                                    runOnUiThread(() -> applyFoundKey(fk, fv));
+                                    break outer;
                                 }
+                            } catch (Exception ignored) { }
 
-                                collect();
-                                status("KEY FOUND " + fk + "  (variant " + fv + ")");
-                                Toast.makeText(this, "Issuer key found", Toast.LENGTH_LONG).show();
-                            });
-                            return;
+                            if (tried % 2000 == 0) {
+                                final int t = tried;
+                                runOnUiThread(() -> {
+                                    if (epoch == scanEpoch && scanning) {
+                                        status("Scanning " + t + " of " + total + "...");
+                                    }
+                                });
+                            }
                         }
-                    } catch (Exception ignored) { }
+                    }
                 }
+            } finally {
+                final int triedFinal = tried;
+                final boolean wasFound = found;
+                runOnUiThread(() -> {
+                    scanning = false;
+                    if (wasFound || epoch != scanEpoch) return;
+                    if (scanCancel) {
+                        status("Scan stopped after " + triedFinal + " tries");
+                        return;
+                    }
+                    status("Read OK - no key matched (" + triedFinal + " tries).");
+                    if (announce) {
+                        Toast.makeText(this, "No match - " + triedFinal + " tries",
+                                Toast.LENGTH_LONG).show();
+                    }
+                });
             }
-            final int total = tried;
-            runOnUiThread(() -> {
-                status("Read OK - no key matched (" + total + " tries).");
-                if (announce) {
-                    Toast.makeText(this, "No match - " + total + " tries", Toast.LENGTH_LONG).show();
-                }
-            });
-        }).start();
+        }, "key-scan").start();
+    }
+
+    /**
+     * Record a hit.
+     *
+     * variant is the MAC input order only - 0 is CDOL||AIP||ATC||IAD, 1 is
+     * AIP||ATC||IAD||CDOL. The key-scheme half of the old four-way loop was
+     * inert, so the label says "input order" rather than "variant".
+     */
+    private void applyFoundKey(String key, int variant) {
+        etMkac.setText(key);
+        prefs.edit().putString(key(current, "keyvar"), String.valueOf(variant)).apply();
+
+        String bin6 = digits(t(etPan));
+        if (bin6.length() >= 6) {
+            prefs.edit().putString("keyfor_" + bin6.substring(0, 6), key).apply();
+        }
+
+        collect();
+        status("KEY FOUND " + key + "  (input order " + variant + ")");
+        Toast.makeText(this, "Issuer key found", Toast.LENGTH_LONG).show();
     }
 
     // ---------- small helpers ----------
@@ -2502,6 +2668,9 @@ public class MainActivity extends AppCompatActivity {
      * pref writes killed the activity at exactly the moment the phone was
      * coupled, which reads as "the app closed when I tapped". A failed flush is
      * survivable; a crash here is not.
+     *
+     * A RUNNING KEY SCAN IS CANCELLED. A tap matters more than a scan, and the
+     * scan holds this activity.
      */
     @Override
     protected void onPause() {
@@ -2510,6 +2679,10 @@ public class MainActivity extends AppCompatActivity {
         // path that matters.
         try {
             ui.removeCallbacks(collectNow);
+        } catch (Throwable ignored) { }
+
+        try {
+            if (scanning) scanCancel = true;
         } catch (Throwable ignored) { }
 
         try {
