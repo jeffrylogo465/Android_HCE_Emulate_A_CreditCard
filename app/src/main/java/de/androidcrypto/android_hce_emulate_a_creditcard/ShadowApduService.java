@@ -12,6 +12,7 @@ import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
@@ -205,6 +206,19 @@ public class ShadowApduService extends HostApduService {
     private boolean expiryWarned;
 
     /**
+     * The key set for this tap, or null until something needs it.
+     *
+     * afl() needs the key names to derive the record ranges, and getAll() is the
+     * only way to get them - which on an encrypted store means decrypting the
+     * whole file. It used to run up to three times per tap, on the binder
+     * thread, once per READ RECORD through msdLocation().
+     *
+     * Cleared in resetTransaction(), so it is fresh for every tap and cannot go
+     * stale behind a capture made in between.
+     */
+    private Set<String> keyCache;
+
+    /**
      * Install the file crash logger and OPEN THE STORE HERE - but on a worker.
      *
      * CrashLog first: onCreate is the only place in this class guaranteed to run
@@ -367,6 +381,12 @@ public class ShadowApduService extends HostApduService {
      */
     private SharedPreferences prefs() {
         return Prefs.get(this);
+    }
+
+    /** The tap's key set, fetched once. See keyCache. */
+    private Set<String> keys() {
+        if (keyCache == null) keyCache = prefs().getAll().keySet();
+        return keyCache;
     }
 
     /**
@@ -636,6 +656,7 @@ public class ShadowApduService extends HostApduService {
         expiryWarned = false;
         capturedIad = null;
         gpoCid = "";
+        keyCache = null;
     }
 
     private byte[] aipForMac() {
@@ -964,7 +985,7 @@ public class ShadowApduService extends HostApduService {
         TreeMap<Integer, TreeSet<Integer>> map = new TreeMap<>();
         String prefix = sel() + "cap_rec";
 
-        for (String k : prefs().getAll().keySet()) {
+        for (String k : keys()) {
             if (!k.startsWith(prefix)) continue;
             String rest = k.substring(prefix.length());
             if (rest.startsWith("_")) rest = rest.substring(1);
