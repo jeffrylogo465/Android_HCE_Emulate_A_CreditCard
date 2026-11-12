@@ -241,7 +241,7 @@ public class ShadowApduService extends HostApduService {
      * READ RECORD then keeps its old behaviour. Once a GPO has answered, only
      * the records that AFL names are readable.
      *
-     * Cleared by a new application SELECT (see startApplication), so a second
+     * Cleared by a new application SELECT (see clearApplicationState), so a second
      * tap or a second AID begins clean, and by resetTransaction().
      */
     private byte[] txnAid;
