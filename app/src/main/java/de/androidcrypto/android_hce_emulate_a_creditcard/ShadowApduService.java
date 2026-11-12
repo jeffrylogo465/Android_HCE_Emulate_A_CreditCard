@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -118,6 +119,15 @@ public class ShadowApduService extends HostApduService {
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
 
+    /**
+     * FALLBACKS. All four of these are now overridable from the card's boxes -
+     * see dol() and hexBox() - and the constant is what gets served when the box
+     * is empty or malformed.
+     *
+     * They used to be the only source, so the PDOL / CDOL1 / CDOL2 / CVM list
+     * fields in the editor were written to prefs on every keystroke and read by
+     * nothing. Typing into them changed the preview and not the card.
+     */
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
@@ -133,10 +143,10 @@ public class ShadowApduService extends HostApduService {
      * Without an 8C in the FCI the terminal has no descriptor for COMPUTE
      * CRYPTOGRAPHIC CHECKSUM and quits after the record.
      *
-     * EMV DOES NOT USE THIS. select() advertises CDOL1 on the EMV path, because
-     * an ARQC MACed over the UN alone covers no amount, no currency and no
-     * terminal country - the issuer rebuilds a longer input and no key can make
-     * that match.
+     * EMV DOES NOT USE THIS. select() advertises the CDOL1 box (or CDOL1) on the
+     * EMV path, because an ARQC MACed over the UN alone covers no amount, no
+     * currency and no terminal country - the issuer rebuilds a longer input and
+     * no key can make that match.
      */
     private static final String CDOL_MSD = "9F3704";
 
@@ -202,6 +212,9 @@ public class ShadowApduService extends HostApduService {
     /** Warn-once guards: these fields are read several times per tap. */
     private boolean psnWarned;
     private boolean expiryWarned;
+
+    /** Pref keys already warned about this tap, so a repeated read says it once. */
+    private Set<String> warned;
 
     /**
      * The key set for this tap, or null until something needs it.
@@ -291,6 +304,14 @@ public class ShadowApduService extends HostApduService {
         } catch (Throwable ignored) { }
         try {
             termLog(s);
+        } catch (Throwable ignored) { }
+    }
+
+    /** tap(), but only the first time this key complains in a tap. */
+    private void warnOnce(String key, String line) {
+        try {
+            if (warned == null) warned = new HashSet<>();
+            if (warned.add(key)) tap(line);
         } catch (Throwable ignored) { }
     }
 
@@ -491,6 +512,43 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
+     * A hex pref, cleaned, or the fallback.
+     *
+     * ODD LENGTH FALLS BACK, it does not pad. Every one of these goes through
+     * Hex.hex() or into a TLV, and a dropped nibble is a shifted field - the
+     * kind of thing that reads as a terminal fault rather than a typo.
+     */
+    private String hexBox(String key, String fallback) {
+        String v = p(key, "").replaceAll("[^0-9A-Fa-f]", "");
+        if (v.isEmpty()) return fallback;
+        if ((v.length() & 1) != 0) {
+            warnOnce(key, "!! " + key + " box is odd-length hex - using the constant");
+            return fallback;
+        }
+        return v.toUpperCase();
+    }
+
+    /**
+     * A DOL from the card's box, or the constant.
+     *
+     * VALIDATED, not merely read. A DOL is a TLV list the terminal walks field
+     * by field: one bad byte and it either sends a GPO the card cannot parse or
+     * gives up on the app. TlvValidator is the same walk the profile self-check
+     * runs from the menu, so anything that passes there passes here.
+     */
+    private String dol(String key, String fallback) {
+        String v = hexBox(key, fallback);
+        if (v.equals(fallback)) return fallback;
+
+        String problem = TlvValidator.firstProblem(v);
+        if (problem != null) {
+            warnOnce(key, "!! " + key + " box malformed (" + problem + ") - using the constant");
+            return fallback;
+        }
+        return v;
+    }
+
+    /**
      * Whether this tap runs mag-stripe mode.
      *
      * The pref ORs with the profile: Amex is mag-stripe by nature, so a true
@@ -544,14 +602,20 @@ public class ShadowApduService extends HostApduService {
      * derives a completely different key, and the only symptom is a wrong ARQC -
      * which reads as a wrong master key and sends you off brute-forcing a key
      * that was correct all along.
+     *
+     * THE DEFAULT IS 01, not 00. MainActivity has no PSN box, so a hand-built
+     * card has no value here at all, and 01 is the PSN on a first card. It used
+     * to default to 00 while the key scan defaulted to 01 - two different ICC
+     * keys from the same correct IMK-AC, and the scan blamed the key. bindCard()
+     * now seeds the pref so this default is only a floor.
      */
     private String psn() {
-        String raw = p("psn", "00").replaceAll("[^0-9]", "");
+        String raw = p("psn", "01").replaceAll("[^0-9]", "");
 
         if (raw.isEmpty()) {
-            if (!psnWarned) tap("!! psn is empty - using 00");
+            if (!psnWarned) tap("!! psn is empty - using 01");
             psnWarned = true;
-            return "00";
+            return "01";
         }
         if (raw.length() == 1) {
             if (!psnWarned) tap("!! psn \"" + raw + "\" is one digit - padding to 0" + raw);
@@ -706,6 +770,7 @@ public class ShadowApduService extends HostApduService {
         sawError = false;
         psnWarned = false;
         expiryWarned = false;
+        warned = null;
         capturedIad = null;
         gpoCid = "";
         keyCache = null;
@@ -1167,6 +1232,10 @@ public class ShadowApduService extends HostApduService {
      *
      * MSD does not use this record for its track - the magstripe skeleton is a
      * personalised 57 served verbatim.
+     *
+     * 8C, 8D and 8E come from the card's boxes when they hold a valid DOL, so
+     * the CDOL and CVM list in the editor finally reach the wire. A blank or
+     * malformed box serves the constant.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -1184,9 +1253,9 @@ public class ShadowApduService extends HostApduService {
                 h == null ? new byte[0] : tlv(0x5F20, h),
                 tlv(0x9F07, hex("FFC0")),
                 tlv(0x9F08, hex("0002")),
-                tlv(0x8C, hex(CDOL1)),
-                tlv(0x8D, hex(CDOL2)),
-                tlv(0x8E, hex(CVMLIST)),
+                tlv(0x8C, hex(dol("cdol1", CDOL1))),
+                tlv(0x8D, hex(dol("cdol2", CDOL2))),
+                tlv(0x8E, hex(hexBox("cvmlist", CVMLIST))),
                 tlv(0x9F0D, hex("0000000000")),
                 tlv(0x9F0E, hex("0000000000")),
                 tlv(0x9F0F, hex("0000000000")),
@@ -1405,13 +1474,15 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x50, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x87, new byte[]{0x01}),
                 // The descriptor follows the flow, not the build. MSD is a
-                // single checksum and wants 9F37 alone; EMV MACs over the CDOL
-                // data, so it needs the full CDOL1 or the ARQC covers no amount.
-                tlv(0x8C, hex(isMsd() ? CDOL_MSD : CDOL1)),
+                // single checksum and wants 9F37 alone - the CDOL1 box is a
+                // terminal-input descriptor and would be wrong here; EMV MACs
+                // over the CDOL data, so it needs the full CDOL1 or the ARQC
+                // covers no amount.
+                tlv(0x8C, hex(isMsd() ? CDOL_MSD : dol("cdol1", CDOL1))),
                 tlv(0x9F11, new byte[]{0x01}),
                 tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
-                tlv(0x9F38, hex(PDOL)));
+                tlv(0x9F38, hex(dol("pdol", PDOL))));
         byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
         return cat(tlv(0x6F, inner), SW_OK);
     }
