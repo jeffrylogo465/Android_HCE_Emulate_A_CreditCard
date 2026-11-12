@@ -10,6 +10,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 import java.util.Arrays;
@@ -29,6 +30,10 @@ public class ShadowApduServiceDispatchTest {
 
     @Before
     public void setUp() {
+        // Prefs caches its SharedPreferences in a static, which outlives the
+        // per-test Robolectric application. Without this the ATC counter
+        // carries over from one test to the next and the bytes depend on order.
+        Prefs.reset(RuntimeEnvironment.getApplication());
         svc = Robolectric.buildService(ShadowApduService.class).create().get();
     }
 
@@ -58,7 +63,7 @@ public class ShadowApduServiceDispatchTest {
     @Test
     public void readRecord_returnsRecordAnd9000() {
         assertEquals(
-                "70818D9F420208405F24033112015A0841111111111111115F3401009F0702FFC0"
+                "70818D9F420208405F24033112015A0841111111111111115F3401019F0702FFC0"
                         + "9F080200028C159F02069F03069F1A0295055F2A029A039C019F37048D18"
                         + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0C00000000"
                         + "00000000" + "1F031E039F0D0500000000009F0E0500000000009F0F05"
