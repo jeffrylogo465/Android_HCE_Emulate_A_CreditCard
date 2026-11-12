@@ -174,6 +174,27 @@ public class MainActivity extends AppCompatActivity {
     private String appliedProfile = "";
 
     /**
+     * What was last written, by pref key, so collect() can skip the rest.
+     *
+     * The store is encrypted, and every putString is a synchronous encrypt
+     * before apply() goes async - 26 of them on the main thread in onPause,
+     * which is the instant a tap starts. Almost none of them change between
+     * pauses. Compared against memory, not against prefs, so a skip costs
+     * nothing.
+     *
+     * Cleared on every bind: a different slot has a different baseline, and
+     * carrying values across would skip the writes that switch cards.
+     */
+    private final Map<String, String> written = new java.util.HashMap<>();
+
+    private void putIfChanged(SharedPreferences.Editor e, String k, String v) {
+        String prev = written.get(k);
+        if (prev != null && prev.equals(v)) return;
+        written.put(k, v);
+        e.putString(k, v);
+    }
+
+    /**
      * Debounced prefs flush.
      *
      * Twenty-two fields were written on EVERY keystroke - sixteen writes for a
@@ -1195,30 +1216,30 @@ public class MainActivity extends AppCompatActivity {
     private void collect() {
         int i = current;
         SharedPreferences.Editor e = prefs.edit();
-        e.putString(key(i, "label"), t(etLabel));
-        e.putString(key(i, "name"), t(etName).toUpperCase());
-        e.putString(key(i, "pan"), digits(t(etPan)));
-        e.putString(key(i, "expiry"), t(etExpiry));
-        e.putString(key(i, "service"), t(etService));
-        e.putString(key(i, "discretionary"), t(etDiscretionary).toUpperCase());
-        e.putString(key(i, "track2"), normaliseTrack2(t(etTrack2)));
-        e.putString(key(i, "aid"), t(etAid).toUpperCase());
-        e.putString(key(i, "aip"), t(etAip).toUpperCase());
-        e.putString(key(i, "afl"), t(etAfl).toUpperCase());
-        e.putString(key(i, "cid"), t(etCid).toUpperCase());
-        e.putString(key(i, "atc"), t(etAtc).toUpperCase());
-        e.putString(key(i, "arqc"), t(etArqc).toUpperCase());
-        e.putString(key(i, "iad"), t(etIad).toUpperCase());
-        e.putString(key(i, "cvmlist"), t(etCvmlist).toUpperCase());
-        e.putString(key(i, "cvmres"), t(etCvmres).toUpperCase());
-        e.putString(key(i, "pdol"), t(etPdol).toUpperCase());
-        e.putString(key(i, "cdol1"), t(etCdol1).toUpperCase());
-        e.putString(key(i, "cdol2"), t(etCdol2).toUpperCase());
-        e.putString(key(i, "mkac"), t(etMkac).toUpperCase());
-        e.putString(key(i, "script"), t(etScript));
-        e.putString(key(i, "msd"), t(etMsd).startsWith("1") ? "1" : "0");
-        e.putString(key(i, "forcetc"), chkForceTc.isChecked() ? "1" : "0");
-        e.putString(key(i, "usescript"), armedLines(t(etScript)) > 0 ? "1" : "0");
+        putIfChanged(e, key(i, "label"), t(etLabel));
+        putIfChanged(e, key(i, "name"), t(etName).toUpperCase());
+        putIfChanged(e, key(i, "pan"), digits(t(etPan)));
+        putIfChanged(e, key(i, "expiry"), t(etExpiry));
+        putIfChanged(e, key(i, "service"), t(etService));
+        putIfChanged(e, key(i, "discretionary"), t(etDiscretionary).toUpperCase());
+        putIfChanged(e, key(i, "track2"), normaliseTrack2(t(etTrack2)));
+        putIfChanged(e, key(i, "aid"), t(etAid).toUpperCase());
+        putIfChanged(e, key(i, "aip"), t(etAip).toUpperCase());
+        putIfChanged(e, key(i, "afl"), t(etAfl).toUpperCase());
+        putIfChanged(e, key(i, "cid"), t(etCid).toUpperCase());
+        putIfChanged(e, key(i, "atc"), t(etAtc).toUpperCase());
+        putIfChanged(e, key(i, "arqc"), t(etArqc).toUpperCase());
+        putIfChanged(e, key(i, "iad"), t(etIad).toUpperCase());
+        putIfChanged(e, key(i, "cvmlist"), t(etCvmlist).toUpperCase());
+        putIfChanged(e, key(i, "cvmres"), t(etCvmres).toUpperCase());
+        putIfChanged(e, key(i, "pdol"), t(etPdol).toUpperCase());
+        putIfChanged(e, key(i, "cdol1"), t(etCdol1).toUpperCase());
+        putIfChanged(e, key(i, "cdol2"), t(etCdol2).toUpperCase());
+        putIfChanged(e, key(i, "mkac"), t(etMkac).toUpperCase());
+        putIfChanged(e, key(i, "script"), t(etScript));
+        putIfChanged(e, key(i, "msd"), t(etMsd).startsWith("1") ? "1" : "0");
+        putIfChanged(e, key(i, "forcetc"), chkForceTc.isChecked() ? "1" : "0");
+        putIfChanged(e, key(i, "usescript"), armedLines(t(etScript)) > 0 ? "1" : "0");
         e.putInt("card_count", cards.size());
         e.putString("selected", String.valueOf(i));
         e.apply();
@@ -1234,6 +1255,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void bindCard(int i) {
+        // A different slot is a different baseline, so the skip list cannot
+        // carry over - it would suppress the writes that switch cards.
+        written.clear();
+
         binding = true;
         current = i;
 
