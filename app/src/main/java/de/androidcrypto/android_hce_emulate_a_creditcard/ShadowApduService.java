@@ -32,6 +32,7 @@ public class ShadowApduService extends HostApduService {
     private static final byte[] PPSE           = hex("325041592E5359532E4444463031");
 
     private static final String DEFAULT_AIP = "1880";
+    private static final String DEFAULT_AID = "A0000000031010";
 
     /**
      * Keeps RFU 0x80, CV 0x10, TRM 0x08. Clears SDA 0x40, DDA 0x20, issuer
@@ -167,9 +168,9 @@ public class ShadowApduService extends HostApduService {
     /**
      * Main-looper handler, one instance.
      *
-     * Everything posted to the UI - toasts and the stall watcher - goes through
-     * this, so removeCallbacksAndMessages(null) can clear them all in one place
-     * when a tap ends.
+     * Everything posted to the UI - toasts, the stall watcher, the MSD sanity
+     * pass - goes through this, so removeCallbacksAndMessages(null) can clear
+     * them all in one place when a tap ends.
      */
     private final android.os.Handler ui =
             new android.os.Handler(android.os.Looper.getMainLooper());
@@ -189,12 +190,41 @@ public class ShadowApduService extends HostApduService {
      */
     private int txnEpoch;
 
+    /**
+     * Whether a tap is in progress.
+     *
+     * THE RESET USED TO HANG OFF THE PPSE SELECT ALONE, and a terminal that
+     * knows the AID does not always ask for the directory first - some wallets
+     * go straight to SELECT AID. That tap then ran on the previous tap's
+     * counters, its slot prefix and its log: nSelects was already 1 before the
+     * first APDU, slotPrefix pointed at whatever card was tapped last, and
+     * verdict() described a tap that had already finished.
+     *
+     * So the reset moved to the FIRST APDU of a tap, whatever its class. The
+     * PPSE block keeps only its own bookkeeping.
+     *
+     * Set at the top of processCommandApdu, cleared in onDeactivated.
+     */
+    private boolean tapOpen;
+
     private byte[] txnAip;
     private String txnAtc;
     /** ATC staged for this tap, not yet written. Committed at cryptogram emission. */
     private String pendingAtc;
     /** Hex, cached with txnAtc so the two can never disagree. */
     private String txnAc;
+
+    /**
+     * The 83 data of this tap's GPO command, or null.
+     *
+     * The AC has to be MACed over the SAME PDOL data the terminal sent, or the
+     * issuer reconstructs a different input. The script path never looked at it
+     * at all - it MACed over an empty field - so every scripted GPO carried a
+     * cryptogram over no amount, no currency and no terminal country. Held for
+     * the tap so txnAcHex() and the recompute below agree.
+     */
+    private byte[] txnPdol;
+
     private boolean cryptogramSent;
     private int scriptHits;
 
@@ -296,15 +326,40 @@ public class ShadowApduService extends HostApduService {
      * that escapes here goes out of processCommandApdu - which HostApduService
      * does not wrap - and takes the process down. That is exactly "the app
      * closed when I tapped". Nothing in a log line is worth a crash.
+     *
+     * SYNCHRONISED ON THE BUILDER. Two threads write here now: the binder thread
+     * on every APDU, and the main looper for the stall watcher and the posted
+     * MSD sanity pass. StringBuilder is not safe under that and used to lose or
+     * duplicate lines.
      */
     private void tap(String s) {
         try {
-            tapLog.append(s).append('\n');
-            if (tapLog.length() > 32000) tapLog.delete(0, 16000);
+            synchronized (tapLog) {
+                tapLog.append(s).append('\n');
+                if (tapLog.length() > 32000) tapLog.delete(0, 16000);
+            }
         } catch (Throwable ignored) { }
         try {
             termLog(s);
         } catch (Throwable ignored) { }
+    }
+
+    private void clearLog() {
+        try {
+            synchronized (tapLog) {
+                tapLog.setLength(0);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    private String logText() {
+        try {
+            synchronized (tapLog) {
+                return tapLog.toString();
+            }
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /** tap(), but only the first time this key complains in a tap. */
@@ -321,10 +376,12 @@ public class ShadowApduService extends HostApduService {
             ui.post(new Runnable() {
                 @Override
                 public void run() {
-                    Toast.makeText(ShadowApduService.this, s, Toast.LENGTH_SHORT).show();
+                    try {
+                        Toast.makeText(ShadowApduService.this, s, Toast.LENGTH_SHORT).show();
+                    } catch (Throwable ignored) { }
                 }
             });
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
     }
 
     static byte[] hex(String s) { return Hex.hex(s); }
@@ -399,6 +456,39 @@ public class ShadowApduService extends HostApduService {
 
     private static byte[] hexOrNull(String s) {
         return (s == null || s.isEmpty()) ? null : hex(s);
+    }
+
+    /**
+     * The command data field verbatim, or empty.
+     *
+     * Used for the CDOL data of GENERATE AC. Bounded by lc and re-checked
+     * against the real array length, because a short APDU with a long lc is
+     * something terminals do emit and Arrays.copyOfRange would throw on it.
+     */
+    private static byte[] dataOf(byte[] apdu) {
+        int lc = lcOf(apdu);
+        int off = dataOff(apdu);
+        if (lc <= 0 || apdu.length < off + lc) return new byte[0];
+        return Arrays.copyOfRange(apdu, off, off + lc);
+    }
+
+    /**
+     * The 83 template's data from a GPO command, or empty.
+     *
+     * The PDOL data sits inside an 83 wrapper. Anything that is not 83, or that
+     * overruns the field, gives empty rather than a guess - an AC over the wrong
+     * bytes is a decline with no local symptom.
+     */
+    private static byte[] pdolDataOf(byte[] apdu) {
+        byte[] d = dataOf(apdu);
+        if (d.length < 2) return new byte[0];
+        int[] q = new int[]{0};
+        int t = readTag(d, q);
+        int l = readLen(d, q);
+        if (t == 0x83 && q[0] + l <= d.length) {
+            return Arrays.copyOfRange(d, q[0], q[0] + l);
+        }
+        return new byte[0];
     }
 
     /**
@@ -517,6 +607,11 @@ public class ShadowApduService extends HostApduService {
      * ODD LENGTH FALLS BACK, it does not pad. Every one of these goes through
      * Hex.hex() or into a TLV, and a dropped nibble is a shifted field - the
      * kind of thing that reads as a terminal fault rather than a typo.
+     *
+     * Hex.hex() is STRICT about the charset too, so the strip below is what
+     * makes a box holding "0x18 80" safe: Hex would reject the 'x'. The strip
+     * runs first, the even-length test runs second, and both end at the
+     * fallback rather than an exception.
      */
     private String hexBox(String key, String fallback) {
         String v = p(key, "").replaceAll("[^0-9A-Fa-f]", "");
@@ -546,6 +641,44 @@ public class ShadowApduService extends HostApduService {
             return fallback;
         }
         return v;
+    }
+
+    /**
+     * A CVM list from the box, or the constant.
+     *
+     * A CVM list is NOT a DOL and TlvValidator cannot check it: it is eight
+     * bytes of two amounts followed by 2-byte rules, no tags anywhere. A
+     * structurally wrong one is worse than an odd nibble - a list that is short
+     * enough has no rule at all, so the terminal applies no CVM and the tap ends
+     * in an approval with an unverified cardholder.
+     *
+     * So the shape is checked here: at least the two amounts plus one rule, and
+     * a rule tail that divides by two.
+     */
+    private String cvmBox() {
+        String v = hexBox("cvmlist", CVMLIST);
+        if (v.equals(CVMLIST)) return CVMLIST;
+
+        if (v.length() < 20 || ((v.length() - 16) & 3) != 0) {
+            warnOnce("cvmlist", "!! cvmlist box is " + v.length()
+                    + " hex - needs 16 for the amounts plus 4 per rule, using the constant");
+            return CVMLIST;
+        }
+        return v;
+    }
+
+    /**
+     * The AID from the capture, or empty.
+     *
+     * Same cleaning as the aid box and the same reason: this is fed straight to
+     * Hex.hex() and into a 4F, and a stray character is a 6F00 on SELECT AID -
+     * the second APDU of every tap, before anything useful has been logged.
+     * Anything shorter than a five-byte AID is not an AID.
+     */
+    private String capAid() {
+        String s = p("cap_aid", "").replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+        if (s.length() < 10 || (s.length() & 1) != 0) return "";
+        return s;
     }
 
     /**
@@ -731,10 +864,20 @@ public class ShadowApduService extends HostApduService {
         prefs().edit().putString(sel() + k, v).commit();
     }
 
+    /**
+     * The AC that goes in a scripted GPO, or zeros without a key.
+     *
+     * OVER THE TAP'S PDOL DATA, not over an empty field. This used to MAC
+     * new byte[0], so every scripted GPO carried a cryptogram covering no
+     * amount, no currency and no terminal country - structurally valid and
+     * unverifiable by any issuer. The PDOL data is captured into txnPdol before
+     * the script is evaluated, and the recompute in processCommandApdu uses the
+     * same value, so the cached hex and the served bytes agree.
+     */
     private String txnAcHex() {
         if (txnAc == null) {
             txnAc = haveKey()
-                    ? bytesToHex(computeAc(txnAtc(), new byte[0]))
+                    ? bytesToHex(computeAc(txnAtc(), txnPdol == null ? new byte[0] : txnPdol))
                     : "0000000000000000";
         }
         return txnAc;
@@ -754,13 +897,14 @@ public class ShadowApduService extends HostApduService {
     private void resetTransaction() {
         try {
             ui.removeCallbacksAndMessages(null);
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
         txnEpoch++;
 
         txnAip = null;
         txnAtc = null;
         pendingAtc = null;
         txnAc = null;
+        txnPdol = null;
         cryptogramSent = false;
         scriptHits = 0;
         atcUsedByCcc = false;
@@ -780,7 +924,7 @@ public class ShadowApduService extends HostApduService {
     private byte[] aipForMac() {
         byte[] a = txnAip;
         if (a == null) {
-            a = hex(p("aip", DEFAULT_AIP));
+            a = hex(hexBox("aip", DEFAULT_AIP));
             if (a.length >= 2) a = new byte[]{(byte) (a[0] & AIP_KEEP_MASK), a[1]};
         }
         if (a.length < 2) a = hex(DEFAULT_AIP);
@@ -798,10 +942,15 @@ public class ShadowApduService extends HostApduService {
      * an empty one MACs a shorter string than the issuer reconstructs and the
      * ARQC fails with a correct key - which reads as a wrong key. Capture the
      * real 9F10 off a live GPO and type it before the tap that matters.
+     *
+     * THE TYPED VALUE IS CLEANED. It is fed to Hex.hex() in three places, so a
+     * space or a stray character used to be a 6F00 on the GPO - and a 6F00 on
+     * the GPO is a dead tap with the whole card unread. hexBox() ends at the
+     * profile default instead, which is at least a legal IAD.
      */
     private String iadHex() {
         if (capturedIad != null) return bytesToHex(capturedIad);
-        String typed = p("iad", "");
+        String typed = hexBox("iad", "");
         if (!typed.isEmpty()) return typed;
         String d = activeProfile().defaultIad();
         return d == null ? DEFAULT_IAD : d;
@@ -884,8 +1033,19 @@ public class ShadowApduService extends HostApduService {
         return Profiles.byName("MASTERCARD");
     }
 
+    /**
+     * The AID in force, cleaned.
+     *
+     * The box is free text and every consumer - appEntry(), the 4F in select(),
+     * the PPSE entry - hands it to Hex.hex(), which throws on an odd nibble or a
+     * stray character. A throw on the SELECT is the worst place for one: the tap
+     * is dead before the terminal has said which app it wants.
+     *
+     * An AID that no longer matches the profile falls back to the profile's own,
+     * so a typo cannot pair a Visa AID with the Mastercard script.
+     */
     private String aidFor(CardProfile prof) {
-        String a = p("aid", "").toUpperCase();
+        String a = hexBox("aid", "");
         if (!a.isEmpty() && prof.matchesAid(a)) return a;
         return prof.defaultAid();
     }
@@ -989,8 +1149,8 @@ public class ShadowApduService extends HostApduService {
             return captured;
         }
 
-        String realAid = p("cap_aid", "");
-        if (realAid.isEmpty()) realAid = p("aid", "A0000000031010");
+        String realAid = capAid();
+        if (realAid.isEmpty()) realAid = hexBox("aid", DEFAULT_AID);
 
         byte[] entry = PPSE_MINIMAL
                 ? cat(tlv(0x4F, hex(realAid)), tlv(0x87, new byte[]{0x01}))
@@ -1018,11 +1178,32 @@ public class ShadowApduService extends HostApduService {
         return built;
     }
 
+    /**
+     * Rewrite the 84 in a captured FCI and return it, or null to fall back.
+     *
+     * THE TRUNCATION IS NOW NAMED. The walk stops at the outer length, so a
+     * capture whose length field overruns its own bytes used to produce a
+     * silently short FCI - and a short FCI is a kernel rejecting the app with
+     * one 6A82 and no log line worth reading. If the walk yields nothing, or the
+     * outer length is zero, the caller serves a generated FCI instead and says
+     * so.
+     *
+     * The status word is stripped by the caller, not here: the outer length does
+     * not cover it, and a 9000 left inside the walk window is parsed as tag 90
+     * length 00 and re-emitted, growing the template by two bytes.
+     */
     private byte[] patchFci(byte[] fci, byte[] aid) {
+        if (fci == null || fci.length < 4) return null;
+
         int[] pos = new int[1];
         int outer = readTag(fci, pos);
         int outerLen = readLen(fci, pos);
-        int end = Math.min(fci.length, pos[0] + outerLen);
+        if (outerLen <= 0 || pos[0] + outerLen > fci.length) {
+            tap("!! captured fci: outer " + String.format("%02X", outer) + " len " + outerLen
+                    + " does not fit " + fci.length + "B - generating instead");
+            return null;
+        }
+        int end = pos[0] + outerLen;
 
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         int i = pos[0];
@@ -1030,7 +1211,7 @@ public class ShadowApduService extends HostApduService {
             int[] q = new int[]{i};
             int t = readTag(fci, q);
             int l = readLen(fci, q);
-            if (q[0] + l > fci.length) break;
+            if (q[0] + l > end) break;
             byte[] v = Arrays.copyOfRange(fci, q[0], q[0] + l);
             i = q[0] + l;
 
@@ -1042,6 +1223,10 @@ public class ShadowApduService extends HostApduService {
 
             byte[] one = tlv(t, v);
             out.write(one, 0, one.length);
+        }
+        if (out.size() == 0) {
+            tap("!! captured fci: walk produced nothing - generating instead");
+            return null;
         }
         return tlv(outer, out.toByteArray());
     }
@@ -1235,7 +1420,8 @@ public class ShadowApduService extends HostApduService {
      *
      * 8C, 8D and 8E come from the card's boxes when they hold a valid DOL, so
      * the CDOL and CVM list in the editor finally reach the wire. A blank or
-     * malformed box serves the constant.
+     * malformed box serves the constant. 8E is checked for shape by cvmBox(),
+     * not by TlvValidator - a CVM list carries no tags.
      */
     private byte[] syntheticRecord() {
         String panS = pan();
@@ -1255,7 +1441,7 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F08, hex("0002")),
                 tlv(0x8C, hex(dol("cdol1", CDOL1))),
                 tlv(0x8D, hex(dol("cdol2", CDOL2))),
-                tlv(0x8E, hex(hexBox("cvmlist", CVMLIST))),
+                tlv(0x8E, hex(cvmBox())),
                 tlv(0x9F0D, hex("0000000000")),
                 tlv(0x9F0E, hex("0000000000")),
                 tlv(0x9F0F, hex("0000000000")),
@@ -1321,34 +1507,42 @@ public class ShadowApduService extends HostApduService {
 
             boolean isSelect = (ins == 0xA4);
 
+            // FIRST APDU OF A TAP. See tapOpen - the reset used to live in the
+            // PPSE branch below, so a terminal that opened with SELECT AID ran
+            // the whole tap on the previous tap's counters and slot.
+            if (!tapOpen) {
+                tapOpen = true;
+                clearLog();
+                resetTransaction();
+                seedAtcFromCapture();
+                warnIfAtcStale();
+                termLog("=== tap "
+                        + new java.text.SimpleDateFormat("HH:mm:ss",
+                                java.util.Locale.US).format(new java.util.Date())
+                        + " ===");
+                int n = scriptLines();
+                tap("-- profile: " + activeProfile().name()
+                        + " | script " + n + " line(s), gate="
+                        + (useScript() ? "ON" : "OFF")
+                        + " | msd=" + isMsd()
+                        + " | forcetc=" + forceOfflineTc()
+                        + " | slot=" + sel()
+                        + " | atc=" + p("atc", "001B")
+                        + " floor=" + p("atcfloor", "-"));
+                popup(nameLine());
+            }
+
+            // The PDOL data is needed before the script is evaluated, because
+            // the profile's own gpo() MACs over it. See txnPdol.
+            if (ins == 0xA8) txnPdol = pdolDataOf(apdu);
+
             if (isSelect && apdu.length >= 5) {
                 int lc0 = lcOf(apdu);
                 int off0 = dataOff(apdu);
                 if (apdu.length >= off0 + lc0) {
                     byte[] nm = new byte[lc0];
                     System.arraycopy(apdu, off0, nm, 0, lc0);
-                    if (Arrays.equals(nm, PPSE)) {
-                        tapLog.setLength(0);
-                        resetTransaction();
-                        sawPpse = true;
-                        seedAtcFromCapture();
-                        warnIfAtcStale();
-                        termLog("=== tap "
-                                + new java.text.SimpleDateFormat("HH:mm:ss",
-                                        java.util.Locale.US).format(new java.util.Date())
-                                + " ===");
-                        int n = scriptLines();
-                        tap("-- profile: " + activeProfile().name()
-                                + " | script " + n + " line(s), gate="
-                                + (useScript() ? "ON" : "OFF")
-                                + " | msd=" + isMsd()
-                                + " | forcetc=" + forceOfflineTc()
-                                + " | slot=" + sel()
-                                + " | atc=" + p("atc", "001B")
-                                + " floor=" + p("atcfloor", "-"));
-                        if (isMsd()) msdSanity();
-                        popup(nameLine());
-                    }
+                    if (Arrays.equals(nm, PPSE)) sawPpse = true;
                 }
             }
 
@@ -1362,14 +1556,15 @@ public class ShadowApduService extends HostApduService {
 
             String hit = useScript() ? scriptMatch(apdu) : null;
             if (hit != null) {
-                byte[] out = hex(hit);
                 scriptHits++;
 
-                if (out.length >= 2 && !looksLikeSw(out[out.length - 2] & 0xFF)) {
-                    tap("-- script response had no status word - appended 9000");
-                    out = cat(out, SW_OK);
-                } else if (out.length < 2) {
-                    out = cat(out, SW_OK);
+                // NORMALISE THE STATUS WORD FIRST. Every edit below walks the
+                // outer template, and a 9000 left inside the walk window is
+                // parsed as tag 90 length 00 and re-emitted - two extra bytes
+                // and a body whose outer length no longer matches.
+                byte[] body = hex(hit);
+                if (body.length >= 2 && looksLikeSw(body[body.length - 2] & 0xFF)) {
+                    body = Arrays.copyOf(body, body.length - 2);
                 }
 
                 if (ins == 0xA8) {
@@ -1377,32 +1572,63 @@ public class ShadowApduService extends HostApduService {
                     // inside gpo() never applied while a script was armed - and
                     // every profile arms one. Same edit, applied to the bytes.
                     if (isMsd()) {
-                        byte[] body = Arrays.copyOf(out, out.length - 2);
-                        out = cat(msdAip(body), SW_OK);
-                        byte[] flat = Arrays.copyOf(out, out.length - 2);
-                        tap("-- msd: gpo format 1 aip=" + bytesToHex(capturedAip(flat))
-                                + " afl=" + bytesToHex(Arrays.copyOfRange(flat, 2, flat.length))
-                                + " payload=" + flat.length + "B " + bytesToHex(flat));
+                        body = msdAip(body);
+                        tap("-- msd: gpo format 1 aip=" + bytesToHex(capturedAip(body))
+                                + " afl=" + bytesToHex(Arrays.copyOfRange(body, 2, body.length))
+                                + " payload=" + body.length + "B " + bytesToHex(body));
                     }
-                    byte[] sa = capturedAip(out);
+                    byte[] sa = capturedAip(body);
                     if (sa != null && sa.length >= 2) {
                         txnAip = sa;
                         tap("-- script GPO AIP parked for the MAC: " + bytesToHex(sa));
                     }
-                    byte[] siad = findTag(out, 0x9F10);
+                    byte[] siad = findTag(body, 0x9F10);
                     if (siad != null) capturedIad = siad;
 
-                    byte[] scid = findTag(out, 0x9F27);
+                    byte[] scid = findTag(body, 0x9F27);
                     gpoCid = (scid == null || scid.length < 1) ? "" : bytesToHex(scid);
                     lastCid = gpoCid;
-                    cryptogramSent = findTag(out, 0x9F26) != null;
+                    cryptogramSent = findTag(body, 0x9F26) != null;
 
                     tap("-- script served the GPO | ac in gpo: "
                             + (cryptogramSent ? "yes cid " + gpoCid
                                               : "no, it comes in GENERATE AC"));
-                    if (cryptogramSent) commitAtc();
-                    watchForStall();
+                } else if (ins == 0xAE) {
+                    cryptogramSent = findTag(body, 0x9F26) != null;
+                    byte[] scid = findTag(body, 0x9F27);
+                    if (scid != null && scid.length >= 1) lastCid = bytesToHex(scid);
+                    tap("-- script served GENERATE AC | cid " + lastCid);
                 }
+
+                // THE AC WAS MACED OVER NOTHING HERE. The profile builds the GPO
+                // with an AC over an empty field, so a scripted tap handed the
+                // issuer a cryptogram covering no amount, no currency and no
+                // terminal country - valid structure, unverifiable input. It is
+                // recomputed over the real PDOL (GPO) or CDOL (GENERATE AC) data
+                // the terminal actually sent, and written back into the tag that
+                // is already there.
+                if (cryptogramSent && haveKey()) {
+                    byte[] macIn = (ins == 0xA8)
+                            ? (txnPdol == null ? new byte[0] : txnPdol)
+                            : dataOf(apdu);
+                    String atc = txnAtc();
+                    byte[] ac = computeAc(atc, macIn);
+                    if (forceAc(body, ac) != null) {
+                        txnAc = bytesToHex(ac);
+                        tap("-- script AC recomputed over the real "
+                                + (ins == 0xA8 ? "PDOL" : "CDOL") + " data ("
+                                + macIn.length + "B)");
+                    }
+                }
+
+                // THE ATC WAS NEVER COMMITTED ON A SCRIPTED GENERATE AC. The
+                // commit sat in the 0xA8 branch only, so an armed script that
+                // answered 80 AE burned a counter that was never written and
+                // every scripted tap reused it.
+                if (cryptogramSent && (ins == 0xA8 || ins == 0xAE)) commitAtc();
+
+                byte[] out = cat(body, SW_OK);
+                if (ins == 0xA8) watchForStall();
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
                 return out;
@@ -1434,7 +1660,11 @@ public class ShadowApduService extends HostApduService {
 
             tap("<< " + bytesToHex(out));
             return out;
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // THROWABLE, not Exception. An APDU answered from a stack that has
+            // just overflowed, or from a thread the VM is short of memory on,
+            // throws Error - and Error escaping processCommandApdu kills the
+            // process on the tap that was already going wrong.
             sawError = true;
             tap("!! " + e);
             return SW_ERR;
@@ -1453,21 +1683,33 @@ public class ShadowApduService extends HostApduService {
         }
 
         if (name.length == 0) {
-            String a = p("cap_aid", "");
-            if (a.isEmpty()) a = p("aid", "A0000000031010");
+            String a = capAid();
+            if (a.isEmpty()) a = hexBox("aid", DEFAULT_AID);
             name = hex(a);
         }
 
-        String real = p("cap_aid", "");
-        if (real.isEmpty()) real = p("aid", "");
+        String real = capAid();
+        if (real.isEmpty()) real = hexBox("aid", "");
         tap("-- selected " + bytesToHex(name)
                 + " | card is " + (real.isEmpty() ? "?" : real));
 
         byte[] captured = rawFci();
-        tap("-- fci source: " + (captured == null ? "generated" : "captured " + captured.length + "B"));
         if (captured != null) {
-            return cat(patchFci(captured, name), SW_OK);
+            // The status word is NOT part of the template. Left in, the outer
+            // length stops covering the response and the terminal reads a 9000
+            // that is not the status word.
+            if (captured.length >= 2
+                    && (captured[captured.length - 2] & 0xFF) == 0x90
+                    && (captured[captured.length - 1] & 0xFF) == 0x00) {
+                captured = Arrays.copyOf(captured, captured.length - 2);
+            }
+            byte[] patched = patchFci(captured, name);
+            if (patched != null) {
+                tap("-- fci source: captured " + patched.length + "B");
+                return cat(patched, SW_OK);
+            }
         }
+        tap("-- fci source: generated");
 
         String label = labelText();
         byte[] prop = cat(
@@ -1548,6 +1790,7 @@ public class ShadowApduService extends HostApduService {
                     if (STRIP_AC) {
                         raw = stripAcTags(raw);
                         gpoCid = "(stripped)";
+                        cryptogramSent = false;
                     } else if (capMsd) {
                         // Format 1 is flat, carries no CID, and findTag() refuses
                         // a 0x80 by design - so forceCid() would staple a 9F27
@@ -1555,6 +1798,7 @@ public class ShadowApduService extends HostApduService {
                         // the captured bytes untouched. Its ATC is not in the
                         // GPO either; ccc() emits and commits that.
                         gpoCid = "";
+                        cryptogramSent = false;
                     } else {
                         byte rc = gpoCidFor();
                         raw = forceCid(raw, rc);
@@ -1571,10 +1815,17 @@ public class ShadowApduService extends HostApduService {
                             raw = forceAtc(raw, hex(txnAtc()));
                             commitAtc();
                         }
+
+                        // cryptogramSent USED TO BE !STRIP_AC, unconditionally.
+                        // A capture with no 9F26 in it therefore told
+                        // Emv.decideCid that an AC had already gone out, and its
+                        // first branch answered ARQC for a requested ARQC
+                        // without ever consulting haveKey() - a zero cryptogram
+                        // on the wire. The flag now follows the tag.
+                        cryptogramSent = findTag(raw, 0x9F26) != null;
                     }
 
                     txnAip = capturedAip(raw);
-                    cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
                             + " (" + (STRIP_AC ? "AC tags stripped"
                                     : capMsd ? "format 1 - cid and atc untouched"
@@ -1594,7 +1845,7 @@ public class ShadowApduService extends HostApduService {
         }
 
         byte[] aip = capturedAip(raw);
-        if (aip == null || aip.length < 2) aip = hex(p("aip", DEFAULT_AIP));
+        if (aip == null || aip.length < 2) aip = hex(hexBox("aip", DEFAULT_AIP));
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
@@ -1603,27 +1854,17 @@ public class ShadowApduService extends HostApduService {
         // Visa the MSD bit is byte 2 0x80 and has to be SET, the opposite of
         // Mastercard, so a single mask cannot serve both.
         if (msd) {
-            String m = activeProfile().msdAip();
-            used = (m != null && m.length() >= 4)
-                    ? hex(m)
+            byte[] m = profileMsdAip();
+            used = (m != null)
+                    ? m
                     : new byte[]{(byte) (used[0] & AIP_MSD_KEEP_1),
                                  (byte) (used[1] & AIP_MSD_KEEP_2)};
         }
 
         txnAip = used;
 
-        byte[] pdolData = new byte[0];
-        int lc = lcOf(apdu);
-        int off = dataOff(apdu);
-        if (lc > 0 && apdu.length >= off + lc) {
-            byte[] d = Arrays.copyOfRange(apdu, off, off + lc);
-            int[] q = new int[]{0};
-            int t = readTag(d, q);
-            int l = readLen(d, q);
-            if (t == 0x83 && q[0] + l <= d.length) {
-                pdolData = Arrays.copyOfRange(d, q[0], q[0] + l);
-            }
-        }
+        byte[] pdolData = (txnPdol != null) ? txnPdol : pdolDataOf(apdu);
+        txnPdol = pdolData;
 
         byte cid = gpoCidFor();
         gpoCid = String.format("%02X", cid & 0xFF);
@@ -1646,6 +1887,7 @@ public class ShadowApduService extends HostApduService {
             byte[] payload = cat(used, a);
             tap("-- msd: gpo format 1 aip=" + bytesToHex(used) + " afl=" + bytesToHex(a)
                     + " payload=" + payload.length + "B " + bytesToHex(payload));
+            postSanity();
             return cat(tlv(0x80, payload), SW_OK);
         }
 
@@ -1664,6 +1906,36 @@ public class ShadowApduService extends HostApduService {
         commitAtc();
         watchForStall();
         return cat(tlv(0x77, body), SW_OK);
+    }
+
+    /**
+     * Run the MSD self-check AFTER the GPO response, on the main looper.
+     *
+     * It used to run inline in the PPSE branch, before the directory was
+     * answered - and it calls afl(), which calls keys(), which is getAll() and
+     * therefore a full decrypt of the store. The first thing a terminal got back
+     * from a cold tap was a directory delayed by a whole-file decrypt.
+     *
+     * Posting it moves all of that off the response path. The epoch check makes
+     * it drop out if the tap ended first, because resetTransaction() clears the
+     * queued runnable and bumps the epoch - the same two halves the stall
+     * watcher relies on.
+     */
+    private void postSanity() {
+        final int epoch = txnEpoch;
+        try {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (epoch != txnEpoch) return;
+                    try {
+                        msdSanity();
+                    } catch (Throwable t) {
+                        tap("!! msd sanity failed: " + t);
+                    }
+                }
+            });
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -1711,7 +1983,29 @@ public class ShadowApduService extends HostApduService {
                     }
                 }
             }, 1500L);
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * The profile's MSD AIP as bytes, or null when it has none.
+     *
+     * Validated rather than trusted: it comes from a profile constant that is
+     * fed to Hex.hex(), and a one-nibble slip there would be a 6F00 on the GPO
+     * of exactly the cards that use the override.
+     */
+    private byte[] profileMsdAip() {
+        String m = activeProfile().msdAip();
+        if (m == null) return null;
+        m = m.replaceAll("[^0-9A-Fa-f]", "");
+        if (m.length() < 4 || (m.length() & 1) != 0) {
+            tap("!! profile msd aip \"" + m + "\" unusable - using the mask");
+            return null;
+        }
+        try {
+            return hex(m);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /**
@@ -1723,9 +2017,9 @@ public class ShadowApduService extends HostApduService {
     private byte[] msdAip(byte[] tpl) {
         byte[] aip = capturedAip(tpl);
         if (aip == null || aip.length < 2) return tpl;
-        String m = activeProfile().msdAip();
-        byte[] set = (m != null && m.length() >= 4)
-                ? hex(m)
+        byte[] m = profileMsdAip();
+        byte[] set = (m != null)
+                ? m
                 : new byte[]{(byte) (aip[0] & AIP_MSD_KEEP_1),
                              (byte) (aip[1] & AIP_MSD_KEEP_2)};
         return setAip(tpl, set);
@@ -1866,6 +2160,39 @@ public class ShadowApduService extends HostApduService {
 
         byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
         return tlv(outer, cat(content, tlv(0x9F36, atc)));
+    }
+
+    /**
+     * Overwrite an existing 9F26 with a freshly computed AC.
+     *
+     * Only ever called when the tag was already found, so the append branch is
+     * a net for a malformed script response. Returns the template, or null if
+     * the AC is not eight bytes - a short copy into the tag would leave half a
+     * cryptogram behind.
+     */
+    private static byte[] forceAc(byte[] tpl, byte[] ac) {
+        if (ac == null || ac.length < 8) return null;
+
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == 0x9F26 && l >= 8) {
+                System.arraycopy(ac, 0, tpl, q[0], 8);
+                return tpl;
+            }
+            i = q[0] + l;
+        }
+
+        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
+        return tlv(outer, cat(content, tlv(0x9F26, ac)));
     }
 
     /**
@@ -2181,13 +2508,7 @@ public class ShadowApduService extends HostApduService {
         lastCid = String.format("%02X", cid);
         String atc = txnAtc();
 
-        byte[] cdol = new byte[0];
-        int lc = lcOf(apdu);
-        int off = dataOff(apdu);
-        if (lc > 0 && apdu.length >= off + lc) {
-            cdol = Arrays.copyOfRange(apdu, off, off + lc);
-        }
-
+        byte[] cdol = dataOf(apdu);
         byte[] ac = computeAc(atc, cdol);
         cryptogramSent = true;
 
@@ -2291,7 +2612,7 @@ public class ShadowApduService extends HostApduService {
             tap("-- macIn " + bytesToHex(macIn));
 
             return EmvCrypto.mac(sk, macIn);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             tap("!! ARQC failed: " + e);
             return new byte[8];
         }
@@ -2383,11 +2704,15 @@ public class ShadowApduService extends HostApduService {
      *
      * The slot prefix is read BEFORE resetTransaction(), because reset clears it
      * and the flush below still needs to name the file the lines belong to.
+     *
+     * tapOpen goes false here, and only here, so the next APDU of THIS tap does
+     * not reset what this one built.
      */
     @Override
     public void onDeactivated(int reason) {
-        final String t = tapLog.toString();
+        final String t = logText();
         final String slot = sel();
+        tapOpen = false;
 
         String v;
         try {
