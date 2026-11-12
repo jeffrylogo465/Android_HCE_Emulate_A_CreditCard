@@ -1008,9 +1008,13 @@ public class MainActivity extends AppCompatActivity {
 
         binding = true;
         etAtc.setText(String.format(java.util.Locale.ROOT, "%04X", atcPrev));
+        // The script IS the mag-stripe replay: it serves the GPO and the CCC
+        // itself. On an EMV card it hijacks the GPO and ccc() never runs, so it
+        // may only be stamped on a network that is actually mag-stripe.
+        boolean magstripe = "1".equals(msdDefault(net));
         if (stamp) {
-            etScript.setText(script);
-            etMsd.setText("1");
+            etScript.setText(magstripe ? script : "");
+            etMsd.setText(msdDefault(net));
         }
         binding = false;
         collect();
