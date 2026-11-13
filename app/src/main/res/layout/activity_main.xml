@@ -126,6 +126,16 @@
                     android:textColor="#9CA3AF"
                     android:textSize="10sp" />
 
+                <CheckBox
+                    android:id="@+id/chkAssetCard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:buttonTint="#14B8A6"
+                    android:text="@string/asset_card_toggle"
+                    android:textColor="#9CA3AF"
+                    android:textSize="11sp" />
+
                 <TextView
                     android:id="@+id/txtStatus"
                     android:layout_width="match_parent"

@@ -23,4 +23,6 @@
     <!-- persistent payment-role prompt -->
     <string name="become_default">Tap to use Shadow Wallet for taps — Android needs one confirmation, and Google Wallet is replaced until you switch back.</string>
     <string name="nfc_off">NFC is off — turn it on, then tap here to become the payment app.</string>
+    <!-- main-screen switch: answer taps from assets/profile.json -->
+    <string name="asset_card_toggle">TEST CARD AFFFFFFFFF1234 (answer taps from profile.json)</string>
 </resources>
