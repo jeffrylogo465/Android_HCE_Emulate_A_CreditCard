@@ -1577,6 +1577,39 @@ public class ShadowApduService extends HostApduService {
         return new int[]{1, 1};
     }
 
+    /** Pref that routes the tap to AssetCardEngine. Off unless set to "1". */
+    private static final String PREF_ASSET_PROFILE = "asset_profile";
+    /** The asset card's ATC, kept apart from the slot-prefixed ATC of the other cards. */
+    private static final String PREF_ASSET_ATC = "asset_atc";
+
+    private AssetCardEngine assetCard;
+
+    private boolean assetCardOn() {
+        try {
+            return "1".equals(prefs().getString(PREF_ASSET_PROFILE, ""));
+        } catch (ClassCastException e) {
+            return false;
+        }
+    }
+
+    private AssetCardEngine assetCard() throws java.io.IOException {
+        if (assetCard == null) {
+            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET)) {
+                assetCard = AssetCardEngine.load(in);
+            }
+            String saved = prefs().getString(PREF_ASSET_ATC, "");
+            if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));
+        }
+        return assetCard;
+    }
+
+    /** Written with commit(): a tap that dies right after the GPO must not reuse the ATC. */
+    @android.annotation.SuppressLint("ApplySharedPref")
+    private void persistAssetAtc() {
+        prefs().edit().putString(PREF_ASSET_ATC,
+                String.format(java.util.Locale.US, "%04X", assetCard.atc())).commit();
+    }
+
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
         try {
@@ -1628,6 +1661,16 @@ public class ShadowApduService extends HostApduService {
             }
 
             tap(">> " + bytesToHex(apdu));
+
+            // The mrautio test card from assets/profile.json, when switched on.
+            // It answers the whole tap itself, so none of the script, MAC and
+            // prefs-driven machinery below runs for it.
+            if (assetCardOn()) {
+                byte[] out = assetCard().process(apdu);
+                if (ins == 0xA8) persistAssetAtc();
+                tap("<< " + bytesToHex(out));
+                return out;
+            }
 
             // READ RECORD walks the AFL the GPO handed out. Before any GPO there
             // is no AFL and the old behaviour stands.
