@@ -159,6 +159,7 @@ public class MainActivity extends AppCompatActivity {
     private PagerSnapHelper snapHelper;
     private TextView txtCount, txtStatus, banner;
     private CheckBox chkForceTc;
+    private CheckBox chkAssetCard;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -258,6 +259,7 @@ public class MainActivity extends AppCompatActivity {
         txtStatus = findViewById(R.id.txtStatus);
         banner = findViewById(R.id.banner);
         chkForceTc = findViewById(R.id.chkForceTc);
+        chkAssetCard = findViewById(R.id.chkAssetCard);
 
         etLabel = findViewById(R.id.etLabel);
         etName = findViewById(R.id.etName);
@@ -329,6 +331,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnAdd).setOnClickListener(v -> { onAdd(); showPage(1); });
         findViewById(R.id.btnClone).setOnClickListener(v -> startReader());
         findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
+        syncAssetCardBox();
+        chkAssetCard.setOnCheckedChangeListener((b, on) -> setAssetCard(on));
         findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
@@ -1634,7 +1638,6 @@ public class MainActivity extends AppCompatActivity {
     private void showKeyTools() {
         String v = prefs.getString(key(current, "keyvar"), "0");
         String label = "MAC variant (" + v + ")";
-        boolean assetOn = "1".equals(prefs.getString("asset_profile", ""));
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
@@ -1645,8 +1648,7 @@ public class MainActivity extends AppCompatActivity {
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
                                 "MSD: set record", "MSD: set location",
                                 "Check profile constants", "Store: retry encryption",
-                                "Copy crash log", "Share crash log", "Clear crash log",
-                                "Test card AFFFFFFFFF1234: " + (assetOn ? "ON" : "off")},
+                                "Copy crash log", "Share crash log", "Clear crash log"},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1670,7 +1672,6 @@ public class MainActivity extends AppCompatActivity {
                             else if (w == 16) copyCrashLog();
                             else if (w == 17) shareCrashLog();
                             else if (w == 18) { CrashLog.clear(this); status("Crash log cleared"); }
-                            else if (w == 19) toggleAssetCard();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1696,12 +1697,21 @@ public class MainActivity extends AppCompatActivity {
      * read by ShadowApduService on every APDU, so it takes effect on the next
      * tap. Not slot-prefixed: it switches the service, not one stored card.
      */
-    private void toggleAssetCard() {
-        boolean on = !"1".equals(prefs.getString("asset_profile", ""));
+    private void setAssetCard(boolean on) {
         prefs.edit().putString("asset_profile", on ? "1" : "").apply();
         status(on ? "Test card AFFFFFFFFF1234 is ON - taps are answered from profile.json"
                   : "Test card is off - taps use the stored card",
                 on ? COL_FRESH : COL_STALE);
+    }
+
+    /** Show the stored switch state without firing the listener. */
+    private void syncAssetCardBox() {
+        boolean on = "1".equals(prefs.getString("asset_profile", ""));
+        if (chkAssetCard.isChecked() == on) return;
+        android.widget.CompoundButton.OnCheckedChangeListener none = null;
+        chkAssetCard.setOnCheckedChangeListener(none);
+        chkAssetCard.setChecked(on);
+        chkAssetCard.setOnCheckedChangeListener((b, v) -> setAssetCard(v));
     }
 
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */
@@ -2731,6 +2741,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+
+        try {
+            syncAssetCardBox();
+        } catch (Throwable ignored) { }
 
         try {
             claimPaymentRole();
