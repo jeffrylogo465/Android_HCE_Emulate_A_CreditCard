@@ -1634,6 +1634,7 @@ public class MainActivity extends AppCompatActivity {
     private void showKeyTools() {
         String v = prefs.getString(key(current, "keyvar"), "0");
         String label = "MAC variant (" + v + ")";
+        boolean assetOn = "1".equals(prefs.getString("asset_profile", ""));
 
         new AlertDialog.Builder(this)
                 .setTitle("Issuer master key")
@@ -1644,7 +1645,8 @@ public class MainActivity extends AppCompatActivity {
                                 "MSD: set IMKCVC3", "MSD: set IVCVC3", "MSD: build record",
                                 "MSD: set record", "MSD: set location",
                                 "Check profile constants", "Store: retry encryption",
-                                "Copy crash log", "Share crash log", "Clear crash log"},
+                                "Copy crash log", "Share crash log", "Clear crash log",
+                                "Test card AFFFFFFFFF1234: " + (assetOn ? "ON" : "off")},
                         (d, w) -> {
                             if (w == 0) scanForKey();
                             else if (w == 1) editKeyList();
@@ -1668,6 +1670,7 @@ public class MainActivity extends AppCompatActivity {
                             else if (w == 16) copyCrashLog();
                             else if (w == 17) shareCrashLog();
                             else if (w == 18) { CrashLog.clear(this); status("Crash log cleared"); }
+                            else if (w == 19) toggleAssetCard();
                             else pickKeyVariant();
                         })
                 .setNegativeButton("Cancel", null)
@@ -1686,6 +1689,19 @@ public class MainActivity extends AppCompatActivity {
     private void seedVector() {
         status(VectorSeed.apply(this));
         bindCard(current);
+    }
+
+    /**
+     * Route taps to the mrautio test card in assets/profile.json. The pref is
+     * read by ShadowApduService on every APDU, so it takes effect on the next
+     * tap. Not slot-prefixed: it switches the service, not one stored card.
+     */
+    private void toggleAssetCard() {
+        boolean on = !"1".equals(prefs.getString("asset_profile", ""));
+        prefs.edit().putString("asset_profile", on ? "1" : "").apply();
+        status(on ? "Test card AFFFFFFFFF1234 is ON - taps are answered from profile.json"
+                  : "Test card is off - taps use the stored card",
+                on ? COL_FRESH : COL_STALE);
     }
 
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */

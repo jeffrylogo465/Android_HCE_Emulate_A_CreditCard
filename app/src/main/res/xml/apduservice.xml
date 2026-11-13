@@ -29,6 +29,10 @@
 
         <aid-filter android:name="325041592E5359532E4444463031" />
 
+        <!-- mrautio/emv-card-simulator test card, answered by AssetCardEngine
+             when the key-tools toggle is on. Full AID, as rule 1 asks. -->
+        <aid-filter android:name="AFFFFFFFFF1234" />
+
         <!-- Visa -->
         <aid-filter android:name="A0000000031010" />
         <aid-filter android:name="A0000000031020" />
