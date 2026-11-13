@@ -38,6 +38,14 @@ public class AssetCardEngineTest {
             "00000000100000000000000008400000000000084026111200" + "12345678";
     private static final String GENAC = "80AE80001D" + CDOL1_DATA + "00";
 
+    // Template 2: 77 { 82 AIP, 94 AFL }
+    private static final String GPO_RESPONSE = "7712" + "82023C00" + "940C080202001001020018010201" + "9000";
+    // CDOL2 data: 8A "Z3" (5A33), then the CDOL1 objects again.
+    private static final String CDOL2_DATA = "5A33" + CDOL1_DATA;
+    private static final String GENAC2 = "80AE40001F" + CDOL2_DATA + "00";
+    private static final String AC2_RESPONSE = "771E9F2701809F360200F1" + "9F2608FB318417FC62FC8E"
+            + "9F100706011203A4A0029000";
+
     private static final String FCI = "6F398407AFFFFFFFFF1234A52E500D5645534120454C454354524F4E5F2D02656E8701019F1210564553412020"
             + "202020202020202020209F1101019000";
     private static final String REC_1_2 = "704257131234560012345608D29122211229424900200F5F200F43415244484F4C4445522F544553549F1F1831"
@@ -103,9 +111,9 @@ public class AssetCardEngineTest {
     }
 
     @Test
-    public void gpo_isFormat1WithAipAndAflFromProfile() {
+    public void gpo_isFormat2WithAipAndAflFromProfile() {
         send(SELECT_AID);
-        assertEquals("800E3C00080202001001020018010201" + "9000", send(GPO));
+        assertEquals(GPO_RESPONSE, send(GPO));
     }
 
     @Test
@@ -137,7 +145,7 @@ public class AssetCardEngineTest {
     public void fullFlow_ppseToGenerateAc_exactBytes() {
         assertTrue(send(SELECT_PPSE).endsWith("9000"));
         assertEquals(FCI, send(SELECT_AID));
-        assertEquals("800E3C00080202001001020018010201" + "9000", send(GPO));
+        assertEquals(GPO_RESPONSE, send(GPO));
         assertEquals(REC_1_2, send("00B2020C00"));
         assertEquals(REC_2_1, send("00B2011400"));
         assertEquals(REC_2_2, send("00B2021400"));
@@ -192,11 +200,60 @@ public class AssetCardEngineTest {
     }
 
     @Test
-    public void generateAc_twiceInOneTransaction_secondIsRefused() {
+    public void generateAc_second_parsesCdol2_andReturnsADifferentCryptogram() {
+        send(SELECT_AID);
+        send(GPO);
+        String first = send(GENAC);
+        String second = send(GENAC2);
+
+        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000", first);
+        assertEquals(AC2_RESPONSE, second);
+        assertNotEquals(first.substring(22, 38), second.substring(22, 38));
+    }
+
+    @Test
+    public void generateAc_second_dataOfTheWrongLength_returns6700_andKeepsTheSlot() {
         send(SELECT_AID);
         send(GPO);
         send(GENAC);
+        // CDOL1-sized data where CDOL2 is due.
+        assertEquals("6700", send(GENAC));
+        assertEquals(AC2_RESPONSE, send(GENAC2));
+    }
+
+    @Test
+    public void generateAc_second_coversTheCdol2Data() {
+        send(SELECT_AID);
+        send(GPO);
+        send(GENAC);
+        String a = send(GENAC2);
+        send(SELECT_AID);
+        eng.setAtc(0xF0);
+        send(GPO);
+        send(GENAC);
+        String b = send(GENAC2.replace("5A33", "5931"));
+        assertEquals(a.substring(0, 22), b.substring(0, 22));
+        assertNotEquals(a.substring(22, 38), b.substring(22, 38));
+    }
+
+    @Test
+    public void generateAc_third_returns6985() {
+        send(SELECT_AID);
+        send(GPO);
+        send(GENAC);
+        send(GENAC2);
+        assertEquals("6985", send(GENAC2));
         assertEquals("6985", send(GENAC));
+    }
+
+    @Test
+    public void generateAc_newGpo_startsAFreshTransaction() {
+        send(SELECT_AID);
+        send(GPO);
+        send(GENAC);
+        send(GENAC2);
+        send(GPO);
+        assertTrue(send(GENAC).startsWith("771E9F2701809F360200F2"));
     }
 
     // ---- PDOL: parsed from the selected record, answered in list order ----
@@ -225,7 +282,7 @@ public class AssetCardEngineTest {
         AssetCardEngine e = withPdol("9F66049F02069F3704");
         String fci = Hex.toHex(e.process(Hex.hex(SELECT_AID)));
         assertTrue(fci, fci.contains("9F38099F66049F02069F3704"));
-        assertEquals("800E3C00080202001001020018010201" + "9000",
+        assertEquals(GPO_RESPONSE,
                 Hex.toHex(e.process(Hex.hex("80A8000010" + "830E"
                         + "F6204000" + "000000001000" + "AABBCCDD" + "00"))));
         assertEquals("F6204000", e.terminalData("9F66"));

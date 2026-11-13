@@ -25,6 +25,9 @@ public class ShadowApduServiceAssetCardTest {
     private static final String GENAC = "80AE80001D"
             + "00000000100000000000000008400000000000084026111200" + "12345678" + "00";
 
+    private static final String GENAC2 = "80AE40001F5A33"
+            + "00000000100000000000000008400000000000084026111200" + "12345678" + "00";
+
     private ShadowApduService svc;
 
     private void start(boolean assetCard) {
@@ -51,7 +54,7 @@ public class ShadowApduServiceAssetCardTest {
         start(true);
         assertTrue(send(SELECT_PPSE).contains("4F07AFFFFFFFFF1234"));
         assertTrue(send(SELECT_AID).startsWith("6F398407AFFFFFFFFF1234"));
-        assertEquals("800E3C00080202001001020018010201" + "9000", send(GPO));
+        assertEquals("7712" + "82023C00" + "940C080202001001020018010201" + "9000", send(GPO));
         assertTrue(send("00B2020C00").endsWith("9000"));
         assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000",
                 send(GENAC));
@@ -70,5 +73,16 @@ public class ShadowApduServiceAssetCardTest {
         send(GPO);
         assertEquals("771E9F2701809F360200F2" + "9F26082D1F49E3E6EA0F85" + "9F100706011203A4A0029000",
                 send(GENAC));
+    }
+
+    @Test
+    public void flag_on_secondAcThenThirdIsRefused() {
+        start(true);
+        send(SELECT_AID);
+        send(GPO);
+        send(GENAC);
+        assertEquals("771E9F2701809F360200F1" + "9F2608FB318417FC62FC8E" + "9F100706011203A4A0029000",
+                send(GENAC2));
+        assertEquals("6985", send(GENAC2));
     }
 }

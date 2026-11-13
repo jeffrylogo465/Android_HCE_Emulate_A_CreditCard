@@ -23,15 +23,18 @@ import java.util.Map;
  * plain unit test. ShadowApduService owns one and persists the ATC around it.
  *
  * What it does, and the one place it differs from the source simulator:
- *  - GPO answers a format-1 template (tag 80: AIP || AFL). The simulator's own
- *    setup uses template 2 (tag 77); format 1 is what the todo asked for.
+ *  - GPO answers a format-2 template, as the simulator's own setup does:
+ *    77 { 82 AIP, 94 AFL }.
  *  - The PDOL is read out of the selected application's A5 template (tag 9F38).
  *    The published profile has none, so for this card the GPO data is "83 00".
  *  - READ RECORD walks the AFL and builds each record from the tag list the
  *    profile gives for that SFI/record.
  *  - GENERATE AC derives SK from MK_AC and the ATC (Book 2 A1.3.1) and computes
  *    the AC with ISO 9797-1 MAC Algorithm 3 over CDOL1 data || AIP || ATC || 9F10.
- *    One AC per transaction; the second GENERATE AC (CDOL2) is refused with 6985.
+ *    The second GENERATE AC of a transaction is parsed against CDOL2 and its AC
+ *    is computed the same way over the CDOL2 data, so it differs from the first.
+ *    The CID in both responses is the profile's 9F27. A third one is refused
+ *    with 6985.
  *  - The ATC advances once per GPO, as in the simulator.
  */
 final class AssetCardEngine {
@@ -63,7 +66,8 @@ final class AssetCardEngine {
 
     private boolean selected;
     private boolean gpoOk;
-    private boolean acIssued;
+    /** GENERATE ACs answered since the last GPO: 0, 1 or 2. */
+    private int acCount;
     private final Map<String, String> terminal = new HashMap<>();
 
     private AssetCardEngine(JsonObject o) {
@@ -160,7 +164,7 @@ final class AssetCardEngine {
     private void clearState() {
         selected = false;
         gpoOk = false;
-        acIssued = false;
+        acCount = 0;
         terminal.clear();
     }
 
@@ -214,8 +218,10 @@ final class AssetCardEngine {
 
         atc++;
         gpoOk = true;
-        acIssued = false;
-        return ok(Tlv.t(0x80, Tlv.cat(Hex.hex(aip), Hex.hex(afl))));
+        acCount = 0;
+        return ok(Tlv.t(0x77, Tlv.cat(
+                Tlv.t(0x82, Hex.hex(aip)),
+                Tlv.t(0x94, Hex.hex(afl)))));
     }
 
     /** The PDOL out of the A5 template of the selected record, empty if it has none. */
@@ -263,9 +269,9 @@ final class AssetCardEngine {
     // ---------- GENERATE AC ----------
 
     private byte[] generateAc(byte[] apdu) {
-        if (!gpoOk || acIssued) return sw("6985");
+        if (!gpoOk || acCount >= 2) return sw("6985");
         byte[] data = dataOf(apdu);
-        int[] dol = parseDol(Hex.hex(cdol1));
+        int[] dol = parseDol(Hex.hex(acCount == 0 ? cdol1 : cdol2));
         if (data == null || data.length != dolLength(dol)) return sw("6700");
 
         takeTerminalData(dol, data);
@@ -280,7 +286,7 @@ final class AssetCardEngine {
             throw new IllegalStateException("AC computation failed: " + e.getMessage(), e);
         }
 
-        acIssued = true;
+        acCount++;
         byte[] body = new byte[0];
         for (int t : GENAC_TEMPLATE) {
             byte[] v;
