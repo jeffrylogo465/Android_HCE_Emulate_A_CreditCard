@@ -54,9 +54,9 @@ public class ShadowApduServiceAssetCardTest {
         start(true);
         assertTrue(send(SELECT_PPSE).contains("4F07AFFFFFFFFF1234"));
         assertTrue(send(SELECT_AID).startsWith("6F398407AFFFFFFFFF1234"));
-        assertEquals("7712" + "82023C00" + "940C080202001001020018010201" + "9000", send(GPO));
+        assertEquals("7712" + "82021C00" + "940C080202001001020018010201" + "9000", send(GPO));
         assertTrue(send("00B2020C00").endsWith("9000"));
-        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000",
+        assertEquals("771E9F2701809F360200F1" + "9F26084ED915D20AC28174" + "9F100706011203A4A0029000",
                 send(GENAC));
     }
 
@@ -71,7 +71,7 @@ public class ShadowApduServiceAssetCardTest {
         svc = Robolectric.buildService(ShadowApduService.class).create().get();
         send(SELECT_AID);
         send(GPO);
-        assertEquals("771E9F2701809F360200F2" + "9F26082D1F49E3E6EA0F85" + "9F100706011203A4A0029000",
+        assertEquals("771E9F2701809F360200F2" + "9F260830E9D37ED4F1E27D" + "9F100706011203A4A0029000",
                 send(GENAC));
     }
 
@@ -81,7 +81,7 @@ public class ShadowApduServiceAssetCardTest {
         send(SELECT_AID);
         send(GPO);
         send(GENAC);
-        assertEquals("771E9F2701809F360200F1" + "9F2608FB318417FC62FC8E" + "9F100706011203A4A0029000",
+        assertEquals("771E9F2701809F360200F1" + "9F2608463C0F076491C0E1" + "9F100706011203A4A0029000",
                 send(GENAC2));
         assertEquals("6985", send(GENAC2));
     }
