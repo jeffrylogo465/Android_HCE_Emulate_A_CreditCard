@@ -39,11 +39,11 @@ public class AssetCardEngineTest {
     private static final String GENAC = "80AE80001D" + CDOL1_DATA + "00";
 
     // Template 2: 77 { 82 AIP, 94 AFL }
-    private static final String GPO_RESPONSE = "7712" + "82023C00" + "940C080202001001020018010201" + "9000";
+    private static final String GPO_RESPONSE = "7712" + "82021C00" + "940C080202001001020018010201" + "9000";
     // CDOL2 data: 8A "Z3" (5A33), then the CDOL1 objects again.
     private static final String CDOL2_DATA = "5A33" + CDOL1_DATA;
     private static final String GENAC2 = "80AE40001F" + CDOL2_DATA + "00";
-    private static final String AC2_RESPONSE = "771E9F2701809F360200F1" + "9F2608FB318417FC62FC8E"
+    private static final String AC2_RESPONSE = "771E9F2701809F360200F1" + "9F2608463C0F076491C0E1"
             + "9F100706011203A4A0029000";
 
     private static final String FCI = "6F398407AFFFFFFFFF1234A52E500D5645534120454C454354524F4E5F2D02656E8701019F1210564553412020"
@@ -86,7 +86,7 @@ public class AssetCardEngineTest {
         assertEquals("221", eng.serviceCode());
         assertEquals("1234560012345608D29122211229424900200F", eng.track2());
         assertEquals("080202001001020018010201", eng.afl());
-        assertEquals("3C00", eng.aip());
+        assertEquals("1C00", eng.aip());
         assertEquals("9F02069F03069F1A0295055F2A029A039C019F3704", eng.cdol1());
         assertEquals("8A029F02069F03069F1A0295055F2A029A039C019F3704", eng.cdol2());
         assertEquals("06011203A4A002", eng.tag("9F10"));
@@ -153,7 +153,7 @@ public class AssetCardEngineTest {
         assertEquals(REC_3_2, send("00B2021C00"));
         // ATC 00F0 in the profile, advanced to 00F1 by the GPO.
         assertEquals("771E" + "9F270180" + "9F360200F1"
-                + "9F2608FBE724C147ACDF75" + "9F100706011203A4A002" + "9000", send(GENAC));
+                + "9F26084ED915D20AC28174" + "9F100706011203A4A002" + "9000", send(GENAC));
     }
 
     @Test
@@ -166,8 +166,8 @@ public class AssetCardEngineTest {
         send(GPO);
         String second = send(GENAC);
 
-        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000", first);
-        assertEquals("771E9F2701809F360200F2" + "9F26082D1F49E3E6EA0F85" + "9F100706011203A4A0029000", second);
+        assertEquals("771E9F2701809F360200F1" + "9F26084ED915D20AC28174" + "9F100706011203A4A0029000", first);
+        assertEquals("771E9F2701809F360200F2" + "9F260830E9D37ED4F1E27D" + "9F100706011203A4A0029000", second);
         assertNotEquals(first, second);
         assertNotEquals(first.substring(22, 38), second.substring(22, 38));
     }
@@ -206,7 +206,7 @@ public class AssetCardEngineTest {
         String first = send(GENAC);
         String second = send(GENAC2);
 
-        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000", first);
+        assertEquals("771E9F2701809F360200F1" + "9F26084ED915D20AC28174" + "9F100706011203A4A0029000", first);
         assertEquals(AC2_RESPONSE, second);
         assertNotEquals(first.substring(22, 38), second.substring(22, 38));
     }
