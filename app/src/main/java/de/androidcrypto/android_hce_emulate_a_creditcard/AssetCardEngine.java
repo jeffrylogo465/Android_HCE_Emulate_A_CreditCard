@@ -5,10 +5,18 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.RSAPrivateKey;
+import org.bouncycastle.util.encoders.Base64;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
@@ -41,6 +49,7 @@ final class AssetCardEngine {
 
     static final String AID = "AFFFFFFFFF1234";
     static final String ASSET = "profile.json";
+    static final String ICC_KEY_ASSET = "icc_private_key.pem";
 
     private static final byte[] PPSE = Hex.hex("325041592E5359532E4444463031");
 
@@ -63,6 +72,11 @@ final class AssetCardEngine {
     private final String mkAc;
 
     private int atc;
+
+    /** ICC RSA key for INTERNAL AUTHENTICATE, or null when none was loaded. */
+    private BigInteger iccModulus;
+    private BigInteger iccPrivateExponent;
+    private final SecureRandom random = new SecureRandom();
 
     private boolean selected;
     private boolean gpoOk;
@@ -114,6 +128,38 @@ final class AssetCardEngine {
         return new AssetCardEngine(JsonParser.parseString(json).getAsJsonObject());
     }
 
+    /** Profile plus the ICC private key (PEM, PKCS#1 or PKCS#8) used for DDA. */
+    static AssetCardEngine load(InputStream profile, InputStream keyPem) throws IOException {
+        AssetCardEngine e = load(profile);
+        e.setIccKey(readAll(keyPem));
+        return e;
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+        return bo.toByteArray();
+    }
+
+    private void setIccKey(byte[] pem) throws IOException {
+        String text = new String(pem, StandardCharsets.US_ASCII);
+        boolean pkcs1 = text.contains("BEGIN RSA PRIVATE KEY");
+        String b64 = text.replaceAll("-----[A-Z ]+-----", "").replaceAll("\\s", "");
+        byte[] der;
+        try {
+            der = Base64.decode(b64);
+        } catch (RuntimeException ex) {
+            throw new IOException("ICC key is not a PEM file: " + ex.getMessage(), ex);
+        }
+        RSAPrivateKey k = RSAPrivateKey.getInstance(pkcs1
+                ? ASN1Primitive.fromByteArray(der)
+                : PrivateKeyInfo.getInstance(ASN1Primitive.fromByteArray(der)).parsePrivateKey());
+        iccModulus = k.getModulus();
+        iccPrivateExponent = k.getPrivateExponent();
+    }
+
     // ---------- profile accessors ----------
 
     String pan() { return pan; }
@@ -145,6 +191,7 @@ final class AssetCardEngine {
             case 0xA8: return gpo(apdu);
             case 0xB2: return readRecord(apdu);
             case 0xAE: return generateAc(apdu);
+            case 0x88: return internalAuthenticate(apdu);
             default:   return sw("6D00");
         }
     }
@@ -331,6 +378,63 @@ final class AssetCardEngine {
         l[2] = (byte) 0xF0;
         r[2] = (byte) 0x0F;
         return Tlv.cat(EmvCrypto.des3(mk16, l), EmvCrypto.des3(mk16, r));
+    }
+
+    // ---------- INTERNAL AUTHENTICATE (DDA) ----------
+
+    /**
+     * EMV Book 2 6.5: the Signed Dynamic Application Data.
+     *
+     * Plain RSA over  6A | 05 | 01 | LDD | ICC dynamic data | BB.. | SHA-1 | BC
+     * with the hash taken over everything from the 05 up to the padding,
+     * followed by the terminal's DDOL data (here the 4-byte UN, per 9F49).
+     * ICC dynamic data is the ICC Dynamic Number: length byte, then 8 random
+     * bytes. The AIP is NOT part of this signature (it is in SDA's static data
+     * only); the ATC is not either, as no CID/AC is carried.
+     */
+    private byte[] internalAuthenticate(byte[] apdu) {
+        if (!selected || !gpoOk) return sw("6985");
+        if (iccModulus == null) return sw("6D00");
+        byte[] ddol = Hex.hex(need("9F49"));
+        byte[] data = dataOf(apdu);
+        if (data == null || data.length != dolLength(parseDol(ddol))) return sw("6700");
+
+        int nic = (iccModulus.bitLength() + 7) / 8;
+        byte[] dyn = new byte[9];
+        dyn[0] = 8;
+        byte[] num = new byte[8];
+        random.nextBytes(num);
+        System.arraycopy(num, 0, dyn, 1, 8);
+
+        byte[] block = new byte[nic];
+        block[0] = 0x6A;
+        block[1] = 0x05;
+        block[2] = 0x01;
+        block[3] = (byte) dyn.length;
+        System.arraycopy(dyn, 0, block, 4, dyn.length);
+        Arrays.fill(block, 4 + dyn.length, nic - 21, (byte) 0xBB);
+        block[nic - 1] = (byte) 0xBC;
+        byte[] hash;
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-1");
+            sha.update(block, 1, nic - 22);
+            sha.update(data);
+            hash = sha.digest();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        System.arraycopy(hash, 0, block, nic - 21, 20);
+
+        byte[] sig = rsaPrivate(block, nic);
+        return ok(Tlv.t(0x77, Tlv.t(0x9F4B, sig)));
+    }
+
+    private byte[] rsaPrivate(byte[] block, int len) {
+        byte[] raw = new BigInteger(1, block).modPow(iccPrivateExponent, iccModulus).toByteArray();
+        byte[] out = new byte[len];
+        int copy = Math.min(raw.length, len);
+        System.arraycopy(raw, raw.length - copy, out, len - copy, copy);
+        return out;
     }
 
     // ---------- DOL and TLV helpers ----------

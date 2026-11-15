@@ -135,3 +135,23 @@ GPO/records now served fine, but the terminal quit before GENERATE AC: AIP
 - [x] Pinned bytes updated: GPO 82021800, and the 9F26 ARQC/TC values - the
       AIP is part of the MAC input, so they change by design, not by accident.
 - [x] Full suite green under --rerun-tasks (84 tests, 0 failures); assembleDebug green.
+
+## Follow-up (term-new3.log) - DDA via INTERNAL AUTHENTICATE
+
+AIP 1800 changed nothing: the terminal reads 5 records then stops, because a
+contactless kernel wants DDA/CDA.
+
+- [x] INS 0x88 in AssetCardEngine: EMV Book 2 6.5 Signed Dynamic Application
+      Data (6A 05 01 LDD dyn BB.. SHA-1 BC, hash over the block + the UN per
+      DDOL 9F49=9F3704), raw RSA with the ICC key from assets/icc_private_key.pem
+      (BouncyCastle bcprov-jdk15to18 1.70 parses the PEM). Response 77{9F4B sig}, 128 bytes.
+- [x] DEVIATION from the request, on purpose: the AIP is NOT in the signed data
+      (that is SDA's static data); and the AIP is 3C00, not 5800. 0x58 is
+      SDA(40)+CVM(10)+TRM(08) - no DDA bit. 3C00 = the simulator's original 1C00
+      + DDA(20). Tag 82 and "aip" both updated.
+- [x] Tests: 0x88 gives 128 bytes, recovery gives 6A/05/01/BB../BC and a SHA-1 that
+      matches block||UN (and not another UN), refused before GPO / wrong UN length /
+      no key; aip_claimsDdaOnly. Seven 9F26 pins updated (AIP is MAC input).
+- [x] .gitignore: *.pem (asset key excepted), term_*.log, term-*.log, tap.log.
+- [x] 89 tests green under --rerun-tasks; assembleDebug green.
+- [ ] Unverified: that the PEM matches the ICC cert in 9F46 (needs the CA/issuer key).

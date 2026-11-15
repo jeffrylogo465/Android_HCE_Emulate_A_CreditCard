@@ -1790,8 +1790,9 @@ public class ShadowApduService extends HostApduService {
 
     private AssetCardEngine assetCard() throws java.io.IOException {
         if (assetCard == null) {
-            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET)) {
-                assetCard = AssetCardEngine.load(in);
+            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET);
+                 java.io.InputStream key = getAssets().open(AssetCardEngine.ICC_KEY_ASSET)) {
+                assetCard = AssetCardEngine.load(in, key);
             }
             String saved = prefs().getString(PREF_ASSET_ATC, "");
             if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));

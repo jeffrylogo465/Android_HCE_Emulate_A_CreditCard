@@ -60,6 +60,10 @@ dependencies {
     // Prefs.java is that only one file has to change if it does.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // ASN.1/PEM parsing of the ICC private key for INTERNAL AUTHENTICATE (DDA).
+    // 1.70 is the jdk15to18 build: Java 5-8 bytecode, fine at minSdk 21.
+    implementation("org.bouncycastle:bcprov-jdk15to18:1.70")
+
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     androidTestImplementation(libs.ext.junit)

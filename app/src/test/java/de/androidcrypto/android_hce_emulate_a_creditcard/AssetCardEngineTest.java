@@ -39,11 +39,11 @@ public class AssetCardEngineTest {
     private static final String GENAC = "80AE80001D" + CDOL1_DATA + "00";
 
     // Template 2: 77 { 82 AIP, 94 AFL }
-    private static final String GPO_RESPONSE = "7712" + "82021800" + "940C080202001001020018010201" + "9000";
+    private static final String GPO_RESPONSE = "7712" + "82023C00" + "940C080202001001020018010201" + "9000";
     // CDOL2 data: 8A "Z3" (5A33), then the CDOL1 objects again.
     private static final String CDOL2_DATA = "5A33" + CDOL1_DATA;
     private static final String GENAC2 = "80AE40001F" + CDOL2_DATA + "00";
-    private static final String AC2_RESPONSE = "771E9F2701809F360200F1" + "9F2608C73584763998A7A5"
+    private static final String AC2_RESPONSE = "771E9F2701809F360200F1" + "9F2608FB318417FC62FC8E"
             + "9F100706011203A4A0029000";
 
     private static final String FCI = "6F398407AFFFFFFFFF1234A52E500D5645534120454C454354524F4E5F2D02656E8701019F1210564553412020"
@@ -86,7 +86,7 @@ public class AssetCardEngineTest {
         assertEquals("221", eng.serviceCode());
         assertEquals("1234560012345608D29122211229424900200F", eng.track2());
         assertEquals("080202001001020018010201", eng.afl());
-        assertEquals("1800", eng.aip());
+        assertEquals("3C00", eng.aip());
         assertEquals("9F02069F03069F1A0295055F2A029A039C019F3704", eng.cdol1());
         assertEquals("8A029F02069F03069F1A0295055F2A029A039C019F3704", eng.cdol2());
         assertEquals("06011203A4A002", eng.tag("9F10"));
@@ -122,14 +122,108 @@ public class AssetCardEngineTest {
      * b6 = DDA, b1 = CDA; none may be set.
      */
     @Test
-    public void aip_claimsNoOfflineDataAuthentication() {
+    public void aip_claimsDdaOnly() {
         send(SELECT_AID);
-        String resp = send(GPO);
-        assertTrue(resp.startsWith("771282021800"));
+        assertTrue(send(GPO).startsWith("771282023C00"));
         int b1 = Integer.parseInt(eng.aip().substring(0, 2), 16);
         assertEquals("SDA bit", 0, b1 & 0x40);
-        assertEquals("DDA bit", 0, b1 & 0x20);
+        assertEquals("DDA bit", 0x20, b1 & 0x20);
         assertEquals("CDA bit", 0, b1 & 0x01);
+        assertEquals("tag 82 and aip agree", eng.aip(), eng.tag("82"));
+    }
+
+    // ---------- INTERNAL AUTHENTICATE (DDA), EMV Book 2 6.5 ----------
+
+    private static final String KEY = "src/main/assets/icc_private_key.pem";
+    private static final String INT_AUTH = "0088000004" + "11223344" + "00";
+
+    private AssetCardEngine withKey() throws Exception {
+        try (InputStream p = new FileInputStream(PROFILE); InputStream k = new FileInputStream(KEY)) {
+            return AssetCardEngine.load(p, k);
+        }
+    }
+
+    @Test
+    public void internalAuthenticate_returnsExactly128SignatureBytes() throws Exception {
+        eng = withKey();
+        send(SELECT_AID);
+        send(GPO);
+        String r = send(INT_AUTH);
+        // 77 81 84 | 9F4B 81 80 | 128 bytes | 9000
+        assertTrue(r, r.startsWith("778184" + "9F4B8180"));
+        assertTrue(r.endsWith("9000"));
+        assertEquals(3 + 4 + 128 + 2, r.length() / 2);
+    }
+
+    @Test
+    public void internalAuthenticate_recoversToEmvSignedDynamicData() throws Exception {
+        eng = withKey();
+        send(SELECT_AID);
+        send(GPO);
+        String r = send(INT_AUTH);
+        byte[] sig = Hex.hex(r.substring(r.indexOf("9F4B8180") + 8, r.length() - 4));
+        assertEquals(128, sig.length);
+
+        // Recover with the public key (e = 65537 or whatever the PEM says).
+        org.bouncycastle.asn1.pkcs.RSAPrivateKey k = readKey();
+        byte[] m = new java.math.BigInteger(1, sig).modPow(k.getPublicExponent(), k.getModulus())
+                .toByteArray();
+        byte[] rec = new byte[128];
+        System.arraycopy(m, Math.max(0, m.length - 128), rec, 128 - Math.min(128, m.length), Math.min(128, m.length));
+
+        assertEquals(0x6A, rec[0] & 0xFF);
+        assertEquals(0x05, rec[1]);
+        assertEquals(0x01, rec[2]);
+        assertEquals(9, rec[3]);          // LDD: length byte + 8-byte ICC dynamic number
+        assertEquals(8, rec[4]);
+        assertEquals((byte) 0xBC, rec[127]);
+        for (int i = 4 + 9; i < 128 - 21; i++) assertEquals((byte) 0xBB, rec[i]);
+
+        java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-1");
+        sha.update(rec, 1, 128 - 22);
+        sha.update(Hex.hex("11223344"));   // the UN, per DDOL 9F3704
+        assertEquals(Hex.toHex(sha.digest()), Hex.toHex(java.util.Arrays.copyOfRange(rec, 107, 127)));
+    }
+
+    @Test
+    public void internalAuthenticate_hashBindsTheUnpredictableNumber() throws Exception {
+        eng = withKey();
+        send(SELECT_AID);
+        send(GPO);
+        String r = send("0088000004" + "AABBCCDD" + "00");
+        byte[] sig = Hex.hex(r.substring(r.indexOf("9F4B8180") + 8, r.length() - 4));
+        org.bouncycastle.asn1.pkcs.RSAPrivateKey k = readKey();
+        byte[] m = new java.math.BigInteger(1, sig).modPow(k.getPublicExponent(), k.getModulus()).toByteArray();
+        byte[] rec = new byte[128];
+        System.arraycopy(m, Math.max(0, m.length - 128), rec, 128 - Math.min(128, m.length), Math.min(128, m.length));
+        java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-1");
+        sha.update(rec, 1, 128 - 22);
+        sha.update(Hex.hex("11223344"));   // a different UN must not match
+        assertNotEquals(Hex.toHex(sha.digest()), Hex.toHex(java.util.Arrays.copyOfRange(rec, 107, 127)));
+    }
+
+    @Test
+    public void internalAuthenticate_refusedBeforeGpoOrWithWrongUnLength() throws Exception {
+        eng = withKey();
+        assertEquals("6985", send(INT_AUTH));
+        send(SELECT_AID);
+        send(GPO);
+        assertEquals("6700", send("0088000003" + "112233" + "00"));
+    }
+
+    @Test
+    public void internalAuthenticate_withoutKeyIsNotSupported() throws Exception {
+        send(SELECT_AID);
+        send(GPO);
+        assertEquals("6D00", send(INT_AUTH));
+    }
+
+    private static org.bouncycastle.asn1.pkcs.RSAPrivateKey readKey() throws Exception {
+        String t = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(KEY)),
+                StandardCharsets.US_ASCII).replaceAll("-----[A-Z ]+-----", "").replaceAll("\\s", "");
+        return org.bouncycastle.asn1.pkcs.RSAPrivateKey.getInstance(
+                org.bouncycastle.asn1.ASN1Primitive.fromByteArray(
+                        org.bouncycastle.util.encoders.Base64.decode(t)));
     }
 
     /**
@@ -188,7 +282,7 @@ public class AssetCardEngineTest {
         assertEquals(REC_3_2, send("00B2021C00"));
         // ATC 00F0 in the profile, advanced to 00F1 by the GPO.
         assertEquals("771E" + "9F270180" + "9F360200F1"
-                + "9F2608E9086B705ED24663" + "9F100706011203A4A002" + "9000", send(GENAC));
+                + "9F2608FBE724C147ACDF75" + "9F100706011203A4A002" + "9000", send(GENAC));
     }
 
     @Test
@@ -201,8 +295,8 @@ public class AssetCardEngineTest {
         send(GPO);
         String second = send(GENAC);
 
-        assertEquals("771E9F2701809F360200F1" + "9F2608E9086B705ED24663" + "9F100706011203A4A0029000", first);
-        assertEquals("771E9F2701809F360200F2" + "9F26082416EBF4820B5AB3" + "9F100706011203A4A0029000", second);
+        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000", first);
+        assertEquals("771E9F2701809F360200F2" + "9F26082D1F49E3E6EA0F85" + "9F100706011203A4A0029000", second);
         assertNotEquals(first, second);
         assertNotEquals(first.substring(22, 38), second.substring(22, 38));
     }
@@ -241,7 +335,7 @@ public class AssetCardEngineTest {
         String first = send(GENAC);
         String second = send(GENAC2);
 
-        assertEquals("771E9F2701809F360200F1" + "9F2608E9086B705ED24663" + "9F100706011203A4A0029000", first);
+        assertEquals("771E9F2701809F360200F1" + "9F2608FBE724C147ACDF75" + "9F100706011203A4A0029000", first);
         assertEquals(AC2_RESPONSE, second);
         assertNotEquals(first.substring(22, 38), second.substring(22, 38));
     }
