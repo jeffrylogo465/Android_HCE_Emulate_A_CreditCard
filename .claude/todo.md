@@ -101,3 +101,25 @@ the real terminal actually hit.
       ShadowApduServiceAssetCardTest.java x1)
 - [x] Full suite green under --rerun-tasks (77 tests, 0 failures)
 - [x] Delete .claude-in-progress when the last item is ticked (none present)
+
+## Follow-up (term-new.log) - the directory fix exposed a second dead end
+
+Live tap: the terminal now selects A0000000041010 (the new PPSE fallback
+entry above works), but GPO came back 6985. The SELECT of that AID fell
+through, uncounted, to the ordinary select() dispatch - which has no
+AIP/AFL of its own and never flipped AssetCardEngine's `selected` flag, so
+the GPO that followed was refused.
+
+- [x] AssetCardEngine.selectAs() binds the card for a requested name that
+      isn't its own AID - same A5/selected state as its own select(), only
+      tag 84 rewritten - and ShadowApduService's fallback branch calls it
+      instead of falling through.
+- [x] baseVerdict() tracked nGpos (the attempt) and assumed success; it now
+      tracks the last GPO status word and names it instead of reporting
+      "read NO records" when the GPO itself was refused.
+- [x] New tests written and green (6 new: AssetCardEngineTest.java x1,
+      ShadowApduServiceAssetCardTest.java x3 net - 2 added, 1 extended with
+      a comment update).
+- [x] Full suite green under --rerun-tasks (83 tests, 0 failures).
+- [x] assembleDebug green.
+- [x] Did not touch the PPSE, apduservice.xml, profile.json or the AIP.
