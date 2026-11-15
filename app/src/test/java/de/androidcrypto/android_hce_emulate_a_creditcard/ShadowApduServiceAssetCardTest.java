@@ -72,9 +72,16 @@ public class ShadowApduServiceAssetCardTest {
     }
 
     /**
-     * select() for the real fallback AID must reach the ordinary profile FCI,
-     * not AssetCardEngine.select() - which answers only AFFFFFFFFF1234 and
-     * 6A82's anything else.
+     * select() for the real fallback AID must bind AssetCardEngine as the
+     * current card - via selectAs(), not its own select() which 6A82's
+     * anything that isn't AFFFFFFFFF1234 - and hand back the profile's real
+     * FCI (A5 untouched) with only the DF name in tag 84 rewritten to the
+     * AID actually requested.
+     *
+     * Falling through to the ordinary profile select() instead (the old
+     * behaviour) produced a structurally fine but synthetic FCI that never
+     * flipped AssetCardEngine's own `selected` flag, so the GPO that
+     * followed answered 6985 - see the next test.
      */
     @Test
     public void flag_on_selectA0000000041010_returnsTheProfileFci() {
@@ -84,6 +91,26 @@ public class ShadowApduServiceAssetCardTest {
         assertTrue("fallback AID must get a real FCI, not AssetCardEngine's 6A82: " + r,
                 r.startsWith("6F") && r.contains("8407A0000000041010"));
         assertTrue(r.endsWith("9000"));
+    }
+
+    /**
+     * The GPO that follows a fallback-AID select must bind, not 6985: the
+     * terminal gets the profile's real AIP/AFL (same values the test-AID
+     * path serves) and the AFL's records are readable afterward.
+     */
+    @Test
+    public void flag_on_selectA0000000041010_thenGpo_bindsAndRecordsAreReadable() {
+        start(true);
+        send(SELECT_PPSE);
+        send("00A4040007A0000000041010");
+        String gpoResp = send(GPO);
+        assertEquals("GPO after the fallback select must return the profile's "
+                        + "real AIP and AFL, not 6985",
+                "7712" + "82021C00" + "940C080202001001020018010201" + "9000",
+                gpoResp);
+        String recResp = send("00B2020C00");
+        assertTrue("the AFL's records must be readable once GPO has bound: " + recResp,
+                recResp.endsWith("9000"));
     }
 
     /**
@@ -160,5 +187,35 @@ public class ShadowApduServiceAssetCardTest {
         assertFalse("a tap that reached GENERATE AC must not be reported as having "
                         + "quit after the PPSE SELECT: " + verdict,
                 verdict.contains("quit after one SELECT"));
+    }
+
+    /**
+     * nGpos counts the attempt, not the outcome: a GPO the card refuses still
+     * bumps it, and baseVerdict() used to read nGpos alone and then assume
+     * success - so a refused GPO (the fallback-select bug served exactly
+     * this: 6985, see the two fallback tests above) was reported as "the
+     * terminal took the GPO response and read NO records", which blames the
+     * terminal for something the card's own refusal caused. ATC exhaustion
+     * is used here only because it is a public, reflection-free way to make
+     * AssetCardEngine's own gpo() answer 6985.
+     */
+    @Test
+    public void flag_on_gpoRefused_verdictNamesTheStatusWordNotNoRecords() {
+        start(true);
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("asset_atc", "FFFF").commit();
+
+        send(SELECT_PPSE);
+        send(SELECT_AID);
+        String gpoResp = send(GPO);
+        assertEquals("6985", gpoResp);
+
+        svc.onDeactivated(0);
+        String verdict = Prefs.get(RuntimeEnvironment.getApplication())
+                .getString("lastverdict", "");
+        assertTrue("must name the real GPO status word: " + verdict, verdict.contains("6985"));
+        assertFalse("must not claim records were read when the GPO itself was refused: "
+                        + verdict,
+                verdict.contains("read NO records"));
     }
 }

@@ -269,6 +269,17 @@ public class ShadowApduService extends HostApduService {
     private String lastCid = "";
 
     /**
+     * The status word of the last GPO this tap sent, "" until one has.
+     *
+     * nGpos counts the attempt, not the outcome, so nGpos > 0 is true even
+     * when the card refused it (6985 and friends). baseVerdict() used to read
+     * nGpos alone and then assume success - reporting "read NO records" for a
+     * tap that never got an AIP/AFL to read records against. This is what
+     * lets it tell the two apart and name the real status word.
+     */
+    private String lastGpoSw = "";
+
+    /**
      * The top (first-listed) AID the last PPSE response actually advertised,
      * so a "quit after one SELECT" verdict can name what we offered instead
      * of saying "field drop" with nothing to act on. Empty until a PPSE has
@@ -950,6 +961,7 @@ public class ShadowApduService extends HostApduService {
         clearApplicationState();
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
+        lastGpoSw = "";
         lastPpseTopAid = "";
         sawError = false;
         psnWarned = false;
@@ -1871,26 +1883,40 @@ public class ShadowApduService extends HostApduService {
                         && Arrays.equals(selName, hex(AssetCardEngine.AID));
 
                 // A terminal that does not know AFFFFFFFFF1234 falls back to
-                // the real brand AID the PPSE's second entry now offers -
-                // see buildAssetPpse(). AssetCardEngine itself answers only
-                // its own one AID and 6A82's anything else, so that fallback
-                // SELECT must fall through, uncounted here, to the ordinary
-                // dispatch below instead of being forwarded to it.
+                // the real brand AID the PPSE's second entry now offers - see
+                // buildAssetPpse(). AssetCardEngine.process() answers only its
+                // own one AID and 6A82's anything else, so this SELECT is
+                // bound here via selectAs(): same card, same A5/AIP/AFL, with
+                // only the DF name in the FCI rewritten to what was actually
+                // requested. It used to fall through, uncounted, to the
+                // ordinary dispatch below - which has no AIP/AFL of its own to
+                // serve and left AssetCardEngine's `selected` flag false, so
+                // the GPO that followed answered 6985.
                 boolean isFallbackSelect = isSelect && selName != null
                         && !isPpseSelect && !isTestAidSelect;
 
-                if (!isFallbackSelect) {
-                    if (isSelect)         nSelects++;
-                    else if (ins == 0xA8) nGpos++;
-                    else if (ins == 0xB2) nRecs++;
-                    else if (ins == 0xAE) nGens++;
-                    else if (ins == 0x2A) nCccs++;
-
-                    byte[] out = isPpseSelect ? buildAssetPpse() : assetCard().process(apdu);
-                    if (ins == 0xA8) persistAssetAtc();
+                if (isFallbackSelect) {
+                    nSelects++;
+                    byte[] out = assetCard().selectAs(selName);
                     tap("<< " + bytesToHex(out));
                     return out;
                 }
+
+                if (isSelect)         nSelects++;
+                else if (ins == 0xA8) nGpos++;
+                else if (ins == 0xB2) nRecs++;
+                else if (ins == 0xAE) nGens++;
+                else if (ins == 0x2A) nCccs++;
+
+                byte[] out = isPpseSelect ? buildAssetPpse() : assetCard().process(apdu);
+                if (ins == 0xA8) {
+                    persistAssetAtc();
+                    lastGpoSw = (out.length >= 2)
+                            ? bytesToHex(new byte[]{out[out.length - 2], out[out.length - 1]})
+                            : "";
+                }
+                tap("<< " + bytesToHex(out));
+                return out;
             }
 
             // READ RECORD walks the AFL the GPO handed out. Before any GPO there
@@ -1982,7 +2008,10 @@ public class ShadowApduService extends HostApduService {
                 if (cryptogramSent && (ins == 0xA8 || ins == 0xAE)) commitAtc();
 
                 byte[] out = cat(body, SW_OK);
-                if (ins == 0xA8) watchForStall();
+                if (ins == 0xA8) {
+                    watchForStall();
+                    lastGpoSw = "9000";
+                }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
                 trackState(apdu, ins, out);
@@ -2013,6 +2042,9 @@ public class ShadowApduService extends HostApduService {
                 out = SW_UNSUPPORTED;
             }
 
+            if (ins == 0xA8 && out.length >= 2) {
+                lastGpoSw = bytesToHex(new byte[]{out[out.length - 2], out[out.length - 1]});
+            }
             tap("<< " + bytesToHex(out));
             trackState(apdu, ins, out);
             return out;
@@ -3006,6 +3038,15 @@ public class ShadowApduService extends HostApduService {
                 + " - and never selected an application: field drop, it was not ready,"
                 + " or no kernel on the terminal recognises that AID";
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
+        // nGpos counts the attempt, not the outcome - a GPO we refused (6985
+        // and friends) still bumps it. Without this check the tap fell into
+        // the nRecs==0 branch below and reported "read NO records", which
+        // reads like a terminal problem when the card never handed out an
+        // AIP/AFL to read records against in the first place.
+        if (!lastGpoSw.isEmpty() && !"9000".equals(lastGpoSw)) {
+            return "TAP: terminal sent the GPO and we answered " + lastGpoSw
+                    + " - no AIP/AFL went out, so there was nothing to read records against";
+        }
 
         if (isMsd()) {
             if (nGens > 0)  return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";

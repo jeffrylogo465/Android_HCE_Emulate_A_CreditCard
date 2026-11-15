@@ -116,6 +116,25 @@ public class AssetCardEngineTest {
         assertEquals(GPO_RESPONSE, send(GPO));
     }
 
+    /**
+     * selectAs() is how ShadowApduService binds this card under a brand AID
+     * a real terminal actually recognises (its own AID, AFFFFFFFFF1234, is
+     * fictional and no kernel selects it on its own). The FCI must be
+     * byte-identical to selectAid_returnsFciFromProfile's except for the
+     * requested name in tag 84, and - unlike falling through to a generic
+     * FCI builder that never touches this engine's state - it must leave
+     * the card selected, so the GPO and READ RECORD that follow see the
+     * profile's real AIP/AFL/records exactly as they do after the real AID.
+     */
+    @Test
+    public void selectAs_rewritesOnlyTag84AndStillBindsForGpoAndRecords() {
+        String fci = Hex.toHex(eng.selectAs(Hex.hex("A0000000041010")));
+        assertEquals(FCI.replace("8407AFFFFFFFFF1234", "8407A0000000041010"), fci);
+
+        assertEquals(GPO_RESPONSE, send(GPO));
+        assertEquals(REC_1_2, send("00B2020C00"));
+    }
+
     @Test
     public void readRecord_walksTheAfl() {
         send(SELECT_AID);

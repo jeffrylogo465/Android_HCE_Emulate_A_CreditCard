@@ -194,6 +194,26 @@ final class AssetCardEngine {
                 Tlv.t(0xA5, Hex.hex(need("A5"))))));
     }
 
+    /**
+     * Binds this card as selected under a name that is not its own AID.
+     *
+     * A terminal that does not recognise AFFFFFFFFF1234 is offered the real
+     * brand AID as a PPSE fallback entry (see ShadowApduService.buildAssetPpse),
+     * and when it SELECTs that AID this card must answer exactly as it would
+     * for its own AID - same A5, same selected state, same AIP/AFL once GPO
+     * runs - with only the DF name in tag 84 rewritten to what was actually
+     * requested. Without this, the SELECT fell through to the ordinary
+     * dispatch, which has no AIP/AFL of its own to serve and left this card's
+     * `selected` flag false, so the GPO that followed answered 6985.
+     */
+    byte[] selectAs(byte[] requestedName) {
+        clearState();
+        selected = true;
+        return ok(Tlv.t(0x6F, Tlv.cat(
+                Tlv.t(0x84, requestedName),
+                Tlv.t(0xA5, Hex.hex(need("A5"))))));
+    }
+
     private String need(String t) {
         String v = tags.get(t);
         if (v == null) throw new IllegalStateException("profile has no tag " + t);
