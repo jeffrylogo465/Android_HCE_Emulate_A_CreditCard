@@ -50,6 +50,56 @@ public class ShadowApduServiceAssetCardTest {
         assertTrue(send(SELECT_PPSE).contains("A0000000031010"));
     }
 
+    /**
+     * No real terminal kernel recognises AFFFFFFFFF1234. A real tap reads the
+     * directory, finds only that fictional AID, and never selects anything -
+     * the "quit after one SELECT" tap. buildAssetPpse() fixes this by adding
+     * a second, real entry (Mastercard) with a correctly-lengthed label, so
+     * the directory is never a dead end.
+     */
+    @Test
+    public void flag_on_ppseAdvertisesARealAidWithAValidLabelLength() {
+        start(true);
+        String r = send(SELECT_PPSE);
+        assertTrue("must still carry the test card's own entry: " + r,
+                r.contains("4F07AFFFFFFFFF1234"));
+        assertTrue("must also offer a real, servable AID: " + r,
+                r.contains("4F07A0000000041010"));
+        // 50 0A "MASTERCARD" (10 ASCII bytes) - the length byte matches the text.
+        assertTrue("the Mastercard entry's 50 label length must match its text: " + r,
+                r.contains("500A4D415354455243415244"));
+        assertTrue(r.endsWith("9000"));
+    }
+
+    /**
+     * select() for the real fallback AID must reach the ordinary profile FCI,
+     * not AssetCardEngine.select() - which answers only AFFFFFFFFF1234 and
+     * 6A82's anything else.
+     */
+    @Test
+    public void flag_on_selectA0000000041010_returnsTheProfileFci() {
+        start(true);
+        send(SELECT_PPSE);
+        String r = send("00A4040007A0000000041010");
+        assertTrue("fallback AID must get a real FCI, not AssetCardEngine's 6A82: " + r,
+                r.startsWith("6F") && r.contains("8407A0000000041010"));
+        assertTrue(r.endsWith("9000"));
+    }
+
+    /**
+     * A terminal that gives up on AFFFFFFFFF1234 commonly falls back to a
+     * well-known brand AID, including this 8-byte Amex one. It must not be
+     * answered with 6A82.
+     */
+    @Test
+    public void flag_on_selectA0000000250100_doesNotFail() {
+        start(true);
+        send(SELECT_PPSE);
+        String r = send("00A4040007A0000000250100");
+        assertFalse("fallback AID must not be rejected with 6A82: " + r, r.endsWith("6A82"));
+        assertTrue(r.endsWith("9000"));
+    }
+
     @Test
     public void flag_on_servesTheFullFlowWithAComputedCryptogram() {
         start(true);

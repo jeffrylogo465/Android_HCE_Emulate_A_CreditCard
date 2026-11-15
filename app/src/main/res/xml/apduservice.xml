@@ -50,6 +50,7 @@
 
         <!-- American Express -->
         <aid-filter android:name="A00000002501" />
+        <aid-filter android:name="A0000000250100" />
         <aid-filter android:name="A0000000250104" />
         <aid-filter android:name="A0000000250001" />
 

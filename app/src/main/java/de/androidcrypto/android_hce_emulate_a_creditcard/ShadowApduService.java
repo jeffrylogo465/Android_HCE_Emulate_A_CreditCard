@@ -268,6 +268,14 @@ public class ShadowApduService extends HostApduService {
     private int nSelects, nGpos, nRecs, nGens, nCccs;
     private String lastCid = "";
 
+    /**
+     * The top (first-listed) AID the last PPSE response actually advertised,
+     * so a "quit after one SELECT" verdict can name what we offered instead
+     * of saying "field drop" with nothing to act on. Empty until a PPSE has
+     * been answered at least once this tap.
+     */
+    private String lastPpseTopAid = "";
+
     private boolean sawError;
     /** Warn-once guards: these fields are read several times per tap. */
     private boolean psnWarned;
@@ -942,6 +950,7 @@ public class ShadowApduService extends HostApduService {
         clearApplicationState();
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
+        lastPpseTopAid = "";
         sawError = false;
         psnWarned = false;
         expiryWarned = false;
@@ -1370,6 +1379,7 @@ public class ShadowApduService extends HostApduService {
             String problem = ppseProblem(captured);
             if (problem == null) {
                 tap("-- ppse source: captured " + captured.length + "B");
+                lastPpseTopAid = "captured directory";
                 return captured;
             }
             tap("!! captured ppse: " + problem + " - generating instead");
@@ -1377,6 +1387,7 @@ public class ShadowApduService extends HostApduService {
 
         String realAid = capAid();
         if (realAid.isEmpty()) realAid = hexBox("aid", DEFAULT_AID);
+        lastPpseTopAid = realAid;
 
         byte[] entry = PPSE_MINIMAL
                 ? cat(tlv(0x4F, hex(realAid)), tlv(0x87, new byte[]{0x01}))
@@ -1402,6 +1413,34 @@ public class ShadowApduService extends HostApduService {
         byte[] built = tlv(0x6F, inner);
         tap("-- ppse source: generated, " + built.length + "B");
         return built;
+    }
+
+    /**
+     * The PPSE served when the asset-card toggle is on.
+     *
+     * AssetCardEngine's own directory entry - the mrautio test card, AID
+     * AFFFFFFFFF1234 - is kept first and byte-for-byte as AssetCardEngineTest
+     * pins it, built from its own "50"/"87" tags rather than duplicating
+     * them. No real terminal kernel recognises that fictional AID, so a
+     * second entry is added naming a real, servable card (Mastercard,
+     * A0000000041010) so a terminal that reads the directory and does not
+     * know the first entry still has one it does. Without this second entry
+     * the terminal reads the directory, recognises nothing in it, and never
+     * selects an application at all - the "quit after one SELECT" tap.
+     */
+    private byte[] buildAssetPpse() throws java.io.IOException {
+        AssetCardEngine ac = assetCard();
+        byte[] e0 = tlv(0x61, cat(
+                tlv(0x4F, hex(AssetCardEngine.AID)),
+                tlv(0x50, hex(ac.tag("50"))),
+                tlv(0x87, hex(ac.tag("87")))));
+        byte[] e1 = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 2));
+
+        lastPpseTopAid = AssetCardEngine.AID;
+
+        byte[] fci = tlv(0xBF0C, cat(e0, e1));
+        byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
+        return cat(tlv(0x6F, inner), SW_OK);
     }
 
     /**
@@ -1819,16 +1858,39 @@ public class ShadowApduService extends HostApduService {
             // what the terminal actually did. That is the one EMV path left that
             // this app's own PPSE/FCI diagnosis could not be trusted on.
             if (assetCardOn()) {
-                if (isSelect)         nSelects++;
-                else if (ins == 0xA8) nGpos++;
-                else if (ins == 0xB2) nRecs++;
-                else if (ins == 0xAE) nGens++;
-                else if (ins == 0x2A) nCccs++;
+                byte[] selName = null;
+                if (isSelect && apdu.length >= 5) {
+                    int lc0 = lcOf(apdu);
+                    int off0 = dataOff(apdu);
+                    if (apdu.length >= off0 + lc0) {
+                        selName = Arrays.copyOfRange(apdu, off0, off0 + lc0);
+                    }
+                }
+                boolean isPpseSelect    = selName != null && Arrays.equals(selName, PPSE);
+                boolean isTestAidSelect = selName != null
+                        && Arrays.equals(selName, hex(AssetCardEngine.AID));
 
-                byte[] out = assetCard().process(apdu);
-                if (ins == 0xA8) persistAssetAtc();
-                tap("<< " + bytesToHex(out));
-                return out;
+                // A terminal that does not know AFFFFFFFFF1234 falls back to
+                // the real brand AID the PPSE's second entry now offers -
+                // see buildAssetPpse(). AssetCardEngine itself answers only
+                // its own one AID and 6A82's anything else, so that fallback
+                // SELECT must fall through, uncounted here, to the ordinary
+                // dispatch below instead of being forwarded to it.
+                boolean isFallbackSelect = isSelect && selName != null
+                        && !isPpseSelect && !isTestAidSelect;
+
+                if (!isFallbackSelect) {
+                    if (isSelect)         nSelects++;
+                    else if (ins == 0xA8) nGpos++;
+                    else if (ins == 0xB2) nRecs++;
+                    else if (ins == 0xAE) nGens++;
+                    else if (ins == 0x2A) nCccs++;
+
+                    byte[] out = isPpseSelect ? buildAssetPpse() : assetCard().process(apdu);
+                    if (ins == 0xA8) persistAssetAtc();
+                    tap("<< " + bytesToHex(out));
+                    return out;
+                }
             }
 
             // READ RECORD walks the AFL the GPO handed out. Before any GPO there
@@ -2939,8 +3001,10 @@ public class ShadowApduService extends HostApduService {
         if (tapLog.length() == 0) return "TAP: nothing recorded";
 
         if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
-        if (nSelects <= 1) return "TAP: terminal read the directory and quit after one SELECT"
-                + " - field drop, or it was not ready";
+        if (nSelects <= 1) return "TAP: terminal read the directory - offered "
+                + (lastPpseTopAid.isEmpty() ? "no usable AID" : lastPpseTopAid)
+                + " - and never selected an application: field drop, it was not ready,"
+                + " or no kernel on the terminal recognises that AID";
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
 
         if (isMsd()) {
