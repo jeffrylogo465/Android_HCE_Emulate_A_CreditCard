@@ -1,6 +1,7 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
@@ -84,5 +85,30 @@ public class ShadowApduServiceAssetCardTest {
         assertEquals("771E9F2701809F360200F1" + "9F2608463C0F076491C0E1" + "9F100706011203A4A0029000",
                 send(GENAC2));
         assertEquals("6985", send(GENAC2));
+    }
+
+    /**
+     * The asset card answers from its own engine, before the SELECT/GPO/
+     * GENERATE AC counters that baseVerdict() reads were ever incremented -
+     * every asset-card tap, including a complete one, used to report "terminal
+     * read the directory and quit after one SELECT" regardless of how far the
+     * terminal actually got. A tap that walks PPSE through GENERATE AC must not
+     * be misdiagnosed as having died at the directory.
+     */
+    @Test
+    public void flag_on_fullFlow_verdictDoesNotMisreportAFirstSelectDeath() {
+        start(true);
+        send(SELECT_PPSE);
+        send(SELECT_AID);
+        send(GPO);
+        send("00B2020C00");
+        send(GENAC);
+
+        svc.onDeactivated(0);
+        String verdict = Prefs.get(RuntimeEnvironment.getApplication())
+                .getString("lastverdict", "");
+        assertFalse("a tap that reached GENERATE AC must not be reported as having "
+                        + "quit after the PPSE SELECT: " + verdict,
+                verdict.contains("quit after one SELECT"));
     }
 }
