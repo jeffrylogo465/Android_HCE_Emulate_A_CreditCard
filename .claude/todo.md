@@ -123,3 +123,15 @@ the GPO that followed was refused.
 - [x] Full suite green under --rerun-tasks (83 tests, 0 failures).
 - [x] assembleDebug green.
 - [x] Did not touch the PPSE, apduservice.xml, profile.json or the AIP.
+
+## Follow-up (term-new2.log) - ODA claimed but impossible
+
+GPO/records now served fine, but the terminal quit before GENERATE AC: AIP
+1C00 advertised SDA with no tag 93 anywhere and an unknown CA key index (8F=92).
+
+- [x] AIP 1C00 -> 1800 in both places it lives in profile.json ("aip" and
+      tags "82"). No tag 93 added. PPSE, AFL and FCI untouched.
+- [x] New test aip_claimsNoOfflineDataAuthentication (SDA/DDA/CDA bits clear).
+- [x] Pinned bytes updated: GPO 82021800, and the 9F26 ARQC/TC values - the
+      AIP is part of the MAC input, so they change by design, not by accident.
+- [x] Full suite green under --rerun-tasks (84 tests, 0 failures); assembleDebug green.
