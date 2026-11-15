@@ -152,12 +152,15 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL_MSD = "9F3704";
 
     /**
-     * CVM list. Eight bytes of zero Amount X and Amount Y, then two rules:
-     * 1F 03 no CVM below the limit, 1E 03 signature above it. Signature cannot
-     * fail, so the fallback sets no TVR bit. Ten bytes - the two amount fields
-     * are mandatory.
+     * CVM list. Amount X and Amount Y are both 000003E8 (10.00 in minor
+     * units), then two rules: 1F 06 no CVM if the transaction is under X,
+     * 1E 07 signature if it is over X. Conditions 06 and 07 are the amount
+     * tests; 03 ("if the terminal supports the CVM") is always true for No CVM
+     * and would make rule 1 win every time. Signature cannot fail, so the
+     * fallback sets no TVR bit. Twelve bytes - the two amount fields are
+     * mandatory.
      */
-    private static final String CVMLIST = "00000000000000001F031E03";
+    private static final String CVMLIST = "000003E8000003E81F061E07";
 
     /** Documentation only - the terminal owns 9F34 and sends it in CDOL1. */
     private static final String CVM_RESULTS = "1F0302";
@@ -2759,7 +2762,7 @@ public class ShadowApduService extends HostApduService {
      * 9F13 is the last-online-ATC register, two bytes. 0000 means "never been
      * online", which is the correct state for a fresh card.
      *
-     * 9F17 is deliberately ABSENT. The CVM list is 1F03 / 1E03 - no CVM below
+     * 9F17 is deliberately ABSENT. The CVM list is 1F06 / 1E07 - no CVM below
      * the limit, signature above - so nothing here ever consumes an offline
      * PIN and there is no counter to report. 00 is the one value that means
      * "zero tries left", a different claim from "no PIN capability", so the tag

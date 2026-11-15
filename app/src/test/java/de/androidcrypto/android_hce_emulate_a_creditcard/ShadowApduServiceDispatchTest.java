@@ -65,10 +65,33 @@ public class ShadowApduServiceDispatchTest {
         assertEquals(
                 "70818D9F420208405F24033112015A0841111111111111115F3401019F0702FFC0"
                         + "9F080200028C159F02069F03069F1A0295055F2A029A039C019F37048D18"
-                        + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0C00000000"
-                        + "00000000" + "1F031E039F0D0500000000009F0E0500000000009F0F05"
+                        + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0C"
+                        + "000003E8" + "000003E8" + "1F061E079F0D0500000000009F0E0500000000009F0F05"
                         + "00000000005F28020840570C4111111111111111D31122019000",
                 Hex.toHex(send("00B2010C00")));
+    }
+
+    /** Terminal-side CVM rule walk for the amount-only conditions 06 and 07. */
+    private static String cvmChosen(String list, long amount) {
+        long x = Long.parseLong(list.substring(0, 8), 16);
+        long y = Long.parseLong(list.substring(8, 16), 16);
+        for (int i = 16; i < list.length(); i += 4) {
+            int method = Integer.parseInt(list.substring(i, i + 2), 16) & 0x3F;
+            int cond = Integer.parseInt(list.substring(i + 2, i + 4), 16);
+            boolean hit = (cond == 0x06 && amount < x) || (cond == 0x07 && amount > y);
+            if (hit) return String.format("%02X", method);
+        }
+        return "none";
+    }
+
+    @Test
+    public void cvmList_underLimitSelectsNoCvm_overLimitSelectsSignature() {
+        String rec = Hex.toHex(send("00B2010C00"));
+        int at = rec.indexOf("8E0C") + 4;
+        String list = rec.substring(at, at + 24);
+        assertEquals("000003E8000003E81F061E07", list);
+        assertEquals("1F", cvmChosen(list, 999));
+        assertEquals("1E", cvmChosen(list, 1001));
     }
 
     @Test

@@ -50,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
      * on the wire come from the same value in ShadowApduService; this copy has
      * to agree with it or the preview lies.
      */
-    private static final String CVMLIST = "00000000000000001F031E03";
+    private static final String CVMLIST = "000003E8000003E81F061E07";
 
     /** Eight zero DD bytes, for the menu-driven skeleton builder. */
     private static final String DD_ZERO = "0000000000000000";
