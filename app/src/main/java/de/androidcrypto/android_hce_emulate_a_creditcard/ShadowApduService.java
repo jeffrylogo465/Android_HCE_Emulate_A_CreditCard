@@ -1434,11 +1434,17 @@ public class ShadowApduService extends HostApduService {
      * AFFFFFFFFF1234 - is kept first and byte-for-byte as AssetCardEngineTest
      * pins it, built from its own "50"/"87" tags rather than duplicating
      * them. No real terminal kernel recognises that fictional AID, so a
-     * second entry is added naming a real, servable card (Mastercard,
-     * A0000000041010) so a terminal that reads the directory and does not
-     * know the first entry still has one it does. Without this second entry
-     * the terminal reads the directory, recognises nothing in it, and never
-     * selects an application at all - the "quit after one SELECT" tap.
+     * second entry is added naming a real, servable card - one of the three
+     * AssetSchemeProfile brands, chosen by advertisedAssetScheme() (default
+     * Mastercard, A0000000041010) - so a terminal that reads the directory
+     * and does not know the first entry still has one it does. Without this
+     * second entry the terminal reads the directory, recognises nothing in
+     * it, and never selects an application at all - the "quit after one
+     * SELECT" tap.
+     *
+     * appEntry() fills that entry's 9F2A from its own AID-prefix table, the
+     * same one every other scheme's directory entry in this file uses, so
+     * the kernel id cannot drift from AssetSchemeProfile's.
      */
     private byte[] buildAssetPpse() throws java.io.IOException {
         AssetCardEngine ac = assetCard();
@@ -1446,7 +1452,8 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x4F, hex(AssetCardEngine.AID)),
                 tlv(0x50, hex(ac.tag("50"))),
                 tlv(0x87, hex(ac.tag("87")))));
-        byte[] e1 = tlv(0x61, appEntry("A0000000041010", "MASTERCARD", 2));
+        AssetSchemeProfile scheme = advertisedAssetScheme();
+        byte[] e1 = tlv(0x61, appEntry(scheme.aid, scheme.label, 2));
 
         lastPpseTopAid = AssetCardEngine.AID;
 
@@ -1777,6 +1784,16 @@ public class ShadowApduService extends HostApduService {
     private static final String PREF_ASSET_PROFILE = "asset_profile";
     /** The asset card's ATC, kept apart from the slot-prefixed ATC of the other cards. */
     private static final String PREF_ASSET_ATC = "asset_atc";
+    /**
+     * Which real brand AID the asset card's PPSE directory advertises
+     * alongside its own AFFFFFFFFF1234 entry. MASTERCARD/VISA/AMEX; any other
+     * value (including unset) keeps today's default, Mastercard.
+     *
+     * All three AIDs are servable in their own shape regardless of this pref
+     * - see the SELECT dispatch below - this only picks which single one the
+     * directory lists, same as a real card only ever lists its own brand.
+     */
+    private static final String PREF_ASSET_SCHEME = "asset_scheme";
 
     private AssetCardEngine assetCard;
 
@@ -1786,6 +1803,16 @@ public class ShadowApduService extends HostApduService {
         } catch (ClassCastException e) {
             return false;
         }
+    }
+
+    private AssetSchemeProfile advertisedAssetScheme() {
+        try {
+            String v = prefs().getString(PREF_ASSET_SCHEME, AssetSchemeProfile.MASTERCARD.name());
+            for (AssetSchemeProfile s : AssetSchemeProfile.values()) if (s.name().equals(v)) return s;
+        } catch (ClassCastException ignored) {
+            // fall through to the default below
+        }
+        return AssetSchemeProfile.MASTERCARD;
     }
 
     private AssetCardEngine assetCard() throws java.io.IOException {
@@ -1887,18 +1914,26 @@ public class ShadowApduService extends HostApduService {
                 // the real brand AID the PPSE's second entry now offers - see
                 // buildAssetPpse(). AssetCardEngine.process() answers only its
                 // own one AID and 6A82's anything else, so this SELECT is
-                // bound here via selectAs(): same card, same A5/AIP/AFL, with
-                // only the DF name in the FCI rewritten to what was actually
-                // requested. It used to fall through, uncounted, to the
-                // ordinary dispatch below - which has no AIP/AFL of its own to
-                // serve and left AssetCardEngine's `selected` flag false, so
-                // the GPO that followed answered 6985.
+                // bound here instead. It used to fall through, uncounted, to
+                // the ordinary dispatch below - which has no AIP/AFL of its
+                // own to serve and left AssetCardEngine's `selected` flag
+                // false, so the GPO that followed answered 6985.
+                //
+                // Two shapes of fallback: one of AssetSchemeProfile's three
+                // real, scheme-shaped AIDs gets selectScheme() - its own
+                // label/9F12/AIP/CVM/CA-index/PDOL, not Mastercard's under a
+                // foreign name. Anything else (a terminal trying some other
+                // AID entirely) gets the old generic selectAs(): same card,
+                // same A5/AIP/AFL, only the DF name rewritten.
                 boolean isFallbackSelect = isSelect && selName != null
                         && !isPpseSelect && !isTestAidSelect;
 
                 if (isFallbackSelect) {
                     nSelects++;
-                    byte[] out = assetCard().selectAs(selName);
+                    AssetSchemeProfile scheme = AssetSchemeProfile.byAid(selName);
+                    byte[] out = scheme != null
+                            ? assetCard().selectScheme(scheme, selName)
+                            : assetCard().selectAs(selName);
                     tap("<< " + bytesToHex(out));
                     return out;
                 }

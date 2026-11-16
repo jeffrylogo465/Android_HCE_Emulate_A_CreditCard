@@ -175,3 +175,47 @@ contactless kernel wants DDA/CDA.
       Mastercard reader holds a CA key there - so 9F46 recovery will find no
       key and ODA aborts before GENERATE AC, independent of any cert bytes.
       That is a terminal-trust-store problem, not something fixable here.
+
+## Follow-up - three scheme profiles for the asset card's fallback AIDs
+
+selectAs() rewrote only tag 84, so a terminal selecting the Visa or Amex
+fallback AID off the PPSE got Mastercard-shaped bytes (label, 9F12, AIP,
+CVM list, CA index) under a foreign AID.
+
+- [x] New AssetSchemeProfile enum (MASTERCARD/VISA/AMEX): AID, CA index (8F:
+      EF/94/05), label, 9F12, PDOL (base CDOL1 set, Visa prefixed with 9F6604),
+      and Amex's own CVM list (8E). AIP is 3C00 for all three - same bit
+      layout, same DDA capability as the one shared ICC key.
+- [x] DELIBERATE SIMPLIFICATION, stated rather than silently assumed: the
+      certificate chain (90/92/9F32/9F46/9F47/9F49) and the ICC private key
+      stay SHARED across all three schemes. 8F is a terminal-side lookup
+      pointer, never bytes inside the cert, so this is one issuer/one ICC
+      key re-badged under three brands - costs nothing, since no real
+      terminal has a CA key at any of these fictional indices regardless.
+      Minting three separate RSA chains would be pure busywork.
+- [x] Not changed: the wire mechanism. GPO still answers AIP+AFL in a
+      format-2 77, READ RECORD still walks the AFL, GENERATE AC still
+      computes the cryptogram from CDOL1/CDOL2 for all three - no qVSDC
+      GPO-carries-the-cryptogram shape for Visa.
+- [x] AssetCardEngine.selectScheme(): binds the scheme, builds a fresh FCI
+      with a REAL 9F38 PDOL (every other path through this engine has none -
+      see the earlier ref.yaml diff). currentAip() feeds both the GPO's 82
+      and the GENERATE AC MAC input; it is 3C00 either way so no existing
+      pinned AC bytes moved. tag()/need() take 8F (and 8E for Amex) from the
+      bound scheme before the shared profile.
+- [x] ShadowApduService: new pref asset_scheme (MASTERCARD/VISA/AMEX, default
+      Mastercard - existing tests untouched). buildAssetPpse()'s second
+      directory entry now names the advertised scheme instead of always
+      Mastercard, and picks up 9F2A from appEntry()'s existing AID-kernel
+      table (not duplicated in AssetSchemeProfile). The fallback-SELECT
+      dispatch tries AssetSchemeProfile.byAid() first; only an AID matching
+      none of the three still falls through to the old generic selectAs().
+- [x] Updated flag_on_selectA0000000041010_thenGpo_bindsAndRecordsAreReadable:
+      A0000000041010 is now a keyed scheme with a real (non-empty) PDOL, so
+      the old empty "83 00" GPO is the wrong length on purpose - a terminal
+      must answer the PDOL this AID now actually advertises.
+- [x] Three new tests (one per scheme): PPSE's second entry carries the right
+      AID and 9F2A kernel id, and SELECTing that AID returns that scheme's own
+      FCI (label/9F12/AIP/PDOL), not Mastercard's; Amex's case also checks its
+      own 8E once GPO has bound it.
+- [x] 92 tests green under --rerun-tasks; assembleDebug green.

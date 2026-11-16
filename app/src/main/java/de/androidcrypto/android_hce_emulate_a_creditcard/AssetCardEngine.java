@@ -79,6 +79,8 @@ final class AssetCardEngine {
     private final SecureRandom random = new SecureRandom();
 
     private boolean selected;
+    /** The real brand this card is answering as, or null for its own AFFFFFFFFF1234 identity. */
+    private AssetSchemeProfile scheme;
     private boolean gpoOk;
     /** GENERATE ACs answered since the last GPO: 0, 1 or 2. */
     private int acCount;
@@ -171,7 +173,6 @@ final class AssetCardEngine {
     String cdol1() { return cdol1; }
     String cdol2() { return cdol2; }
     String mkAc() { return mkAc; }
-    String tag(String t) { return tags.get(t.toUpperCase(Locale.ROOT)); }
 
     int atc() { return atc; }
     void setAtc(int v) { atc = v & 0xFFFF; }
@@ -210,6 +211,7 @@ final class AssetCardEngine {
 
     private void clearState() {
         selected = false;
+        scheme = null;
         gpoOk = false;
         acCount = 0;
         terminal.clear();
@@ -261,10 +263,51 @@ final class AssetCardEngine {
                 Tlv.t(0xA5, Hex.hex(need("A5"))))));
     }
 
+    /**
+     * Binds this card as selected under one of the three real, scheme-shaped
+     * fallback AIDs (see AssetSchemeProfile) rather than the generic
+     * Mastercard-shaped selectAs(). The FCI's A5 is built fresh from the
+     * scheme's own label/9F12/AIP and - unlike every other path through this
+     * engine - carries a real 9F38 PDOL, so the terminal does not send an
+     * empty GPO.
+     */
+    byte[] selectScheme(AssetSchemeProfile s, byte[] requestedAid) {
+        clearState();
+        selected = true;
+        scheme = s;
+        byte[] a5 = Tlv.cat(
+                Tlv.t(0x50, s.label.getBytes(StandardCharsets.US_ASCII)),
+                Tlv.t(0x5F2D, Hex.hex("656E")),
+                Tlv.t(0x87, Hex.hex("01")),
+                Tlv.t(0x9F12, Hex.hex(s.preferredName)),
+                Tlv.t(0x9F38, Hex.hex(s.pdol(cdol1))));
+        return ok(Tlv.t(0x6F, Tlv.cat(
+                Tlv.t(0x84, requestedAid),
+                Tlv.t(0xA5, a5))));
+    }
+
+    /** The AIP to serve/sign with: the bound scheme's, or this card's own. */
+    private String currentAip() { return scheme != null ? scheme.aip() : aip; }
+
     private String need(String t) {
-        String v = tags.get(t);
+        String v = tag(t);
         if (v == null) throw new IllegalStateException("profile has no tag " + t);
         return v;
+    }
+
+    /**
+     * A tag's value, with the bound scheme's own bytes taking priority over
+     * the shared profile - today just 8F (CA index) and, for Amex, 8E (CVM
+     * list). Every other tag, including the whole certificate chain, is
+     * deliberately shared across schemes; see AssetSchemeProfile's class doc.
+     */
+    String tag(String t) {
+        String up = t.toUpperCase(Locale.ROOT);
+        if (scheme != null) {
+            if (up.equals("8F")) return scheme.caIndex;
+            if (up.equals("8E") && scheme.cvmListOverride() != null) return scheme.cvmListOverride();
+        }
+        return tags.get(up);
     }
 
     // ---------- GET PROCESSING OPTIONS ----------
@@ -287,12 +330,18 @@ final class AssetCardEngine {
         gpoOk = true;
         acCount = 0;
         return ok(Tlv.t(0x77, Tlv.cat(
-                Tlv.t(0x82, Hex.hex(aip)),
+                Tlv.t(0x82, Hex.hex(currentAip())),
                 Tlv.t(0x94, Hex.hex(afl)))));
     }
 
-    /** The PDOL out of the A5 template of the selected record, empty if it has none. */
+    /**
+     * The PDOL for the selected identity: the bound scheme's own PDOL (built
+     * in selectScheme(), brand tag then CDOL1's base set), or - for this
+     * card's own AFFFFFFFFF1234 identity - whatever 9F38 the A5 template
+     * carries, empty if it has none.
+     */
     private byte[] pdolBytes() {
+        if (scheme != null) return Hex.hex(scheme.pdol(cdol1));
         byte[] v = findTag(Hex.hex(need("A5")), 0x9F38);
         return v == null ? new byte[0] : v;
     }
@@ -345,7 +394,7 @@ final class AssetCardEngine {
 
         byte[] atcBytes = EmvCrypto.atcField(atc);
         byte[] iad = Hex.hex(need("9F10"));
-        byte[] macIn = Tlv.cat(Tlv.cat(data, Hex.hex(aip)), Tlv.cat(atcBytes, iad));
+        byte[] macIn = Tlv.cat(Tlv.cat(data, Hex.hex(currentAip())), Tlv.cat(atcBytes, iad));
         byte[] ac;
         try {
             ac = EmvCrypto.mac(sessionKey(Hex.hex(mkAc), atcBytes), macIn);
