@@ -16,3 +16,10 @@ local.properties
 
 .claude-stop-count
 .claude-in-progress
+
+# DDA test-card keys / terminal logs. The asset key is the public mrautio test card key, shipped on purpose.
+*.pem
+!app/src/main/assets/icc_private_key.pem
+term_*.log
+term-*.log
+tap.log

@@ -5,10 +5,18 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.pkcs.RSAPrivateKey;
+import org.bouncycastle.util.encoders.Base64;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
@@ -36,11 +44,19 @@ import java.util.Map;
  *    The CID in both responses is the profile's 9F27. A third one is refused
  *    with 6985.
  *  - The ATC advances once per GPO, as in the simulator.
+ *
+ * A real card can be loaded on top of all of this - see LoadedCard and
+ * loadCard(). tag() and recordFor() cascade loaded card, then scheme
+ * profile, then this engine's own profile.json tags, and once a card is
+ * loaded the chain tags (LoadedCard.CHAIN_TAGS) never fall back past it, so
+ * an incomplete loaded chain fails loudly rather than quietly mixing in the
+ * shared test chain's bytes under a real card's PAN and AID.
  */
 final class AssetCardEngine {
 
     static final String AID = "AFFFFFFFFF1234";
     static final String ASSET = "profile.json";
+    static final String ICC_KEY_ASSET = "icc_private_key.pem";
 
     private static final byte[] PPSE = Hex.hex("325041592E5359532E4444463031");
 
@@ -64,7 +80,16 @@ final class AssetCardEngine {
 
     private int atc;
 
+    /** ICC RSA key for INTERNAL AUTHENTICATE, or null when none was loaded. */
+    private BigInteger iccModulus;
+    private BigInteger iccPrivateExponent;
+    private final SecureRandom random = new SecureRandom();
+
     private boolean selected;
+    /** The real brand this card is answering as, or null for its own AFFFFFFFFF1234 identity. */
+    private AssetSchemeProfile scheme;
+    /** A real card loaded on top of everything else, or null. See the class doc. */
+    private LoadedCard loadedCard;
     private boolean gpoOk;
     /** GENERATE ACs answered since the last GPO: 0, 1 or 2. */
     private int acCount;
@@ -114,6 +139,38 @@ final class AssetCardEngine {
         return new AssetCardEngine(JsonParser.parseString(json).getAsJsonObject());
     }
 
+    /** Profile plus the ICC private key (PEM, PKCS#1 or PKCS#8) used for DDA. */
+    static AssetCardEngine load(InputStream profile, InputStream keyPem) throws IOException {
+        AssetCardEngine e = load(profile);
+        e.setIccKey(readAll(keyPem));
+        return e;
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+        return bo.toByteArray();
+    }
+
+    private void setIccKey(byte[] pem) throws IOException {
+        String text = new String(pem, StandardCharsets.US_ASCII);
+        boolean pkcs1 = text.contains("BEGIN RSA PRIVATE KEY");
+        String b64 = text.replaceAll("-----[A-Z ]+-----", "").replaceAll("\\s", "");
+        byte[] der;
+        try {
+            der = Base64.decode(b64);
+        } catch (RuntimeException ex) {
+            throw new IOException("ICC key is not a PEM file: " + ex.getMessage(), ex);
+        }
+        RSAPrivateKey k = RSAPrivateKey.getInstance(pkcs1
+                ? ASN1Primitive.fromByteArray(der)
+                : PrivateKeyInfo.getInstance(ASN1Primitive.fromByteArray(der)).parsePrivateKey());
+        iccModulus = k.getModulus();
+        iccPrivateExponent = k.getPrivateExponent();
+    }
+
     // ---------- profile accessors ----------
 
     String pan() { return pan; }
@@ -125,7 +182,6 @@ final class AssetCardEngine {
     String cdol1() { return cdol1; }
     String cdol2() { return cdol2; }
     String mkAc() { return mkAc; }
-    String tag(String t) { return tags.get(t.toUpperCase(Locale.ROOT)); }
 
     int atc() { return atc; }
     void setAtc(int v) { atc = v & 0xFFFF; }
@@ -145,6 +201,7 @@ final class AssetCardEngine {
             case 0xA8: return gpo(apdu);
             case 0xB2: return readRecord(apdu);
             case 0xAE: return generateAc(apdu);
+            case 0x88: return internalAuthenticate(apdu);
             default:   return sw("6D00");
         }
     }
@@ -163,6 +220,7 @@ final class AssetCardEngine {
 
     private void clearState() {
         selected = false;
+        scheme = null;
         gpoOk = false;
         acCount = 0;
         terminal.clear();
@@ -194,10 +252,124 @@ final class AssetCardEngine {
                 Tlv.t(0xA5, Hex.hex(need("A5"))))));
     }
 
+    /**
+     * Binds this card as selected under a name that is not its own AID.
+     *
+     * A terminal that does not recognise AFFFFFFFFF1234 is offered the real
+     * brand AID as a PPSE fallback entry (see ShadowApduService.buildAssetPpse),
+     * and when it SELECTs that AID this card must answer exactly as it would
+     * for its own AID - same A5, same selected state, same AIP/AFL once GPO
+     * runs - with only the DF name in tag 84 rewritten to what was actually
+     * requested. Without this, the SELECT fell through to the ordinary
+     * dispatch, which has no AIP/AFL of its own to serve and left this card's
+     * `selected` flag false, so the GPO that followed answered 6985.
+     */
+    byte[] selectAs(byte[] requestedName) {
+        clearState();
+        selected = true;
+        return ok(Tlv.t(0x6F, Tlv.cat(
+                Tlv.t(0x84, requestedName),
+                Tlv.t(0xA5, Hex.hex(need("A5"))))));
+    }
+
+    /**
+     * Binds this card as selected under one of the three real, scheme-shaped
+     * fallback AIDs (see AssetSchemeProfile) rather than the generic
+     * Mastercard-shaped selectAs(). The FCI's A5 is built fresh from the
+     * scheme's own label/9F12/AIP and - unlike every other path through this
+     * engine - carries a real 9F38 PDOL, so the terminal does not send an
+     * empty GPO.
+     */
+    byte[] selectScheme(AssetSchemeProfile s, byte[] requestedAid) {
+        clearState();
+        selected = true;
+        scheme = s;
+        byte[] a5 = Tlv.cat(
+                Tlv.t(0x50, s.label.getBytes(StandardCharsets.US_ASCII)),
+                Tlv.t(0x5F2D, Hex.hex("656E")),
+                Tlv.t(0x87, Hex.hex("01")),
+                Tlv.t(0x9F12, Hex.hex(s.preferredName)),
+                Tlv.t(0x9F38, Hex.hex(s.pdol(cdol1))));
+        return ok(Tlv.t(0x6F, Tlv.cat(
+                Tlv.t(0x84, requestedAid),
+                Tlv.t(0xA5, a5))));
+    }
+
+    /**
+     * Loads a real card on top of everything else: AssetSchemeProfile and
+     * profile.json's own tags/records still answer whatever the loaded card
+     * does not redeclare, EXCEPT the certificate chain (LoadedCard.CHAIN_TAGS),
+     * which never falls back past a loaded card - see tag()/isChainBlocked().
+     *
+     * Not reset by clearState(): a loaded card outlives any one
+     * SELECT/GPO/GENERATE AC cycle, same as profile.json's own tags do.
+     */
+    void loadCard(LoadedCard c) { loadedCard = c; }
+
+    void clearLoadedCard() { loadedCard = null; }
+
+    /** The AIP to serve/sign with: the loaded card's, the bound scheme's, or this card's own. */
+    private String currentAip() {
+        if (loadedCard != null) {
+            String v = loadedCard.tag("82");
+            if (v != null) return v;
+        }
+        return scheme != null ? scheme.aip() : aip;
+    }
+
+    /** The AFL to serve and to walk in READ RECORD: the loaded card's, or this card's own. */
+    private String currentAfl() {
+        if (loadedCard != null) {
+            String v = loadedCard.tag("94");
+            if (v != null) return v;
+        }
+        return afl;
+    }
+
+    /** MK_AC to derive the session key from: the loaded card's own AC key, or this card's own. */
+    private String currentMkAc() {
+        if (loadedCard != null && loadedCard.acKey() != null) return loadedCard.acKey();
+        return mkAc;
+    }
+
     private String need(String t) {
-        String v = tags.get(t);
+        String v = tag(t);
         if (v == null) throw new IllegalStateException("profile has no tag " + t);
         return v;
+    }
+
+    /**
+     * A tag's value: the loaded card's own, if it has one; then the bound
+     * scheme's - today just 8F (CA index) and, for Amex, 8E (CVM list); then
+     * the shared profile.json tags.
+     *
+     * Once a card is loaded, a CHAIN_TAGS tag it did NOT supply returns null
+     * here rather than falling through to the scheme or the shared profile -
+     * see LoadedCard's class doc for why a half-declared chain must fail
+     * loudly (need() throws) rather than silently serve a real card's PAN
+     * and AID next to the fictional test chain's certificate bytes.
+     */
+    String tag(String t) {
+        String up = t.toUpperCase(Locale.ROOT);
+        if (loadedCard != null) {
+            String v = loadedCard.tag(up);
+            if (v != null) return v;
+            if (LoadedCard.isChainTag(up)) return null;
+        }
+        if (scheme != null) {
+            if (up.equals("8F")) return scheme.caIndex;
+            if (up.equals("8E") && scheme.cvmListOverride() != null) return scheme.cvmListOverride();
+        }
+        return tags.get(up);
+    }
+
+    /** One SFI:record's tag list: the loaded card's own, if it declared that record, else profile.json's. */
+    private String[] recordFor(String sfiColonRecord) {
+        if (loadedCard != null) {
+            String[] v = loadedCard.record(sfiColonRecord);
+            if (v != null) return v;
+        }
+        return records.get(sfiColonRecord);
     }
 
     // ---------- GET PROCESSING OPTIONS ----------
@@ -220,12 +392,18 @@ final class AssetCardEngine {
         gpoOk = true;
         acCount = 0;
         return ok(Tlv.t(0x77, Tlv.cat(
-                Tlv.t(0x82, Hex.hex(aip)),
-                Tlv.t(0x94, Hex.hex(afl)))));
+                Tlv.t(0x82, Hex.hex(currentAip())),
+                Tlv.t(0x94, Hex.hex(currentAfl())))));
     }
 
-    /** The PDOL out of the A5 template of the selected record, empty if it has none. */
+    /**
+     * The PDOL for the selected identity: the bound scheme's own PDOL (built
+     * in selectScheme(), brand tag then CDOL1's base set), or - for this
+     * card's own AFFFFFFFFF1234 identity - whatever 9F38 the A5 template
+     * carries, empty if it has none.
+     */
     private byte[] pdolBytes() {
+        if (scheme != null) return Hex.hex(scheme.pdol(cdol1));
         byte[] v = findTag(Hex.hex(need("A5")), 0x9F38);
         return v == null ? new byte[0] : v;
     }
@@ -248,14 +426,14 @@ final class AssetCardEngine {
         if ((p2 & 0x07) != 0x04) return sw("6A86");
         int sfi = p2 >> 3;
 
-        byte[] a = Hex.hex(afl);
+        byte[] a = Hex.hex(currentAfl());
         boolean inAfl = false;
         for (int i = 0; i + 4 <= a.length; i += 4) {
             if (((a[i] & 0xFF) >> 3) == sfi && rec >= (a[i + 1] & 0xFF) && rec <= (a[i + 2] & 0xFF)) {
                 inAfl = true;
             }
         }
-        String[] list = records.get(sfi + ":" + rec);
+        String[] list = recordFor(sfi + ":" + rec);
         if (!inAfl || list == null) return sw("6A83");
 
         ByteArrayOutputStream body = new ByteArrayOutputStream();
@@ -278,10 +456,10 @@ final class AssetCardEngine {
 
         byte[] atcBytes = EmvCrypto.atcField(atc);
         byte[] iad = Hex.hex(need("9F10"));
-        byte[] macIn = Tlv.cat(Tlv.cat(data, Hex.hex(aip)), Tlv.cat(atcBytes, iad));
+        byte[] macIn = Tlv.cat(Tlv.cat(data, Hex.hex(currentAip())), Tlv.cat(atcBytes, iad));
         byte[] ac;
         try {
-            ac = EmvCrypto.mac(sessionKey(Hex.hex(mkAc), atcBytes), macIn);
+            ac = EmvCrypto.mac(sessionKey(Hex.hex(currentMkAc()), atcBytes), macIn);
         } catch (Exception e) {
             throw new IllegalStateException("AC computation failed: " + e.getMessage(), e);
         }
@@ -311,6 +489,74 @@ final class AssetCardEngine {
         l[2] = (byte) 0xF0;
         r[2] = (byte) 0x0F;
         return Tlv.cat(EmvCrypto.des3(mk16, l), EmvCrypto.des3(mk16, r));
+    }
+
+    // ---------- INTERNAL AUTHENTICATE (DDA) ----------
+
+    /**
+     * EMV Book 2 6.5: the Signed Dynamic Application Data.
+     *
+     * Plain RSA over  6A | 05 | 01 | LDD | ICC dynamic data | BB.. | SHA-1 | BC
+     * with the hash taken over everything from the 05 up to the padding,
+     * followed by the terminal's DDOL data (here the 4-byte UN, per 9F49).
+     * ICC dynamic data is the ICC Dynamic Number: length byte, then 8 random
+     * bytes. The AIP is NOT part of this signature (it is in SDA's static data
+     * only); the ATC is not either, as no CID/AC is carried.
+     */
+    private byte[] internalAuthenticate(byte[] apdu) {
+        if (!selected || !gpoOk) return sw("6985");
+        BigInteger modulus = currentIccModulus();
+        BigInteger privateExponent = currentIccPrivateExponent();
+        if (modulus == null) return sw("6D00");
+        byte[] ddol = Hex.hex(need("9F49"));
+        byte[] data = dataOf(apdu);
+        if (data == null || data.length != dolLength(parseDol(ddol))) return sw("6700");
+
+        int nic = (modulus.bitLength() + 7) / 8;
+        byte[] dyn = new byte[9];
+        dyn[0] = 8;
+        byte[] num = new byte[8];
+        random.nextBytes(num);
+        System.arraycopy(num, 0, dyn, 1, 8);
+
+        byte[] block = new byte[nic];
+        block[0] = 0x6A;
+        block[1] = 0x05;
+        block[2] = 0x01;
+        block[3] = (byte) dyn.length;
+        System.arraycopy(dyn, 0, block, 4, dyn.length);
+        Arrays.fill(block, 4 + dyn.length, nic - 21, (byte) 0xBB);
+        block[nic - 1] = (byte) 0xBC;
+        byte[] hash;
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-1");
+            sha.update(block, 1, nic - 22);
+            sha.update(data);
+            hash = sha.digest();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        System.arraycopy(hash, 0, block, nic - 21, 20);
+
+        byte[] sig = rsaPrivate(block, nic, privateExponent, modulus);
+        return ok(Tlv.t(0x77, Tlv.t(0x9F4B, sig)));
+    }
+
+    private static byte[] rsaPrivate(byte[] block, int len, BigInteger privateExponent, BigInteger modulus) {
+        byte[] raw = new BigInteger(1, block).modPow(privateExponent, modulus).toByteArray();
+        byte[] out = new byte[len];
+        int copy = Math.min(raw.length, len);
+        System.arraycopy(raw, raw.length - copy, out, len - copy, copy);
+        return out;
+    }
+
+    /** The ICC modulus to sign INTERNAL AUTHENTICATE with: the loaded card's own, or this card's own. */
+    private BigInteger currentIccModulus() {
+        return loadedCard != null ? loadedCard.iccModulus() : iccModulus;
+    }
+
+    private BigInteger currentIccPrivateExponent() {
+        return loadedCard != null ? loadedCard.iccPrivateExponent() : iccPrivateExponent;
     }
 
     // ---------- DOL and TLV helpers ----------

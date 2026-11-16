@@ -98,6 +98,17 @@ public class ShadowApduService extends HostApduService {
      */
     private static final boolean PPSE_MINIMAL = false;
 
+    /**
+     * The most directory entries a PPSE response is allowed to carry.
+     *
+     * A real card lists one to three applications. A captured PPSE that lists
+     * more than that - or the PPSE AID itself, as if it were an application -
+     * is exactly the shape of directory that aborts a real terminal right
+     * after the first SELECT: oversized or malformed is a classic kernel
+     * abort with no further SELECT ever following. See ppseProblem().
+     */
+    private static final int MAX_PPSE_ENTRIES = 3;
+
     private static final byte CID_AAC  = Emv.CID_AAC;
     private static final byte CID_TC   = Emv.CID_TC;
     private static final byte CID_ARQC = Emv.CID_ARQC;
@@ -256,6 +267,25 @@ public class ShadowApduService extends HostApduService {
     private boolean sawPpse;
     private int nSelects, nGpos, nRecs, nGens, nCccs;
     private String lastCid = "";
+
+    /**
+     * The status word of the last GPO this tap sent, "" until one has.
+     *
+     * nGpos counts the attempt, not the outcome, so nGpos > 0 is true even
+     * when the card refused it (6985 and friends). baseVerdict() used to read
+     * nGpos alone and then assume success - reporting "read NO records" for a
+     * tap that never got an AIP/AFL to read records against. This is what
+     * lets it tell the two apart and name the real status word.
+     */
+    private String lastGpoSw = "";
+
+    /**
+     * The top (first-listed) AID the last PPSE response actually advertised,
+     * so a "quit after one SELECT" verdict can name what we offered instead
+     * of saying "field drop" with nothing to act on. Empty until a PPSE has
+     * been answered at least once this tap.
+     */
+    private String lastPpseTopAid = "";
 
     private boolean sawError;
     /** Warn-once guards: these fields are read several times per tap. */
@@ -931,6 +961,8 @@ public class ShadowApduService extends HostApduService {
         clearApplicationState();
         nSelects = nGpos = nRecs = nGens = nCccs = 0;
         lastCid = "";
+        lastGpoSw = "";
+        lastPpseTopAid = "";
         sawError = false;
         psnWarned = false;
         expiryWarned = false;
@@ -1221,6 +1253,133 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x9F2A, new byte[]{(byte) kernelFor(aidHex)}));
     }
 
+    /**
+     * Why a captured PPSE should not be trusted, or null if it is fine to serve
+     * as-is.
+     *
+     * Mirrors patchFci()'s walk: any field that overruns its container falls
+     * back rather than serving a desynced template. Two checks beyond that are
+     * PPSE-specific and are the ones the generated builder can never fail
+     * on its own, so they only matter for a captured blob: the entry count is
+     * bounded at MAX_PPSE_ENTRIES (a real card lists one to three, not fifty),
+     * and the PPSE's own AID - 2PAY.SYS.DDF01 - must never appear as if it were
+     * one of the listed applications, which would have a kernel select the
+     * directory itself as the app and abort.
+     *
+     * The walk is two levels: the outer 6F for the 84 name and the A5 FCI
+     * proprietary template, then inside A5 either a BF0C issuer-discretionary
+     * wrapper (the shape this app generates) or 61 entries directly (also
+     * legal BER-TLV) - entries are counted and their 4F inspected either way.
+     */
+    private String ppseProblem(byte[] captured) {
+        if (captured == null || captured.length < 4) return "too short to be a directory";
+
+        int[] pos = new int[1];
+        int outer = readTag(captured, pos);
+        if (outer != 0x6F) {
+            return "outer tag " + String.format("%02X", outer) + " is not 6F";
+        }
+        int outerLen = readLen(captured, pos);
+        if (outerLen <= 0 || pos[0] + outerLen > captured.length) {
+            return "outer len " + outerLen + " does not fit " + captured.length + "B";
+        }
+        int end = pos[0] + outerLen;
+
+        boolean sawName = false;
+        int entries = 0;
+        int i = pos[0];
+        while (i < end) {
+            int[] q = new int[]{i};
+            int t = readTag(captured, q);
+            int l = readLen(captured, q);
+            if (q[0] + l > end) return "a field under 6F overruns the outer template";
+            byte[] v = Arrays.copyOfRange(captured, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0x84) {
+                sawName = true;
+            } else if (t == 0xA5) {
+                int[] n = new int[1];
+                String problem = countPpseEntries(v, n);
+                if (problem != null) return problem;
+                entries += n[0];
+            }
+        }
+        if (!sawName) return "missing the 84 directory name";
+        if (entries == 0) return "no directory entries";
+        if (entries > MAX_PPSE_ENTRIES) {
+            return entries + " directory entries, more than " + MAX_PPSE_ENTRIES;
+        }
+        return null;
+    }
+
+    /**
+     * Counts the 61 directory entries inside an A5 (FCI proprietary template)
+     * payload, descending through an optional BF0C wrapper, and rejects any
+     * entry whose 4F is the PPSE's own AID. countOut[0] receives the count.
+     * Returns a problem string, or null if the walk was clean.
+     */
+    private String countPpseEntries(byte[] a5, int[] countOut) {
+        countOut[0] = 0;
+        int i = 0;
+        while (i < a5.length) {
+            int[] q = new int[]{i};
+            int t = readTag(a5, q);
+            int l = readLen(a5, q);
+            if (q[0] + l > a5.length) return "a field under A5 overruns A5";
+            byte[] v = Arrays.copyOfRange(a5, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0xBF0C) {
+                return countDirectoryEntries(v, countOut);
+            }
+            if (t == 0x61) {
+                String problem = checkOneEntry(v);
+                if (problem != null) return problem;
+                countOut[0]++;
+            }
+        }
+        return null;
+    }
+
+    /** Counts 61 entries directly inside a BF0C (or equivalent) payload. */
+    private String countDirectoryEntries(byte[] dir, int[] countOut) {
+        int i = 0;
+        while (i < dir.length) {
+            int[] q = new int[]{i};
+            int t = readTag(dir, q);
+            int l = readLen(dir, q);
+            if (q[0] + l > dir.length) return "a field under BF0C overruns BF0C";
+            byte[] v = Arrays.copyOfRange(dir, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0x61) {
+                String problem = checkOneEntry(v);
+                if (problem != null) return problem;
+                countOut[0]++;
+            }
+        }
+        return null;
+    }
+
+    /** A single 61 entry's 4F must not be the PPSE's own AID. */
+    private String checkOneEntry(byte[] entry) {
+        int i = 0;
+        while (i < entry.length) {
+            int[] q = new int[]{i};
+            int t = readTag(entry, q);
+            int l = readLen(entry, q);
+            if (q[0] + l > entry.length) return "a field under 61 overruns the entry";
+            byte[] v = Arrays.copyOfRange(entry, q[0], q[0] + l);
+            i = q[0] + l;
+
+            if (t == 0x4F && Arrays.equals(v, PPSE)) {
+                return "a directory entry's 4F is the PPSE's own AID";
+            }
+        }
+        return null;
+    }
+
     private byte[] buildPpse() {
         byte[] captured = rawPpse();
         if (captured != null && captured.length >= 4) {
@@ -1229,12 +1388,18 @@ public class ShadowApduService extends HostApduService {
                     && (captured[captured.length - 1] & 0xFF) == 0x00) {
                 captured = Arrays.copyOf(captured, captured.length - 2);
             }
-            tap("-- ppse source: captured " + captured.length + "B");
-            return captured;
+            String problem = ppseProblem(captured);
+            if (problem == null) {
+                tap("-- ppse source: captured " + captured.length + "B");
+                lastPpseTopAid = "captured directory";
+                return captured;
+            }
+            tap("!! captured ppse: " + problem + " - generating instead");
         }
 
         String realAid = capAid();
         if (realAid.isEmpty()) realAid = hexBox("aid", DEFAULT_AID);
+        lastPpseTopAid = realAid;
 
         byte[] entry = PPSE_MINIMAL
                 ? cat(tlv(0x4F, hex(realAid)), tlv(0x87, new byte[]{0x01}))
@@ -1260,6 +1425,41 @@ public class ShadowApduService extends HostApduService {
         byte[] built = tlv(0x6F, inner);
         tap("-- ppse source: generated, " + built.length + "B");
         return built;
+    }
+
+    /**
+     * The PPSE served when the asset-card toggle is on.
+     *
+     * AssetCardEngine's own directory entry - the mrautio test card, AID
+     * AFFFFFFFFF1234 - is kept first and byte-for-byte as AssetCardEngineTest
+     * pins it, built from its own "50"/"87" tags rather than duplicating
+     * them. No real terminal kernel recognises that fictional AID, so a
+     * second entry is added naming a real, servable card - one of the three
+     * AssetSchemeProfile brands, chosen by advertisedAssetScheme() (default
+     * Mastercard, A0000000041010) - so a terminal that reads the directory
+     * and does not know the first entry still has one it does. Without this
+     * second entry the terminal reads the directory, recognises nothing in
+     * it, and never selects an application at all - the "quit after one
+     * SELECT" tap.
+     *
+     * appEntry() fills that entry's 9F2A from its own AID-prefix table, the
+     * same one every other scheme's directory entry in this file uses, so
+     * the kernel id cannot drift from AssetSchemeProfile's.
+     */
+    private byte[] buildAssetPpse() throws java.io.IOException {
+        AssetCardEngine ac = assetCard();
+        byte[] e0 = tlv(0x61, cat(
+                tlv(0x4F, hex(AssetCardEngine.AID)),
+                tlv(0x50, hex(ac.tag("50"))),
+                tlv(0x87, hex(ac.tag("87")))));
+        AssetSchemeProfile scheme = advertisedAssetScheme();
+        byte[] e1 = tlv(0x61, appEntry(scheme.aid, scheme.label, 2));
+
+        lastPpseTopAid = AssetCardEngine.AID;
+
+        byte[] fci = tlv(0xBF0C, cat(e0, e1));
+        byte[] inner = cat(tlv(0x84, PPSE), tlv(0xA5, fci));
+        return cat(tlv(0x6F, inner), SW_OK);
     }
 
     /**
@@ -1584,6 +1784,16 @@ public class ShadowApduService extends HostApduService {
     private static final String PREF_ASSET_PROFILE = "asset_profile";
     /** The asset card's ATC, kept apart from the slot-prefixed ATC of the other cards. */
     private static final String PREF_ASSET_ATC = "asset_atc";
+    /**
+     * Which real brand AID the asset card's PPSE directory advertises
+     * alongside its own AFFFFFFFFF1234 entry. MASTERCARD/VISA/AMEX; any other
+     * value (including unset) keeps today's default, Mastercard.
+     *
+     * All three AIDs are servable in their own shape regardless of this pref
+     * - see the SELECT dispatch below - this only picks which single one the
+     * directory lists, same as a real card only ever lists its own brand.
+     */
+    private static final String PREF_ASSET_SCHEME = "asset_scheme";
 
     private AssetCardEngine assetCard;
 
@@ -1595,13 +1805,32 @@ public class ShadowApduService extends HostApduService {
         }
     }
 
+    private AssetSchemeProfile advertisedAssetScheme() {
+        try {
+            String v = prefs().getString(PREF_ASSET_SCHEME, AssetSchemeProfile.MASTERCARD.name());
+            for (AssetSchemeProfile s : AssetSchemeProfile.values()) if (s.name().equals(v)) return s;
+        } catch (ClassCastException ignored) {
+            // fall through to the default below
+        }
+        return AssetSchemeProfile.MASTERCARD;
+    }
+
     private AssetCardEngine assetCard() throws java.io.IOException {
         if (assetCard == null) {
-            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET)) {
-                assetCard = AssetCardEngine.load(in);
+            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET);
+                 java.io.InputStream key = getAssets().open(AssetCardEngine.ICC_KEY_ASSET)) {
+                assetCard = AssetCardEngine.load(in, key);
             }
             String saved = prefs().getString(PREF_ASSET_ATC, "");
             if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));
+
+            // A real card loaded via LoadedCardStore overrides this profile's
+            // own identity/chain bytes on top of whatever scheme is bound -
+            // see AssetCardEngine's class doc. Re-applied every time this
+            // lazily-created engine is (re)built, so a loaded card survives
+            // a process restart the same way the ATC above does.
+            LoadedCard loaded = LoadedCardStore.activeCard(this);
+            if (loaded != null) assetCard.loadCard(loaded);
         }
         return assetCard;
     }
@@ -1668,9 +1897,68 @@ public class ShadowApduService extends HostApduService {
             // The mrautio test card from assets/profile.json, when switched on.
             // It answers the whole tap itself, so none of the script, MAC and
             // prefs-driven machinery below runs for it.
+            //
+            // THE COUNTERS ARE INCREMENTED HERE TOO, not only on the path below.
+            // baseVerdict() reads nSelects/nGpos/... to say how far a tap got,
+            // and before this they were never touched on the asset-card branch -
+            // every asset-card tap, including a complete one that walked all the
+            // way to GENERATE AC, reported "quit after one SELECT" regardless of
+            // what the terminal actually did. That is the one EMV path left that
+            // this app's own PPSE/FCI diagnosis could not be trusted on.
             if (assetCardOn()) {
-                byte[] out = assetCard().process(apdu);
-                if (ins == 0xA8) persistAssetAtc();
+                byte[] selName = null;
+                if (isSelect && apdu.length >= 5) {
+                    int lc0 = lcOf(apdu);
+                    int off0 = dataOff(apdu);
+                    if (apdu.length >= off0 + lc0) {
+                        selName = Arrays.copyOfRange(apdu, off0, off0 + lc0);
+                    }
+                }
+                boolean isPpseSelect    = selName != null && Arrays.equals(selName, PPSE);
+                boolean isTestAidSelect = selName != null
+                        && Arrays.equals(selName, hex(AssetCardEngine.AID));
+
+                // A terminal that does not know AFFFFFFFFF1234 falls back to
+                // the real brand AID the PPSE's second entry now offers - see
+                // buildAssetPpse(). AssetCardEngine.process() answers only its
+                // own one AID and 6A82's anything else, so this SELECT is
+                // bound here instead. It used to fall through, uncounted, to
+                // the ordinary dispatch below - which has no AIP/AFL of its
+                // own to serve and left AssetCardEngine's `selected` flag
+                // false, so the GPO that followed answered 6985.
+                //
+                // Two shapes of fallback: one of AssetSchemeProfile's three
+                // real, scheme-shaped AIDs gets selectScheme() - its own
+                // label/9F12/AIP/CVM/CA-index/PDOL, not Mastercard's under a
+                // foreign name. Anything else (a terminal trying some other
+                // AID entirely) gets the old generic selectAs(): same card,
+                // same A5/AIP/AFL, only the DF name rewritten.
+                boolean isFallbackSelect = isSelect && selName != null
+                        && !isPpseSelect && !isTestAidSelect;
+
+                if (isFallbackSelect) {
+                    nSelects++;
+                    AssetSchemeProfile scheme = AssetSchemeProfile.byAid(selName);
+                    byte[] out = scheme != null
+                            ? assetCard().selectScheme(scheme, selName)
+                            : assetCard().selectAs(selName);
+                    tap("<< " + bytesToHex(out));
+                    return out;
+                }
+
+                if (isSelect)         nSelects++;
+                else if (ins == 0xA8) nGpos++;
+                else if (ins == 0xB2) nRecs++;
+                else if (ins == 0xAE) nGens++;
+                else if (ins == 0x2A) nCccs++;
+
+                byte[] out = isPpseSelect ? buildAssetPpse() : assetCard().process(apdu);
+                if (ins == 0xA8) {
+                    persistAssetAtc();
+                    lastGpoSw = (out.length >= 2)
+                            ? bytesToHex(new byte[]{out[out.length - 2], out[out.length - 1]})
+                            : "";
+                }
                 tap("<< " + bytesToHex(out));
                 return out;
             }
@@ -1764,7 +2052,10 @@ public class ShadowApduService extends HostApduService {
                 if (cryptogramSent && (ins == 0xA8 || ins == 0xAE)) commitAtc();
 
                 byte[] out = cat(body, SW_OK);
-                if (ins == 0xA8) watchForStall();
+                if (ins == 0xA8) {
+                    watchForStall();
+                    lastGpoSw = "9000";
+                }
                 tap("-- script hit " + out.length + " bytes");
                 tap("<< " + bytesToHex(out));
                 trackState(apdu, ins, out);
@@ -1795,6 +2086,9 @@ public class ShadowApduService extends HostApduService {
                 out = SW_UNSUPPORTED;
             }
 
+            if (ins == 0xA8 && out.length >= 2) {
+                lastGpoSw = bytesToHex(new byte[]{out[out.length - 2], out[out.length - 1]});
+            }
             tap("<< " + bytesToHex(out));
             trackState(apdu, ins, out);
             return out;
@@ -2783,9 +3077,20 @@ public class ShadowApduService extends HostApduService {
         if (tapLog.length() == 0) return "TAP: nothing recorded";
 
         if (!sawPpse)     return "TAP: terminal never asked for the directory - it never read the phone";
-        if (nSelects <= 1) return "TAP: terminal read the directory and quit after one SELECT"
-                + " - field drop, or it was not ready";
+        if (nSelects <= 1) return "TAP: terminal read the directory - offered "
+                + (lastPpseTopAid.isEmpty() ? "no usable AID" : lastPpseTopAid)
+                + " - and never selected an application: field drop, it was not ready,"
+                + " or no kernel on the terminal recognises that AID";
         if (nGpos == 0)   return "TAP: terminal picked an app then stopped - it rejected the FCI";
+        // nGpos counts the attempt, not the outcome - a GPO we refused (6985
+        // and friends) still bumps it. Without this check the tap fell into
+        // the nRecs==0 branch below and reported "read NO records", which
+        // reads like a terminal problem when the card never handed out an
+        // AIP/AFL to read records against in the first place.
+        if (!lastGpoSw.isEmpty() && !"9000".equals(lastGpoSw)) {
+            return "TAP: terminal sent the GPO and we answered " + lastGpoSw
+                    + " - no AIP/AFL went out, so there was nothing to read records against";
+        }
 
         if (isMsd()) {
             if (nGens > 0)  return "TAP: MSD mode but the terminal sent GENERATE AC - MSD is not on";

@@ -11,10 +11,15 @@ import android.nfc.cardemulation.CardEmulation;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -160,6 +165,21 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtCount, txtStatus, banner;
     private CheckBox chkForceTc;
     private CheckBox chkAssetCard;
+    private Spinner spnAssetScheme;
+    private TextView txtAssetScheme;
+    /** Guards the one onItemSelected Android fires when the adapter/selection is set in code. */
+    private boolean syncingAssetScheme;
+
+    /**
+     * The "Load card" dialog's own views and dialog handle - package-private
+     * rather than behind getters, same reason R.id-found views are reached
+     * directly in tests: these have no XML id to find them by, since the
+     * dialog's content view is built in code, not inflated.
+     */
+    EditText etLoadCardBlock;
+    TextView tvLoadCardSummary;
+    TextView tvLoadCardError;
+    AlertDialog loadCardDialog;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -260,6 +280,8 @@ public class MainActivity extends AppCompatActivity {
         banner = findViewById(R.id.banner);
         chkForceTc = findViewById(R.id.chkForceTc);
         chkAssetCard = findViewById(R.id.chkAssetCard);
+        spnAssetScheme = findViewById(R.id.spnAssetScheme);
+        txtAssetScheme = findViewById(R.id.txtAssetScheme);
 
         etLabel = findViewById(R.id.etLabel);
         etName = findViewById(R.id.etName);
@@ -333,6 +355,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
         syncAssetCardBox();
         chkAssetCard.setOnCheckedChangeListener((b, on) -> setAssetCard(on));
+        setUpAssetSchemeSpinner();
+        findViewById(R.id.btnLoadCard).setOnClickListener(v -> showLoadCardDialog());
         findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
@@ -1714,6 +1738,162 @@ public class MainActivity extends AppCompatActivity {
         chkAssetCard.setOnCheckedChangeListener((b, v) -> setAssetCard(v));
     }
 
+    /**
+     * Which real brand AID the asset card's PPSE advertises alongside its
+     * own AFFFFFFFFF1234 - ShadowApduService.PREF_ASSET_SCHEME, "MASTERCARD"
+     * by default. Kept out of showKeyTools(): nothing wrote this pref before
+     * now, the same unreachable-default trap asset_profile had, and this one
+     * has to be visible rather than buried behind a long-press dialog.
+     */
+    private void setUpAssetSchemeSpinner() {
+        String[] names = new String[AssetSchemeProfile.values().length];
+        for (int i = 0; i < names.length; i++) names[i] = AssetSchemeProfile.values()[i].name();
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, names);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spnAssetScheme.setAdapter(adapter);
+
+        syncAssetSchemeSpinner();
+
+        spnAssetScheme.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, View v, int pos, long id) {
+                if (syncingAssetScheme) return;
+                setAssetScheme(AssetSchemeProfile.values()[pos]);
+            }
+
+            @Override
+            public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+    }
+
+    private void setAssetScheme(AssetSchemeProfile scheme) {
+        prefs.edit().putString("asset_scheme", scheme.name()).apply();
+        showActiveAssetScheme(scheme);
+        status("PPSE now advertises " + scheme.name() + " (" + scheme.aid + ") alongside the test AID",
+                COL_FRESH);
+    }
+
+    private void showActiveAssetScheme(AssetSchemeProfile scheme) {
+        txtAssetScheme.setText("advertising: " + scheme.name());
+    }
+
+    /** Show the stored scheme without firing the listener, same pattern as syncAssetCardBox(). */
+    private void syncAssetSchemeSpinner() {
+        String v = prefs.getString("asset_scheme", AssetSchemeProfile.MASTERCARD.name());
+        AssetSchemeProfile scheme = AssetSchemeProfile.MASTERCARD;
+        for (AssetSchemeProfile s : AssetSchemeProfile.values()) if (s.name().equals(v)) scheme = s;
+
+        syncingAssetScheme = true;
+        spnAssetScheme.setSelection(scheme.ordinal());
+        showActiveAssetScheme(scheme);
+        syncingAssetScheme = false;
+    }
+
+    /**
+     * "Load card": paste a full EMV card's TAG=HEX block and have it override
+     * the test card/scheme profile - see LoadedCard and LoadedCardStore.
+     *
+     * Kept entirely in this dialog rather than on the main screen, which the
+     * asset-scheme spinner already earns the space on. Save does not dismiss
+     * the dialog on success OR on refusal - setPositiveButton's listener
+     * would dismiss either way, so the buttons are wired after show() to
+     * decide that themselves: a refusal leaves the block on screen with
+     * every missing field named, success updates the summary in place so it
+     * is obvious the new card is now active without losing the dialog.
+     */
+    void showLoadCardDialog() {
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(pad, pad / 2, pad, pad / 2);
+
+        tvLoadCardSummary = new TextView(this);
+        tvLoadCardSummary.setTextColor(0xFF9CA3AF);
+        tvLoadCardSummary.setTextSize(12);
+        box.addView(tvLoadCardSummary);
+
+        etLoadCardBlock = new EditText(this);
+        etLoadCardBlock.setMinLines(10);
+        etLoadCardBlock.setGravity(Gravity.TOP | Gravity.START);
+        etLoadCardBlock.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        etLoadCardBlock.setHint("TAG=HEX per line, REC sfi:rec=TAG,TAG, ICCKEY=hex, ACKEY=hex");
+        etLoadCardBlock.setText(LoadedCardStore.rawBlock(this));
+        box.addView(etLoadCardBlock);
+
+        tvLoadCardError = new TextView(this);
+        tvLoadCardError.setTextColor(0xFFEF4444);
+        tvLoadCardError.setTextSize(12);
+        box.addView(tvLoadCardError);
+
+        refreshLoadedCardSummary();
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Load card")
+                .setView(box)
+                .setPositiveButton("Save", null)
+                .setNeutralButton("Clear", null)
+                .setNegativeButton("Close", null)
+                .create();
+        loadCardDialog = dialog;
+
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                try {
+                    LoadedCardStore.save(this, etLoadCardBlock.getText().toString());
+                    tvLoadCardError.setText("");
+                    refreshLoadedCardSummary();
+                    status("Card loaded - taps now answer from it", COL_FRESH);
+                } catch (IllegalArgumentException e) {
+                    tvLoadCardError.setText(e.getMessage());
+                } catch (java.io.IOException e) {
+                    tvLoadCardError.setText("could not save: " + e.getMessage());
+                }
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                LoadedCardStore.clear(this);
+                tvLoadCardError.setText("");
+                refreshLoadedCardSummary();
+                status("Loaded card cleared - taps use the test card/profile again", COL_STALE);
+            });
+        });
+
+        dialog.show();
+    }
+
+    /** Shows the currently stored card's PAN/expiry/scheme, or that none is loaded. */
+    private void refreshLoadedCardSummary() {
+        tvLoadCardSummary.setText(loadedCardSummaryText());
+    }
+
+    private String loadedCardSummaryText() {
+        LoadedCard c;
+        try {
+            c = LoadedCardStore.activeCard(this);
+        } catch (Exception e) {
+            c = null;
+        }
+        if (c == null) return "No card loaded - taps use the test card/profile.";
+
+        String pan = c.pan();
+        String expiry = c.expiry();
+        String aidHex = c.aid();
+        String scheme = "unknown AID";
+        if (aidHex != null) {
+            try {
+                AssetSchemeProfile s = AssetSchemeProfile.byAid(Hex.hex(aidHex));
+                scheme = s != null ? s.name() : aidHex;
+            } catch (IllegalArgumentException ignored) {
+                scheme = aidHex;
+            }
+        }
+        return "Active: PAN " + (pan == null ? "?" : pan)
+                + ", exp " + (expiry == null ? "?" : expiry)
+                + ", " + scheme;
+    }
+
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */
     private void retryEncryption() {
         Prefs.reset(this);
@@ -2744,6 +2924,10 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             syncAssetCardBox();
+        } catch (Throwable ignored) { }
+
+        try {
+            syncAssetSchemeSpinner();
         } catch (Throwable ignored) { }
 
         try {
