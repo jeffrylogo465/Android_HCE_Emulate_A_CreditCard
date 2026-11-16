@@ -22,6 +22,8 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
         public String expiry = "";
         public String aid = "";
         public int msd = 1;
+        /** Comma-joined missing chain/ICC-key fields from a loaded track 2 or block, or "". */
+        public String certWarning = "";
 
         public CardModel() { }
 
@@ -101,6 +103,15 @@ public class CardAdapter extends RecyclerView.Adapter<CardAdapter.CardHolder> {
         set(root, R.id.cardAid, c.aid == null || c.aid.isEmpty() ? "--" : c.aid, s.muted);
         set(root, R.id.cardMode, c.msd == 1 ? "MSD" : "EMV", s.muted);
         set(root, R.id.cardIndex, (position + 1) + "/" + total, s.muted);
+
+        // No dialog for this any more - a loaded track 2 or block that is
+        // missing the certificate chain/ICC key says so right here.
+        TextView certWarning = root.findViewById(R.id.cardCertWarning);
+        if (certWarning != null) {
+            boolean has = c.certWarning != null && !c.certWarning.isEmpty();
+            certWarning.setVisibility(has ? View.VISIBLE : View.GONE);
+            if (has) certWarning.setContentDescription("Missing: " + c.certWarning);
+        }
 
         // Bank logo sits on a small white chip so a dark logo still reads on a
         // dark card.

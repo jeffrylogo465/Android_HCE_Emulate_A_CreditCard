@@ -1823,14 +1823,6 @@ public class ShadowApduService extends HostApduService {
             }
             String saved = prefs().getString(PREF_ASSET_ATC, "");
             if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));
-
-            // A real card loaded via LoadedCardStore overrides this profile's
-            // own identity/chain bytes on top of whatever scheme is bound -
-            // see AssetCardEngine's class doc. Re-applied every time this
-            // lazily-created engine is (re)built, so a loaded card survives
-            // a process restart the same way the ATC above does.
-            LoadedCard loaded = LoadedCardStore.activeCard(this);
-            if (loaded != null) assetCard.loadCard(loaded);
         }
         return assetCard;
     }

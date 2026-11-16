@@ -329,3 +329,107 @@ unreachable-pref trap asset_profile had before setAssetCard() existed.
       shows the already-persisted summary; Clear removes the card and the
       summary says so; a fresh install's dialog says no card is loaded.
 - [x] 114 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - accept a bare track 2, split validation into warning vs refusal
+
+The loader only accepted TAG=HEX lines and hard-refused a block without
+8F/90/92/9F46/ICCKEY - but a bare track 2 (PAN=YYMMSVC...) is how dumps
+actually arrive, and it has none of those by nature.
+
+- [x] LoadedCard.parse() now recognises a line matching PAN(12-19
+      digits)=YYMMSVC[discretionary] (no tag= prefix) before falling
+      through to the generic TAG=HEX dispatch, and derives 5A (PAN, BCD-
+      padded), 5F24 (YYMM + a defaulted day of 31 - track 2 carries no
+      day), 57 (PAN + D + YYMM + SVC + discretionary, BCD-padded) and 5F34
+      (01, track 2 carries no PAN sequence number). A later explicit tag
+      line overwrites what the bare line derived - simple top-to-bottom
+      order, no special-casing which one wins.
+- [x] Split validation: PAN (5A, or a bare track 2) and expiry (5F24, or a
+      bare track 2) are the only hard requirements now - missing either
+      refuses, naming both if both are missing. 8F/90/92/9F46/ICCKEY
+      dropped from REQUIRED_TAGS to a new WARN_TAGS set: missing any of
+      them no longer throws: LoadedCard.warnings() lists them, and the
+      card still loads. The ICC key fields are simply null when ICCKEY is
+      absent - AssetCardEngine's internalAuthenticate() already answers
+      6D00 on a null modulus, so no engine change was needed there.
+      CHAIN_TAGS (the broader, engine-level "never fall back" set,
+      including 9F32/9F47/9F49) is untouched - still enforced the same
+      way regardless of what's a warning vs a refusal at load time.
+- [x] MainActivity's Load card dialog: a new live preview
+      (tvLoadCardPreview) re-parses on every keystroke, BEFORE Save is
+      pressed, and shows "Parsed: PAN ..., exp ..., SCHEME[, warning]" or
+      "Would be refused: ..." - "confirm the read before saving" is a
+      pre-save concern, not a post-save one, now that parse() succeeds for
+      far more input than it refuses. The persisted summary
+      (tvLoadCardSummary) gained the same warning clause, shown both right
+      after Save and on reopening the dialog.
+- [x] Updated tests that depended on the old hard-refusal behaviour for
+      8F/90/92/9F46/ICCKEY (LoadedCardTest's three, the dialog's bad-block
+      test) to assert the new warning path instead, and added 5A/5F24
+      lines to every other test block that had relied on the old rules
+      never checking for PAN/expiry at all.
+- [x] New tests (the task's own three, plus the live preview): a bare
+      track 2 yields the right 5A/5F24/57/5F34 (and a second case for an
+      odd-length PAN's F-pad, and one proving a later explicit tag wins);
+      a block with no chain tags loads with the warning, at both the
+      LoadedCard level and through the dialog (summary shows "WARNING" and
+      names what's missing); a block with no PAN (and separately, no
+      expiry) is refused, naming which; the dialog's live preview shows
+      the parsed PAN/expiry or the refusal reason before Save is pressed.
+- [x] 122 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - LoadedCard merged into the per-slot editor; the dialog retired
+
+The EDIT screen already had PAN/expiry/service/discretionary/track2/AID/
+AIP/AFL/CID/ATC per slot. The "Load card" dialog/store was a second,
+parallel home for the same data - merged into one.
+
+- [x] Removed: LoadedCardStore.java; AssetCardEngine.loadCard()/
+      clearLoadedCard()/the loaded-card cascade in tag()/recordFor()/
+      currentAip()/currentAfl()/currentMkAc()/currentIcc*(), reverted to the
+      scheme-only cascade; the Load card dialog, its fields and methods in
+      MainActivity; the btnLoadCard button; LoadedCardStoreTest,
+      AssetCardEngineLoadedCardTest, MainActivityLoadCardDialogTest.
+      LoadedCard.CHAIN_TAGS/isChainTag() removed too - nothing calls them
+      now that the editor has no field for the chain tags to fall back
+      past. LoadedCard itself stays: a parser library the editor calls,
+      not a feature of its own.
+- [x] LoadedCard gained serviceCode()/discretionary(), read out of tag 57
+      (one source of truth whether 57 came from an explicit line or a bare
+      track 2) rather than kept as separate fields.
+- [x] etTrack2 (TRACK 2 RAW HEX)'s existing filler watcher - which already
+      called applyDump() for a single bare-track2/dump line via
+      looksLikeFullDump() - now also recognises a genuinely multi-line
+      block (looksLikeCardBlock(): contains '\n') and routes it to the new
+      applyCardBlock(). A single line keeps going through applyDump()
+      exactly as before - zero regression risk for the common case.
+- [x] applyCardBlock(): PAN/expiry/service/discretionary/track2 always come
+      from the block; AID/AIP/AFL/CID/ATC/MK_AC OVERRIDE applyProfile()'s
+      hand-typed network defaults whenever the block supplies them.
+      Discovered and fixed along the way: ShadowApduService.scriptRaw()
+      falls back to the NETWORK PROFILE'S OWN canned script (real captured
+      Mastercard/Visa/Amex bytes, a different AID from ours) whenever the
+      script box is empty, and that canned script answers PPSE/FCI/GPO
+      before the AID/AIP/AFL boxes are ever consulted - so overriding the
+      boxes alone did not change what a tap served. applyCardBlock() now
+      also disarms that fallback (a comment-only, line-free etScript, which
+      collect() turns into usescript=0) so the card's own fields actually
+      govern the wire bytes. Also marks "seededfor" (same as applyDump()
+      already did) so filler()'s unconditional trailing seedFromPan(pan)
+      call does not immediately rerun applyProfile() and overwrite
+      everything just set - the exact bug this surfaced as before the fix.
+- [x] The certificate chain and ICC key have no field in this editor at
+      all - LoadedCard.warnings() goes to a new CardAdapter.CardModel.
+      certWarning field (set via setCertWarning(), synced in collect()/
+      loadAll()) and renders as a small "NO CHAIN" badge on the tile
+      (item_card.xml's cardCertWarning) - on the tile, not a dialog.
+      applyDump() sets it too, reusing LoadedCard.parse() on its own
+      already-validated d[] fields as one source of truth for "a bare
+      track 2 never carries the chain" instead of a second hardcoded list.
+- [x] New MainActivityCardLoadTest (the task's own three tests): a bare
+      track 2 fills PAN/expiry/service code/discretionary; a block's
+      AID/AIP/AFL/CID/ATC win over the profile defaults and the tile shows
+      the certWarning; the tile shows the card after Save; a fresh
+      ShadowApduService serves the saved AID/AIP via real SELECT PPSE/
+      SELECT AID/GPO APDUs, not 6A82/6985.
+- [x] 113 tests green under --rerun-tasks; assembleDebug green.

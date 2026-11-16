@@ -44,13 +44,6 @@ import java.util.Map;
  *    The CID in both responses is the profile's 9F27. A third one is refused
  *    with 6985.
  *  - The ATC advances once per GPO, as in the simulator.
- *
- * A real card can be loaded on top of all of this - see LoadedCard and
- * loadCard(). tag() and recordFor() cascade loaded card, then scheme
- * profile, then this engine's own profile.json tags, and once a card is
- * loaded the chain tags (LoadedCard.CHAIN_TAGS) never fall back past it, so
- * an incomplete loaded chain fails loudly rather than quietly mixing in the
- * shared test chain's bytes under a real card's PAN and AID.
  */
 final class AssetCardEngine {
 
@@ -88,8 +81,6 @@ final class AssetCardEngine {
     private boolean selected;
     /** The real brand this card is answering as, or null for its own AFFFFFFFFF1234 identity. */
     private AssetSchemeProfile scheme;
-    /** A real card loaded on top of everything else, or null. See the class doc. */
-    private LoadedCard loadedCard;
     private boolean gpoOk;
     /** GENERATE ACs answered since the last GPO: 0, 1 or 2. */
     private int acCount;
@@ -295,42 +286,8 @@ final class AssetCardEngine {
                 Tlv.t(0xA5, a5))));
     }
 
-    /**
-     * Loads a real card on top of everything else: AssetSchemeProfile and
-     * profile.json's own tags/records still answer whatever the loaded card
-     * does not redeclare, EXCEPT the certificate chain (LoadedCard.CHAIN_TAGS),
-     * which never falls back past a loaded card - see tag()/isChainBlocked().
-     *
-     * Not reset by clearState(): a loaded card outlives any one
-     * SELECT/GPO/GENERATE AC cycle, same as profile.json's own tags do.
-     */
-    void loadCard(LoadedCard c) { loadedCard = c; }
-
-    void clearLoadedCard() { loadedCard = null; }
-
-    /** The AIP to serve/sign with: the loaded card's, the bound scheme's, or this card's own. */
-    private String currentAip() {
-        if (loadedCard != null) {
-            String v = loadedCard.tag("82");
-            if (v != null) return v;
-        }
-        return scheme != null ? scheme.aip() : aip;
-    }
-
-    /** The AFL to serve and to walk in READ RECORD: the loaded card's, or this card's own. */
-    private String currentAfl() {
-        if (loadedCard != null) {
-            String v = loadedCard.tag("94");
-            if (v != null) return v;
-        }
-        return afl;
-    }
-
-    /** MK_AC to derive the session key from: the loaded card's own AC key, or this card's own. */
-    private String currentMkAc() {
-        if (loadedCard != null && loadedCard.acKey() != null) return loadedCard.acKey();
-        return mkAc;
-    }
+    /** The AIP to serve/sign with: the bound scheme's, or this card's own. */
+    private String currentAip() { return scheme != null ? scheme.aip() : aip; }
 
     private String need(String t) {
         String v = tag(t);
@@ -339,37 +296,18 @@ final class AssetCardEngine {
     }
 
     /**
-     * A tag's value: the loaded card's own, if it has one; then the bound
-     * scheme's - today just 8F (CA index) and, for Amex, 8E (CVM list); then
-     * the shared profile.json tags.
-     *
-     * Once a card is loaded, a CHAIN_TAGS tag it did NOT supply returns null
-     * here rather than falling through to the scheme or the shared profile -
-     * see LoadedCard's class doc for why a half-declared chain must fail
-     * loudly (need() throws) rather than silently serve a real card's PAN
-     * and AID next to the fictional test chain's certificate bytes.
+     * A tag's value, with the bound scheme's own bytes taking priority over
+     * the shared profile - today just 8F (CA index) and, for Amex, 8E (CVM
+     * list). Every other tag, including the whole certificate chain, is
+     * deliberately shared across schemes; see AssetSchemeProfile's class doc.
      */
     String tag(String t) {
         String up = t.toUpperCase(Locale.ROOT);
-        if (loadedCard != null) {
-            String v = loadedCard.tag(up);
-            if (v != null) return v;
-            if (LoadedCard.isChainTag(up)) return null;
-        }
         if (scheme != null) {
             if (up.equals("8F")) return scheme.caIndex;
             if (up.equals("8E") && scheme.cvmListOverride() != null) return scheme.cvmListOverride();
         }
         return tags.get(up);
-    }
-
-    /** One SFI:record's tag list: the loaded card's own, if it declared that record, else profile.json's. */
-    private String[] recordFor(String sfiColonRecord) {
-        if (loadedCard != null) {
-            String[] v = loadedCard.record(sfiColonRecord);
-            if (v != null) return v;
-        }
-        return records.get(sfiColonRecord);
     }
 
     // ---------- GET PROCESSING OPTIONS ----------
@@ -393,7 +331,7 @@ final class AssetCardEngine {
         acCount = 0;
         return ok(Tlv.t(0x77, Tlv.cat(
                 Tlv.t(0x82, Hex.hex(currentAip())),
-                Tlv.t(0x94, Hex.hex(currentAfl())))));
+                Tlv.t(0x94, Hex.hex(afl)))));
     }
 
     /**
@@ -426,14 +364,14 @@ final class AssetCardEngine {
         if ((p2 & 0x07) != 0x04) return sw("6A86");
         int sfi = p2 >> 3;
 
-        byte[] a = Hex.hex(currentAfl());
+        byte[] a = Hex.hex(afl);
         boolean inAfl = false;
         for (int i = 0; i + 4 <= a.length; i += 4) {
             if (((a[i] & 0xFF) >> 3) == sfi && rec >= (a[i + 1] & 0xFF) && rec <= (a[i + 2] & 0xFF)) {
                 inAfl = true;
             }
         }
-        String[] list = recordFor(sfi + ":" + rec);
+        String[] list = records.get(sfi + ":" + rec);
         if (!inAfl || list == null) return sw("6A83");
 
         ByteArrayOutputStream body = new ByteArrayOutputStream();
@@ -459,7 +397,7 @@ final class AssetCardEngine {
         byte[] macIn = Tlv.cat(Tlv.cat(data, Hex.hex(currentAip())), Tlv.cat(atcBytes, iad));
         byte[] ac;
         try {
-            ac = EmvCrypto.mac(sessionKey(Hex.hex(currentMkAc()), atcBytes), macIn);
+            ac = EmvCrypto.mac(sessionKey(Hex.hex(mkAc), atcBytes), macIn);
         } catch (Exception e) {
             throw new IllegalStateException("AC computation failed: " + e.getMessage(), e);
         }
@@ -505,14 +443,12 @@ final class AssetCardEngine {
      */
     private byte[] internalAuthenticate(byte[] apdu) {
         if (!selected || !gpoOk) return sw("6985");
-        BigInteger modulus = currentIccModulus();
-        BigInteger privateExponent = currentIccPrivateExponent();
-        if (modulus == null) return sw("6D00");
+        if (iccModulus == null) return sw("6D00");
         byte[] ddol = Hex.hex(need("9F49"));
         byte[] data = dataOf(apdu);
         if (data == null || data.length != dolLength(parseDol(ddol))) return sw("6700");
 
-        int nic = (modulus.bitLength() + 7) / 8;
+        int nic = (iccModulus.bitLength() + 7) / 8;
         byte[] dyn = new byte[9];
         dyn[0] = 8;
         byte[] num = new byte[8];
@@ -538,25 +474,16 @@ final class AssetCardEngine {
         }
         System.arraycopy(hash, 0, block, nic - 21, 20);
 
-        byte[] sig = rsaPrivate(block, nic, privateExponent, modulus);
+        byte[] sig = rsaPrivate(block, nic);
         return ok(Tlv.t(0x77, Tlv.t(0x9F4B, sig)));
     }
 
-    private static byte[] rsaPrivate(byte[] block, int len, BigInteger privateExponent, BigInteger modulus) {
-        byte[] raw = new BigInteger(1, block).modPow(privateExponent, modulus).toByteArray();
+    private byte[] rsaPrivate(byte[] block, int len) {
+        byte[] raw = new BigInteger(1, block).modPow(iccPrivateExponent, iccModulus).toByteArray();
         byte[] out = new byte[len];
         int copy = Math.min(raw.length, len);
         System.arraycopy(raw, raw.length - copy, out, len - copy, copy);
         return out;
-    }
-
-    /** The ICC modulus to sign INTERNAL AUTHENTICATE with: the loaded card's own, or this card's own. */
-    private BigInteger currentIccModulus() {
-        return loadedCard != null ? loadedCard.iccModulus() : iccModulus;
-    }
-
-    private BigInteger currentIccPrivateExponent() {
-        return loadedCard != null ? loadedCard.iccPrivateExponent() : iccPrivateExponent;
     }
 
     // ---------- DOL and TLV helpers ----------
