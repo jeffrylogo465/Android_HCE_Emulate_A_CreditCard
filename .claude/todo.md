@@ -249,3 +249,54 @@ unreachable-pref trap asset_profile had before setAssetCard() existed.
       shadowOf(Looper.getMainLooper()).idle() after each spinner selection -
       Spinner's selection-changed callback is posted, not synchronous.
 - [x] 95 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - load a real card (the importer)
+
+- [x] Block format reported before writing the parser (see the chat): one
+      text block, TAG=HEX lines (case-insensitive tag names), REC sfi:rec=
+      TAG,TAG,TAG lines for which tags sit in which record (same shape as
+      profile.json's own "records" map), and two reserved non-EMV keys,
+      ICCKEY (hex DER, PKCS1 or PKCS8) and ACKEY (hex MK_AC). PAN/track2/
+      expiry are tags 5A/57/5F24 directly, not separate fields; service
+      code is not its own line - it is read out of track2 (57), same as a
+      real card's own track2 already carries it.
+- [x] New LoadedCard (pure Java, parse+validate): refuses, naming every
+      missing one in one message, a block missing 8F, 90, 92, 9F46 or
+      ICCKEY. LoadedCard.CHAIN_TAGS names the full cert-chain tag set
+      {8F,90,92,9F32,9F46,9F47,9F49} for the "never fall back" rule below.
+- [x] AssetCardEngine.tag()/recordFor() cascade loaded card, then scheme
+      profile, then profile.json, same order for every tag - not a
+      hand-picked allow-list matching the request's bullets one by one.
+      Once a card is loaded, a CHAIN_TAGS tag it did not declare returns
+      null rather than falling through to the scheme or the shared
+      profile, even though only 8F/90/92/9F46 are hard-required at parse
+      time - a half-declared chain fails loud (need() throws) rather than
+      quietly pairing a real PAN with the fictional test chain's bytes.
+      currentAip()/currentAfl()/currentMkAc()/currentIccModulus()/
+      currentIccPrivateExponent() carry the same cascade into GPO, READ
+      RECORD's AFL walk, GENERATE AC's session key, and INTERNAL
+      AUTHENTICATE's signing key. loadCard()/clearLoadedCard() are not
+      touched by clearState() - a loaded card outlives one SELECT/GPO/
+      GENERATE AC cycle, same as profile.json's own tags.
+- [x] New LoadedCardStore: a plain file in Context.getFilesDir() (CrashLog's
+      own file is the precedent for this over the encrypted Prefs store -
+      this is a free-text blob, not a short pref). save() parses and
+      validates BEFORE writing, so a bad paste never overwrites a card that
+      was working. ShadowApduService.assetCard() re-applies the stored card
+      every time it (re)builds the engine, so a loaded card survives a
+      process restart, same as the asset card's own ATC.
+- [x] DELIBERATE SCOPE CUT, flagged rather than assumed: no paste-dialog
+      screen in MainActivity yet - the request's own test list is backend-
+      only (parser + refusal), unlike the asset_scheme spinner request.
+      LoadedCardStore.save()/.clear() are ready for a future screen to call.
+- [x] Tests: LoadedCardTest (parse/validate/cascade primitives directly -
+      a good card serves its own 8F/certs/PAN, missing 9F46 or ICCKEY
+      refused naming it, multiple missing fields named together, chain-tag
+      set exercised both ways, bad hex refused at parse time).
+      AssetCardEngineLoadedCardTest (through the engine itself - GPO and
+      READ RECORD serve the loaded card's AIP/AFL/PAN, a tag the loaded
+      card did not touch still comes from the shared profile, a missing
+      chain tag never falls back, clearLoadedCard() restores the shared
+      chain). LoadedCardStoreTest (save/activeCard/clear round-trip, and a
+      bad block never overwrites the one already stored).
+- [x] 109 tests green under --rerun-tasks; assembleDebug green.
