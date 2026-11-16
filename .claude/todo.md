@@ -377,3 +377,59 @@ actually arrive, and it has none of those by nature.
       expiry) is refused, naming which; the dialog's live preview shows
       the parsed PAN/expiry or the refusal reason before Save is pressed.
 - [x] 122 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - LoadedCard merged into the per-slot editor; the dialog retired
+
+The EDIT screen already had PAN/expiry/service/discretionary/track2/AID/
+AIP/AFL/CID/ATC per slot. The "Load card" dialog/store was a second,
+parallel home for the same data - merged into one.
+
+- [x] Removed: LoadedCardStore.java; AssetCardEngine.loadCard()/
+      clearLoadedCard()/the loaded-card cascade in tag()/recordFor()/
+      currentAip()/currentAfl()/currentMkAc()/currentIcc*(), reverted to the
+      scheme-only cascade; the Load card dialog, its fields and methods in
+      MainActivity; the btnLoadCard button; LoadedCardStoreTest,
+      AssetCardEngineLoadedCardTest, MainActivityLoadCardDialogTest.
+      LoadedCard.CHAIN_TAGS/isChainTag() removed too - nothing calls them
+      now that the editor has no field for the chain tags to fall back
+      past. LoadedCard itself stays: a parser library the editor calls,
+      not a feature of its own.
+- [x] LoadedCard gained serviceCode()/discretionary(), read out of tag 57
+      (one source of truth whether 57 came from an explicit line or a bare
+      track 2) rather than kept as separate fields.
+- [x] etTrack2 (TRACK 2 RAW HEX)'s existing filler watcher - which already
+      called applyDump() for a single bare-track2/dump line via
+      looksLikeFullDump() - now also recognises a genuinely multi-line
+      block (looksLikeCardBlock(): contains '\n') and routes it to the new
+      applyCardBlock(). A single line keeps going through applyDump()
+      exactly as before - zero regression risk for the common case.
+- [x] applyCardBlock(): PAN/expiry/service/discretionary/track2 always come
+      from the block; AID/AIP/AFL/CID/ATC/MK_AC OVERRIDE applyProfile()'s
+      hand-typed network defaults whenever the block supplies them.
+      Discovered and fixed along the way: ShadowApduService.scriptRaw()
+      falls back to the NETWORK PROFILE'S OWN canned script (real captured
+      Mastercard/Visa/Amex bytes, a different AID from ours) whenever the
+      script box is empty, and that canned script answers PPSE/FCI/GPO
+      before the AID/AIP/AFL boxes are ever consulted - so overriding the
+      boxes alone did not change what a tap served. applyCardBlock() now
+      also disarms that fallback (a comment-only, line-free etScript, which
+      collect() turns into usescript=0) so the card's own fields actually
+      govern the wire bytes. Also marks "seededfor" (same as applyDump()
+      already did) so filler()'s unconditional trailing seedFromPan(pan)
+      call does not immediately rerun applyProfile() and overwrite
+      everything just set - the exact bug this surfaced as before the fix.
+- [x] The certificate chain and ICC key have no field in this editor at
+      all - LoadedCard.warnings() goes to a new CardAdapter.CardModel.
+      certWarning field (set via setCertWarning(), synced in collect()/
+      loadAll()) and renders as a small "NO CHAIN" badge on the tile
+      (item_card.xml's cardCertWarning) - on the tile, not a dialog.
+      applyDump() sets it too, reusing LoadedCard.parse() on its own
+      already-validated d[] fields as one source of truth for "a bare
+      track 2 never carries the chain" instead of a second hardcoded list.
+- [x] New MainActivityCardLoadTest (the task's own three tests): a bare
+      track 2 fills PAN/expiry/service code/discretionary; a block's
+      AID/AIP/AFL/CID/ATC win over the profile defaults and the tile shows
+      the certWarning; the tile shows the card after Save; a fresh
+      ShadowApduService serves the saved AID/AIP via real SELECT PPSE/
+      SELECT AID/GPO APDUs, not 6A82/6985.
+- [x] 113 tests green under --rerun-tasks; assembleDebug green.

@@ -162,16 +162,6 @@
                         android:textSize="10sp" />
                 </LinearLayout>
 
-                <Button
-                    android:id="@+id/btnLoadCard"
-                    android:layout_width="match_parent"
-                    android:layout_height="40dp"
-                    android:layout_marginTop="8dp"
-                    android:backgroundTint="#1F2430"
-                    android:text="LOAD CARD"
-                    android:textColor="#9CA3AF"
-                    android:textSize="10sp" />
-
                 <TextView
                     android:id="@+id/txtStatus"
                     android:layout_width="match_parent"
@@ -386,13 +376,17 @@
                 <EditText
                     android:id="@+id/etTrack2"
                     android:layout_width="match_parent"
-                    android:layout_height="44dp"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
                     android:background="@drawable/field_bg"
                     android:fontFamily="monospace"
-                    android:hint="optional"
-                    android:inputType="textNoSuggestions|textCapCharacters"
+                    android:gravity="top|start"
+                    android:hint="optional - a bare track 2, or paste a full card block"
+                    android:inputType="textNoSuggestions|textCapCharacters|textMultiLine"
                     android:paddingStart="12dp"
+                    android:paddingTop="10dp"
                     android:paddingEnd="12dp"
+                    android:paddingBottom="10dp"
                     android:textColor="#E5E7EB"
                     android:textColorHint="#4B5563"
                     android:textSize="12sp" />

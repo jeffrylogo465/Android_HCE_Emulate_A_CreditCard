@@ -11,10 +11,9 @@ import org.junit.Test;
 import java.math.BigInteger;
 
 /**
- * LoadedCard.parse(): the block format, validation, and the cascade
- * primitives (tag()/record()) AssetCardEngine builds the "never fall back
- * past a loaded card" rule on top of. See AssetCardEngine's and
- * LoadedCard's class docs for the format and the chain-tags rule.
+ * LoadedCard.parse(): the block format and the warning/refusal split. See
+ * LoadedCard's class doc - this is a library MainActivity's per-slot card
+ * editor calls, not a feature of its own.
  */
 public class LoadedCardTest {
 
@@ -110,6 +109,28 @@ public class LoadedCardTest {
     }
 
     @Test
+    public void serviceCodeAndDiscretionary_readOutOfTrack2() {
+        LoadedCard c = LoadedCard.parse(goodBlock());
+        // 57 = 1414141400001234 D 2912 301 1234567890120 F
+        assertEquals("301", c.serviceCode());
+        assertEquals("1234567890120", c.discretionary());
+    }
+
+    @Test
+    public void serviceCodeAndDiscretionary_derivedFromABareTrack2() {
+        LoadedCard c = LoadedCard.parse("1234560012345608=2912201456\n");
+        assertEquals("201", c.serviceCode());
+        assertEquals("456", c.discretionary());
+    }
+
+    @Test
+    public void serviceCodeAndDiscretionary_nullAndEmptyWithNoTrack2() {
+        LoadedCard c = LoadedCard.parse("5A=1234560012345608\n5F24=291231\n");
+        assertNull(c.serviceCode());
+        assertEquals("", c.discretionary());
+    }
+
+    @Test
     public void missingIccKey_loadsWithAWarningAndNoIccKey() {
         String block = goodBlock().replaceAll("(?m)^ICCKEY=.*\\n", "");
         LoadedCard c = LoadedCard.parse(block);
@@ -190,17 +211,6 @@ public class LoadedCardTest {
         } catch (IllegalArgumentException e) {
             assertTrue(e.getMessage(), e.getMessage().contains("expiry"));
             assertTrue(e.getMessage(), e.getMessage().contains("5F24"));
-        }
-    }
-
-    @Test
-    public void isChainTag_coversTheWholeChainAndNothingElse() {
-        for (String t : new String[]{"8F", "90", "92", "9F32", "9F46", "9F47", "9F49"}) {
-            assertTrue(t, LoadedCard.isChainTag(t));
-            assertTrue(t + " lowercase", LoadedCard.isChainTag(t.toLowerCase(java.util.Locale.ROOT)));
-        }
-        for (String t : new String[]{"82", "94", "8E", "5A", "84"}) {
-            assertTrue(t + " must not be a chain tag", !LoadedCard.isChainTag(t));
         }
     }
 

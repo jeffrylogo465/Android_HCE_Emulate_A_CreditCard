@@ -14,39 +14,29 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * A real EMV card, pasted as one text block and parsed into exactly the
- * shape AssetCardEngine already knows how to serve: a tag map and a records
- * map, plus the two secrets no EMV tag carries (the ICC private key and
- * MK_AC).
+ * A real EMV card, pasted as one text block (or a bare track 2 line) and
+ * parsed into a tag map plus the two secrets no EMV tag carries (the ICC
+ * private key and MK_AC).
  *
- * See AssetCardEngine's class doc for the block format and for how this
- * cascades under a loaded card: loaded card, then scheme profile, then
- * profile.json, with the certificate-chain tags never falling back past
- * "loaded card" once one exists.
+ * This is a library, not a feature of its own: MainActivity's per-slot card
+ * editor is the one place a loaded card lives (the same fields, prefs and
+ * tile every hand-typed or dump-pasted card uses - see
+ * MainActivity.applyLoadedCard()), not a separate store. Parsing a block
+ * that carries more than the editor has fields for - the certificate chain,
+ * the ICC key - is not an error; it is simply not kept, and warnings()
+ * exists so the editor can say so on the tile rather than silently drop it.
  *
  * Validation is split in two. PAN and expiry are the only things a card
  * cannot be served without at all, so a block with neither an explicit 5A/
  * 5F24 nor a bare track 2 line is REFUSED, naming both. The certificate
  * chain (8F/90/92/9F46) and the ICC key are a WARNING, not a refusal - a
  * dump is usually just a bare track 2, which has none of them, and it is
- * still a usable card: it loads and serves PAN/track2/expiry (MSD), it
- * simply cannot answer INTERNAL AUTHENTICATE or carry the cert chain in a
- * record, both of which already fail loud (need() throws) rather than
- * silently borrowing the shared test chain - see warnings() and
- * AssetCardEngine's tag().
+ * still a usable card.
  *
  * Pure Java, no Android types - same discipline as AssetCardEngine and
  * AssetSchemeProfile, so parsing and validation run as plain unit tests.
  */
 final class LoadedCard {
-
-    /**
-     * The certificate-chain tags AssetCardEngine must never let fall back to
-     * the shared test chain once a card is loaded, even for a tag this
-     * particular card did not bother to redeclare. 8F is the CA index; the
-     * rest is the chain and the DDOL it is read against.
-     */
-    static final String[] CHAIN_TAGS = {"8F", "90", "92", "9F32", "9F46", "9F47", "9F49"};
 
     /** Missing here is a WARNING (warnings()), not a refusal - see the class doc. */
     private static final String[] WARN_TAGS = {"8F", "90", "92", "9F46"};
@@ -213,6 +203,32 @@ final class LoadedCard {
     /** This card's own AID (tag 84), or null. */
     String aid() { return tag("84"); }
 
+    /**
+     * Service code and discretionary data, read out of tag 57 (PAN, D,
+     * YYMM, SVC, discretionary) rather than kept as separate fields - one
+     * source of truth whether 57 came from an explicit line or was derived
+     * from a bare track 2. Null/empty when this card has no 57.
+     */
+    String serviceCode() {
+        String rest = track2Rest(); // YYMM + SVC + discretionary
+        return rest == null || rest.length() < 7 ? null : rest.substring(4, 7);
+    }
+
+    String discretionary() {
+        String rest = track2Rest();
+        if (rest == null || rest.length() <= 7) return "";
+        String dd = rest.substring(7);
+        return dd.endsWith("F") ? dd.substring(0, dd.length() - 1) : dd;
+    }
+
+    /** Tag 57 after the PAN and its D separator (YYMM+SVC+discretionary), or null. */
+    private String track2Rest() {
+        String t2 = tag("57");
+        if (t2 == null) return null;
+        int d = t2.indexOf('D');
+        return d < 0 ? null : t2.substring(d + 1);
+    }
+
     /** This card's own tag list for one SFI:record, or null. */
     String[] record(String sfiColonRecord) { return records.get(sfiColonRecord); }
 
@@ -229,10 +245,4 @@ final class LoadedCard {
      * caller that cares shows these, it does not catch them.
      */
     List<String> warnings() { return warnings; }
-
-    static boolean isChainTag(String t) {
-        String up = t.toUpperCase(Locale.ROOT);
-        for (String c : CHAIN_TAGS) if (c.equals(up)) return true;
-        return false;
-    }
 }

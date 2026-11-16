@@ -13,12 +13,10 @@ import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -158,6 +156,11 @@ public class MainActivity extends AppCompatActivity {
 
     private SharedPreferences prefs;
     private final List<CardAdapter.CardModel> cards = new ArrayList<>();
+
+    /** Test-only reads of the in-memory card list - no XML id reaches these. */
+    CardAdapter.CardModel cardAt(int i) { return cards.get(i); }
+
+    int currentSlot() { return current; }
     private CardAdapter adapter;
     private RecyclerView pager;
     private LinearLayoutManager layoutManager;
@@ -169,18 +172,6 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtAssetScheme;
     /** Guards the one onItemSelected Android fires when the adapter/selection is set in code. */
     private boolean syncingAssetScheme;
-
-    /**
-     * The "Load card" dialog's own views and dialog handle - package-private
-     * rather than behind getters, same reason R.id-found views are reached
-     * directly in tests: these have no XML id to find them by, since the
-     * dialog's content view is built in code, not inflated.
-     */
-    EditText etLoadCardBlock;
-    TextView tvLoadCardSummary;
-    TextView tvLoadCardPreview;
-    TextView tvLoadCardError;
-    AlertDialog loadCardDialog;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -357,7 +348,6 @@ public class MainActivity extends AppCompatActivity {
         syncAssetCardBox();
         chkAssetCard.setOnCheckedChangeListener((b, on) -> setAssetCard(on));
         setUpAssetSchemeSpinner();
-        findViewById(R.id.btnLoadCard).setOnClickListener(v -> showLoadCardDialog());
         findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
@@ -404,6 +394,7 @@ public class MainActivity extends AppCompatActivity {
 
                 String t2 = t(etTrack2);
                 if (looksLikeFullDump(t2)) applyDump(t2);
+                else if (looksLikeCardBlock(t2)) applyCardBlock(t2);
 
                 seedFromPan(digits(t(etPan)));
             }
@@ -430,6 +421,16 @@ public class MainActivity extends AppCompatActivity {
         int d = s.indexOf('D');
         if (d < 12 || d > 19) return false;
         return s.length() >= d + 8;
+    }
+
+    /**
+     * A pasted card block rather than one track 2 line - LoadedCard's TAG=HEX/
+     * REC format, which is inherently multi-line. Checked only when
+     * looksLikeFullDump() has already said no, so a single bare track 2 line
+     * keeps going through applyDump() exactly as it always has.
+     */
+    private static boolean looksLikeCardBlock(String t2) {
+        return t2 != null && t2.trim().contains("\n");
     }
 
     // ---------- status line ----------
@@ -934,6 +935,12 @@ public class MainActivity extends AppCompatActivity {
         binding = false;
         collect();
 
+        // A bare track 2 never carries the certificate chain - reusing
+        // LoadedCard's own bare-track2 parse (guaranteed to succeed: d[]
+        // already passed parseDump()'s stricter checks) for warnings() is
+        // one source of truth instead of a second hardcoded list.
+        setCertWarning(current, LoadedCard.parse(d[0] + "=" + d[1] + svcOut + d[3]).warnings());
+
         int cscLen = cscLength(net);
         if (d[3].length() >= cscLen) {
             prefs.edit()
@@ -948,6 +955,119 @@ public class MainActivity extends AppCompatActivity {
         if (!armed) return;
         status("dump loaded " + d[0] + " " + net
                 + " - record, ATC and script armed. Tap it.", COL_WARM);
+    }
+
+    /**
+     * Paste a full card block (LoadedCard's TAG=HEX/REC format) into the
+     * TRACK 2 RAW HEX field and it becomes the selected slot - same
+     * destination as applyDump(), not a parallel store. PAN/expiry/service
+     * code/discretionary/track2 always come from it; AID, AIP, AFL, CID,
+     * ATC and MK_AC OVERRIDE applyProfile()'s own hand-typed defaults
+     * whenever the block supplies them, because those bytes are the card's,
+     * not the editor's fallback - applyProfile() still runs first for the
+     * network baseline (CDOL/label/etc.), it is just not the last word on
+     * them here.
+     *
+     * The certificate chain and the ICC key have no field in this editor at
+     * all, so LoadedCard.warnings() - whatever the block didn't supply -
+     * goes straight to the tile via setCertWarning(), not a dialog.
+     */
+    private void applyCardBlock(String raw) {
+        LoadedCard c;
+        try {
+            c = LoadedCard.parse(raw);
+        } catch (IllegalArgumentException e) {
+            status("card block: " + e.getMessage(), COL_STALE);
+            return;
+        }
+
+        String pan = c.pan();
+        if (pan == null || pan.length() < 12 || pan.length() > 19
+                || !pan.matches("[0-9]+") || !luhn(pan)) {
+            status("card block: PAN " + (pan == null ? "missing" : pan) + " is not usable", COL_STALE);
+            return;
+        }
+        String net = profileFor(pan);
+        if (net.isEmpty()) {
+            status("card block: " + pan + " is not a network this app serves", COL_STALE);
+            return;
+        }
+
+        dumping = true;
+
+        String expiry6 = c.expiry();
+        String expiry4 = expiry6 != null && expiry6.length() >= 4 ? expiry6.substring(0, 4) : "3112";
+        String sc = c.serviceCode();
+        String dd = c.discretionary();
+
+        binding = true;
+        etPan.setText(pan);
+        etExpiry.setText(expiry4);
+        if (sc != null) etService.setText(sc);
+        etDiscretionary.setText(dd == null ? "" : dd);
+        etTrack2.setText(pan + "=" + expiry4 + (sc == null ? "" : sc) + (dd == null ? "" : dd));
+        binding = false;
+        collect();
+
+        applyProfile(pan, net);
+
+        // The card's own bytes win over applyProfile()'s hand-typed
+        // defaults - only when the block actually supplied them.
+        binding = true;
+        if (c.aid() != null) etAid.setText(c.aid());
+        if (c.tag("82") != null) etAip.setText(c.tag("82"));
+        if (c.tag("94") != null) etAfl.setText(c.tag("94"));
+        if (c.tag("9F27") != null) etCid.setText(c.tag("9F27"));
+        if (c.tag("9F36") != null) etAtc.setText(c.tag("9F36"));
+        if (c.acKey() != null) etMkac.setText(c.acKey());
+
+        // ShadowApduService.scriptRaw() falls back to the NETWORK PROFILE'S
+        // OWN canned script (real captured Mastercard/Visa/Amex bytes, a
+        // DIFFERENT AID from ours) whenever the script box is empty, and
+        // that canned script answers PPSE/FCI/GPO before this card's own
+        // AID/AIP/AFL fields are ever consulted - so "come from the card,
+        // not the editor defaults" needs the canned replay disarmed, not
+        // just overridden. A non-empty, line-free box skips that fallback;
+        // collect() below then computes "usescript"="0" from it, which is
+        // what actually turns useScript() off.
+        if (t(etScript).trim().isEmpty()) {
+            etScript.setText("# loaded from a card block - serving this card's own fields, not a canned script");
+        }
+        binding = false;
+        collect();
+
+        setCertWarning(current, c.warnings());
+
+        // Marked exactly as applyDump() marks it, for the exact same reason:
+        // filler() unconditionally calls seedFromPan(pan) right after this
+        // returns, and seedFromPan() only skips a PAN it finds already
+        // marked here - otherwise it reruns applyProfile() and overwrites
+        // etDiscretionary with its own CSC guess, undoing everything above.
+        prefs.edit().putString(key(current, "seededfor"), pan).apply();
+
+        dumping = false;
+
+        // Not armFromFields(): that re-derives the ATC as "whatever is in
+        // the box, minus one" for MSD replay, which would clobber the ATC
+        // just set from the card's own 9F36. A block's EMV fields serve
+        // through the normal AID/AIP/AFL/record path armFromFields() has
+        // nothing to do with.
+        status("card block loaded " + pan + " " + net
+                + (c.warnings().isEmpty() ? " - full chain" : " - missing " + String.join(", ", c.warnings())),
+                COL_WARM);
+    }
+
+    /**
+     * Records which chain/ICC-key fields a loaded track 2 or block did not
+     * supply, so the tile can show it - see CardAdapter.CardModel.certWarning
+     * and bindTile(). Empty clears it (a fully-chained block, or a plain
+     * hand-typed/profile-picked card that never calls this at all).
+     */
+    private void setCertWarning(int slot, java.util.List<String> warnings) {
+        String csv = warnings == null || warnings.isEmpty() ? "" : String.join(", ", warnings);
+        prefs.edit().putString(key(slot, "certwarning"), csv).apply();
+        if (slot < cards.size()) cards.get(slot).certWarning = csv;
+        adapter.notifyItemChanged(slot);
     }
 
     /**
@@ -1269,6 +1389,7 @@ public class MainActivity extends AppCompatActivity {
             c.expiry = prefs.getString(key(i, "expiry"), "");
             c.aid = prefs.getString(key(i, "aid"), "");
             c.msd = intPref(key(i, "msd"), 0);
+            c.certWarning = prefs.getString(key(i, "certwarning"), "");
             cards.add(c);
 
             e.putString(key(i, "usescript"),
@@ -1792,149 +1913,6 @@ public class MainActivity extends AppCompatActivity {
         syncingAssetScheme = false;
     }
 
-    /**
-     * "Load card": paste a full EMV card's TAG=HEX block (or a bare track 2
-     * line) and have it override the test card/scheme profile - see
-     * LoadedCard and LoadedCardStore.
-     *
-     * Kept entirely in this dialog rather than on the main screen, which the
-     * asset-scheme spinner already earns the space on. Save does not dismiss
-     * the dialog on success OR on refusal - setPositiveButton's listener
-     * would dismiss either way, so the buttons are wired after show() to
-     * decide that themselves: a refusal leaves the block on screen with
-     * every missing field named, success updates the summary in place so it
-     * is obvious the new card is now active without losing the dialog.
-     *
-     * A TextWatcher re-parses on every keystroke and shows the result in
-     * tvLoadCardPreview, BEFORE Save is pressed - LoadedCard.parse() now
-     * succeeds for far more input than it refuses (a missing certificate
-     * chain is a warning, not a refusal - see LoadedCard's class doc), so
-     * this is the moment to confirm the read, not after committing it.
-     */
-    void showLoadCardDialog() {
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(pad, pad / 2, pad, pad / 2);
-
-        tvLoadCardSummary = new TextView(this);
-        tvLoadCardSummary.setTextColor(0xFF9CA3AF);
-        tvLoadCardSummary.setTextSize(12);
-        box.addView(tvLoadCardSummary);
-
-        etLoadCardBlock = new EditText(this);
-        etLoadCardBlock.setMinLines(10);
-        etLoadCardBlock.setGravity(Gravity.TOP | Gravity.START);
-        etLoadCardBlock.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        etLoadCardBlock.setHint("TAG=HEX per line, a bare track 2 (PAN=YYMMSVC...), "
-                + "REC sfi:rec=TAG,TAG, ICCKEY=hex, ACKEY=hex");
-        etLoadCardBlock.setText(LoadedCardStore.rawBlock(this));
-        box.addView(etLoadCardBlock);
-
-        tvLoadCardPreview = new TextView(this);
-        tvLoadCardPreview.setTextColor(0xFF60A5FA);
-        tvLoadCardPreview.setTextSize(12);
-        box.addView(tvLoadCardPreview);
-
-        tvLoadCardError = new TextView(this);
-        tvLoadCardError.setTextColor(0xFFEF4444);
-        tvLoadCardError.setTextSize(12);
-        box.addView(tvLoadCardError);
-
-        refreshLoadedCardSummary();
-        refreshLoadCardPreview();
-        etLoadCardBlock.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
-            @Override public void onTextChanged(CharSequence s, int st, int b, int c) { }
-            @Override public void afterTextChanged(Editable s) { refreshLoadCardPreview(); }
-        });
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Load card")
-                .setView(box)
-                .setPositiveButton("Save", null)
-                .setNeutralButton("Clear", null)
-                .setNegativeButton("Close", null)
-                .create();
-        loadCardDialog = dialog;
-
-        dialog.setOnShowListener(d -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-                try {
-                    LoadedCardStore.save(this, etLoadCardBlock.getText().toString());
-                    tvLoadCardError.setText("");
-                    refreshLoadedCardSummary();
-                    status("Card loaded - taps now answer from it", COL_FRESH);
-                } catch (IllegalArgumentException e) {
-                    tvLoadCardError.setText(e.getMessage());
-                } catch (java.io.IOException e) {
-                    tvLoadCardError.setText("could not save: " + e.getMessage());
-                }
-            });
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
-                LoadedCardStore.clear(this);
-                tvLoadCardError.setText("");
-                refreshLoadedCardSummary();
-                status("Loaded card cleared - taps use the test card/profile again", COL_STALE);
-            });
-        });
-
-        dialog.show();
-    }
-
-    /** Shows the currently stored card's PAN/expiry/scheme/warnings, or that none is loaded. */
-    private void refreshLoadedCardSummary() {
-        tvLoadCardSummary.setText(loadedCardSummaryText());
-    }
-
-    private String loadedCardSummaryText() {
-        LoadedCard c;
-        try {
-            c = LoadedCardStore.activeCard(this);
-        } catch (Exception e) {
-            c = null;
-        }
-        if (c == null) return "No card loaded - taps use the test card/profile.";
-        return "Active: " + summarize(c);
-    }
-
-    /** Live, pre-save feedback for whatever is currently typed - see showLoadCardDialog()'s doc. */
-    private void refreshLoadCardPreview() {
-        String block = etLoadCardBlock.getText().toString();
-        if (block.trim().isEmpty()) {
-            tvLoadCardPreview.setText("");
-            return;
-        }
-        try {
-            LoadedCard c = LoadedCard.parse(block);
-            tvLoadCardPreview.setText("Parsed: " + summarize(c));
-        } catch (IllegalArgumentException e) {
-            tvLoadCardPreview.setText("Would be refused: " + e.getMessage());
-        }
-    }
-
-    /** "PAN ..., exp ..., SCHEME" plus a warning clause when the chain/ICC key is incomplete. */
-    private String summarize(LoadedCard c) {
-        String pan = c.pan();
-        String expiry = c.expiry();
-        String aidHex = c.aid();
-        String scheme = "unknown AID";
-        if (aidHex != null) {
-            try {
-                AssetSchemeProfile s = AssetSchemeProfile.byAid(Hex.hex(aidHex));
-                scheme = s != null ? s.name() : aidHex;
-            } catch (IllegalArgumentException ignored) {
-                scheme = aidHex;
-            }
-        }
-        String base = "PAN " + (pan == null ? "?" : pan)
-                + ", exp " + (expiry == null ? "?" : expiry)
-                + ", " + scheme;
-        if (c.warnings().isEmpty()) return base;
-        return base + " - WARNING: missing " + String.join(", ", c.warnings())
-                + " (no certificate chain; MSD only, no INTERNAL AUTHENTICATE)";
-    }
 
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */
     private void retryEncryption() {
