@@ -47,6 +47,25 @@ final class LoadedCardStore {
         if (f.exists()) f.delete();
     }
 
+    /**
+     * The stored block's raw text, unparsed, or "" when none is stored - for
+     * prefilling an edit screen with exactly what was last saved, even if it
+     * no longer parses. Never throws.
+     */
+    static String rawBlock(Context ctx) {
+        File f = file(ctx);
+        if (!f.exists()) return "";
+        try (FileInputStream in = new FileInputStream(f)) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+            return new String(bo.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     /** The stored block, re-parsed, or null when none is stored. Never throws on a read. */
     static LoadedCard activeCard(Context ctx) {
         File f = file(ctx);

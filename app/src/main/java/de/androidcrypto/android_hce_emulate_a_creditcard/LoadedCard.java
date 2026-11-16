@@ -139,6 +139,22 @@ final class LoadedCard {
     /** This card's own value for an EMV tag, or null - never the shared profile's. */
     String tag(String t) { return tags.get(t.toUpperCase(Locale.ROOT)); }
 
+    /**
+     * The PAN out of tag 5A, with BCD's single trailing 'F' pad nibble
+     * stripped for an odd-length PAN, or null if this card has no 5A.
+     */
+    String pan() {
+        String v = tag("5A");
+        if (v == null) return null;
+        return v.endsWith("F") ? v.substring(0, v.length() - 1) : v;
+    }
+
+    /** Expiry out of tag 5F24 (YYMMDD, already the exact digits), or null. */
+    String expiry() { return tag("5F24"); }
+
+    /** This card's own AID (tag 84), or null. */
+    String aid() { return tag("84"); }
+
     /** This card's own tag list for one SFI:record, or null. */
     String[] record(String sfiColonRecord) { return records.get(sfiColonRecord); }
 

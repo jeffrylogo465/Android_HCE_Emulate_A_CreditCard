@@ -300,3 +300,32 @@ unreachable-pref trap asset_profile had before setAssetCard() existed.
       chain). LoadedCardStoreTest (save/activeCard/clear round-trip, and a
       bad block never overwrites the one already stored).
 - [x] 109 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - the "Load card" dialog LoadedCard had no UI for
+
+- [x] New "LOAD CARD" button on the main screen (small, one row) opens a
+      dialog holding everything else: a summary line, the multi-line
+      TAG=HEX block (prefilled from LoadedCardStore.rawBlock() so reopening
+      shows what is already saved, editable in place), Save, Clear, Close.
+      Kept off the main screen itself, same instruction as the scheme
+      spinner's own space - only the one-line trigger button lives there.
+- [x] Save does NOT rely on AlertDialog's own button dismiss-on-click:
+      wired via setOnShowListener + getButton().setOnClickListener() so a
+      refusal (LoadedCard.parse() throwing) leaves the dialog open with
+      the typed block intact and every missing field named in one message,
+      instead of the dialog closing on the error. Success updates the
+      summary in place, same dialog instance, no dismiss.
+- [x] LoadedCard.pan()/expiry()/aid() added (5A pad-stripped, 5F24, 84
+      verbatim) so the summary ("Active: PAN ..., exp ..., SCHEME") does
+      not reach into the tags map itself. The scheme name is
+      AssetSchemeProfile.byAid() against the loaded card's own 84, falling
+      back to the raw AID when it matches none of the three.
+- [x] LoadedCardStore.rawBlock(): the stored text verbatim, unparsed, never
+      throws - for prefilling the dialog even if a hand-edited file no
+      longer parses.
+- [x] New MainActivityLoadCardDialogTest: a bad block names every missing
+      field and does not persist; a good block persists and the summary
+      shows its PAN, expiry and scheme; reopening the dialog (no edits)
+      shows the already-persisted summary; Clear removes the card and the
+      summary says so; a fresh install's dialog says no card is loaded.
+- [x] 114 tests green under --rerun-tasks; assembleDebug green.
