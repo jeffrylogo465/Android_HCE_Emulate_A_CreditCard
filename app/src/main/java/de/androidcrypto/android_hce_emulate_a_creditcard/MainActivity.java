@@ -13,8 +13,10 @@ import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -160,6 +162,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView txtCount, txtStatus, banner;
     private CheckBox chkForceTc;
     private CheckBox chkAssetCard;
+    private Spinner spnAssetScheme;
+    private TextView txtAssetScheme;
+    /** Guards the one onItemSelected Android fires when the adapter/selection is set in code. */
+    private boolean syncingAssetScheme;
 
     private EditText etLabel, etName, etPan, etExpiry, etService, etDiscretionary,
             etTrack2, etAid, etAip, etAfl, etCid, etAtc, etArqc, etIad, etMkac,
@@ -260,6 +266,8 @@ public class MainActivity extends AppCompatActivity {
         banner = findViewById(R.id.banner);
         chkForceTc = findViewById(R.id.chkForceTc);
         chkAssetCard = findViewById(R.id.chkAssetCard);
+        spnAssetScheme = findViewById(R.id.spnAssetScheme);
+        txtAssetScheme = findViewById(R.id.txtAssetScheme);
 
         etLabel = findViewById(R.id.etLabel);
         etName = findViewById(R.id.etName);
@@ -333,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnCallBank).setOnClickListener(v -> callIssuer());
         syncAssetCardBox();
         chkAssetCard.setOnCheckedChangeListener((b, on) -> setAssetCard(on));
+        setUpAssetSchemeSpinner();
         findViewById(R.id.btnDelete).setOnClickListener(v -> onDelete());
         findViewById(R.id.btnAdd).setOnLongClickListener(v -> { startReader(); return true; });
 
@@ -1714,6 +1723,59 @@ public class MainActivity extends AppCompatActivity {
         chkAssetCard.setOnCheckedChangeListener((b, v) -> setAssetCard(v));
     }
 
+    /**
+     * Which real brand AID the asset card's PPSE advertises alongside its
+     * own AFFFFFFFFF1234 - ShadowApduService.PREF_ASSET_SCHEME, "MASTERCARD"
+     * by default. Kept out of showKeyTools(): nothing wrote this pref before
+     * now, the same unreachable-default trap asset_profile had, and this one
+     * has to be visible rather than buried behind a long-press dialog.
+     */
+    private void setUpAssetSchemeSpinner() {
+        String[] names = new String[AssetSchemeProfile.values().length];
+        for (int i = 0; i < names.length; i++) names[i] = AssetSchemeProfile.values()[i].name();
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, names);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spnAssetScheme.setAdapter(adapter);
+
+        syncAssetSchemeSpinner();
+
+        spnAssetScheme.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(android.widget.AdapterView<?> parent, View v, int pos, long id) {
+                if (syncingAssetScheme) return;
+                setAssetScheme(AssetSchemeProfile.values()[pos]);
+            }
+
+            @Override
+            public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+    }
+
+    private void setAssetScheme(AssetSchemeProfile scheme) {
+        prefs.edit().putString("asset_scheme", scheme.name()).apply();
+        showActiveAssetScheme(scheme);
+        status("PPSE now advertises " + scheme.name() + " (" + scheme.aid + ") alongside the test AID",
+                COL_FRESH);
+    }
+
+    private void showActiveAssetScheme(AssetSchemeProfile scheme) {
+        txtAssetScheme.setText("advertising: " + scheme.name());
+    }
+
+    /** Show the stored scheme without firing the listener, same pattern as syncAssetCardBox(). */
+    private void syncAssetSchemeSpinner() {
+        String v = prefs.getString("asset_scheme", AssetSchemeProfile.MASTERCARD.name());
+        AssetSchemeProfile scheme = AssetSchemeProfile.MASTERCARD;
+        for (AssetSchemeProfile s : AssetSchemeProfile.values()) if (s.name().equals(v)) scheme = s;
+
+        syncingAssetScheme = true;
+        spnAssetScheme.setSelection(scheme.ordinal());
+        showActiveAssetScheme(scheme);
+        syncingAssetScheme = false;
+    }
+
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */
     private void retryEncryption() {
         Prefs.reset(this);
@@ -2744,6 +2806,10 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             syncAssetCardBox();
+        } catch (Throwable ignored) { }
+
+        try {
+            syncAssetSchemeSpinner();
         } catch (Throwable ignored) { }
 
         try {

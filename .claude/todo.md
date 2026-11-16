@@ -219,3 +219,33 @@ CVM list, CA index) under a foreign AID.
       FCI (label/9F12/AIP/PDOL), not Mastercard's; Amex's case also checks its
       own 8E once GPO has bound it.
 - [x] 92 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - wire asset_scheme into the UI
+
+asset_scheme defaulted to Mastercard and nothing wrote it - the same
+unreachable-pref trap asset_profile had before setAssetCard() existed.
+
+- [x] New Spinner (spnAssetScheme) on the main screen, directly under the
+      test-card toggle, not inside showKeyTools() - it has to be visible.
+      Options come from AssetSchemeProfile.values() so a fourth scheme needs
+      no second list to update. A TextView (txtAssetScheme) states which one
+      is active ("advertising: VISA") next to it.
+- [x] MainActivity.setUpAssetSchemeSpinner()/setAssetScheme()/
+      syncAssetSchemeSpinner(): same pattern as chkAssetCard's
+      syncAssetCardBox() - read the pref with the Mastercard default and set
+      the selection BEFORE attaching the listener, guarded by a boolean flag
+      against the one onItemSelected Android fires for that programmatic
+      set. Synced again in onResume(), wrapped in the same try/catch as the
+      other asset-card sync calls.
+- [x] Picking a scheme writes asset_scheme immediately (ShadowApduService
+      reads it on the next tap, same as every other asset-card pref) and
+      updates the label; nothing is written until a scheme is actually
+      picked, so a fresh install still shows Mastercard without persisting
+      it, same as the service's own unset-pref default.
+- [x] New MainActivityAssetSchemeTest (Robolectric, first activity test in
+      this app): default shows Mastercard with the pref unset, picking Visa
+      writes the pref and updates the label, picking Amex survives a second
+      Robolectric.buildActivity() (a reopen). Needed
+      shadowOf(Looper.getMainLooper()).idle() after each spinner selection -
+      Spinner's selection-changed callback is posted, not synchronous.
+- [x] 95 tests green under --rerun-tasks; assembleDebug green.
