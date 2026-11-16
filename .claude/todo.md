@@ -154,4 +154,24 @@ contactless kernel wants DDA/CDA.
       no key; aip_claimsDdaOnly. Seven 9F26 pins updated (AIP is MAC input).
 - [x] .gitignore: *.pem (asset key excepted), term_*.log, term-*.log, tap.log.
 - [x] 89 tests green under --rerun-tasks; assembleDebug green.
-- [ ] Unverified: that the PEM matches the ICC cert in 9F46 (needs the CA/issuer key).
+- [x] Verified: the PEM modulus matches 9F46's embedded ICC modulus exactly.
+      Recovered the chain with the CA key (ca_92.pam, e=3) over tag 90 to get
+      the issuer key, then the issuer key over 9F46; the ICC cert's own SHA-1
+      hash did NOT verify under the standard EMV hash input (format||PAN||
+      exp||serial||hashalg||pkalg||NIC||EIC||pubkey||exponent) even though the
+      issuer cert's hash did - a defect in the upstream fixture, not in the key.
+- [x] Fixed 9F46: fetched the issuer's actual private key (the IIN pem the repo
+      only had as a URL pointer, iin_313233343536_e_3_private_key.pem from
+      mrautio/emv-card-simulator) and confirmed its modulus equals the issuer
+      key recovered above. Rebuilt the ICC cert plaintext with the same PAN/
+      expiry/serial/NIC/EIC/modulus/exponent, a correctly computed SHA-1 hash,
+      and re-signed it with that issuer private key. 9F46 changed in
+      profile.json; nothing else in the chain (90, 92, 9F32, ca_92.pam) moved.
+- [x] REC_2_1 and the 9F46 startsWith assertion updated in AssetCardEngineTest
+      to the new cert bytes.
+- [x] 90 tests green under --rerun-tasks; assembleDebug green.
+- [ ] Still open: no real terminal will complete ODA against this card. The CA
+      key index (RID A000000004, index 92) is fictional - no production
+      Mastercard reader holds a CA key there - so 9F46 recovery will find no
+      key and ODA aborts before GENERATE AC, independent of any cert bytes.
+      That is a terminal-trust-store problem, not something fixable here.
