@@ -69,21 +69,75 @@ public class MainActivityLoadCardDialogTest {
         shadowOf(Looper.getMainLooper()).idle();
     }
 
+    /**
+     * 8F/90/92/9F46/ICCKEY are warnings now, not refusals (see LoadedCard's
+     * class doc) - only a missing PAN or expiry still refuses. This block
+     * has neither.
+     */
     @Test
-    public void badBlock_showsNamedMissingFieldsAndDoesNotPersist() {
+    public void blockWithNoPan_refusedAndDoesNotPersist() {
         openDialog();
-        activity.etLoadCardBlock.setText("8F=06\n"); // missing 90, 92, 9F46, ICCKEY
+        activity.etLoadCardBlock.setText("8F=06\n90=AABB\n92=CCDD\n9F46=EEFF\n"); // no 5A, no 5F24
 
         activity.loadCardDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
 
         String err = activity.tvLoadCardError.getText().toString();
-        assertTrue("must name 90: " + err, err.contains("90"));
-        assertTrue("must name 92: " + err, err.contains("92"));
-        assertTrue("must name 9F46: " + err, err.contains("9F46"));
-        assertTrue("must name ICCKEY: " + err, err.contains("ICCKEY"));
+        assertTrue("must name the missing PAN: " + err, err.contains("PAN"));
+        assertTrue("must name the missing expiry: " + err, err.contains("expiry"));
 
         assertNull("a refused block must not persist",
                 LoadedCardStore.activeCard(RuntimeEnvironment.getApplication()));
+    }
+
+    /**
+     * The task's own test: a block with PAN/expiry (here, a bare track 2)
+     * but no chain tags still loads - with the warning shown in the
+     * dialog's summary, not a refusal.
+     */
+    @Test
+    public void blockWithNoChainTags_loadsWithTheWarningShown() {
+        openDialog();
+        activity.etLoadCardBlock.setText("1234560012345608=2912201\n");
+
+        activity.loadCardDialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+
+        assertEquals("a warning is not a refusal", "", activity.tvLoadCardError.getText().toString());
+        LoadedCard stored = LoadedCardStore.activeCard(RuntimeEnvironment.getApplication());
+        assertEquals("1234560012345608", stored.pan());
+        assertTrue(stored.warnings().contains("8F"));
+        assertTrue(stored.warnings().contains("ICCKEY"));
+
+        String summary = activity.tvLoadCardSummary.getText().toString();
+        assertTrue("summary must show the PAN: " + summary, summary.contains("1234560012345608"));
+        assertTrue("summary must show the warning: " + summary, summary.contains("WARNING"));
+        assertTrue("summary must name a missing field: " + summary, summary.contains("ICCKEY"));
+    }
+
+    /**
+     * "Show the parsed PAN and expiry back in the dialog so the read can be
+     * confirmed before saving" - the preview updates as soon as the block
+     * is typed, with no Save click at all.
+     */
+    @Test
+    public void livePreview_showsParsedPanAndExpiryBeforeSaving() {
+        openDialog();
+        activity.etLoadCardBlock.setText(GOOD_BLOCK);
+
+        String preview = activity.tvLoadCardPreview.getText().toString();
+        assertTrue("preview must show the PAN before Save: " + preview, preview.contains("1234560012345608"));
+        assertTrue("preview must show the expiry before Save: " + preview, preview.contains("291231"));
+
+        // Nothing was saved yet.
+        assertNull(LoadedCardStore.activeCard(RuntimeEnvironment.getApplication()));
+    }
+
+    @Test
+    public void livePreview_showsTheRefusalReasonBeforeSaving() {
+        openDialog();
+        activity.etLoadCardBlock.setText("8F=06\n"); // no PAN
+
+        String preview = activity.tvLoadCardPreview.getText().toString();
+        assertTrue("preview must say it would be refused: " + preview, preview.contains("PAN"));
     }
 
     @Test

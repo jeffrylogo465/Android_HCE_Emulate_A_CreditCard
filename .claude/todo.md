@@ -329,3 +329,51 @@ unreachable-pref trap asset_profile had before setAssetCard() existed.
       shows the already-persisted summary; Clear removes the card and the
       summary says so; a fresh install's dialog says no card is loaded.
 - [x] 114 tests green under --rerun-tasks; assembleDebug green.
+
+## Follow-up - accept a bare track 2, split validation into warning vs refusal
+
+The loader only accepted TAG=HEX lines and hard-refused a block without
+8F/90/92/9F46/ICCKEY - but a bare track 2 (PAN=YYMMSVC...) is how dumps
+actually arrive, and it has none of those by nature.
+
+- [x] LoadedCard.parse() now recognises a line matching PAN(12-19
+      digits)=YYMMSVC[discretionary] (no tag= prefix) before falling
+      through to the generic TAG=HEX dispatch, and derives 5A (PAN, BCD-
+      padded), 5F24 (YYMM + a defaulted day of 31 - track 2 carries no
+      day), 57 (PAN + D + YYMM + SVC + discretionary, BCD-padded) and 5F34
+      (01, track 2 carries no PAN sequence number). A later explicit tag
+      line overwrites what the bare line derived - simple top-to-bottom
+      order, no special-casing which one wins.
+- [x] Split validation: PAN (5A, or a bare track 2) and expiry (5F24, or a
+      bare track 2) are the only hard requirements now - missing either
+      refuses, naming both if both are missing. 8F/90/92/9F46/ICCKEY
+      dropped from REQUIRED_TAGS to a new WARN_TAGS set: missing any of
+      them no longer throws: LoadedCard.warnings() lists them, and the
+      card still loads. The ICC key fields are simply null when ICCKEY is
+      absent - AssetCardEngine's internalAuthenticate() already answers
+      6D00 on a null modulus, so no engine change was needed there.
+      CHAIN_TAGS (the broader, engine-level "never fall back" set,
+      including 9F32/9F47/9F49) is untouched - still enforced the same
+      way regardless of what's a warning vs a refusal at load time.
+- [x] MainActivity's Load card dialog: a new live preview
+      (tvLoadCardPreview) re-parses on every keystroke, BEFORE Save is
+      pressed, and shows "Parsed: PAN ..., exp ..., SCHEME[, warning]" or
+      "Would be refused: ..." - "confirm the read before saving" is a
+      pre-save concern, not a post-save one, now that parse() succeeds for
+      far more input than it refuses. The persisted summary
+      (tvLoadCardSummary) gained the same warning clause, shown both right
+      after Save and on reopening the dialog.
+- [x] Updated tests that depended on the old hard-refusal behaviour for
+      8F/90/92/9F46/ICCKEY (LoadedCardTest's three, the dialog's bad-block
+      test) to assert the new warning path instead, and added 5A/5F24
+      lines to every other test block that had relied on the old rules
+      never checking for PAN/expiry at all.
+- [x] New tests (the task's own three, plus the live preview): a bare
+      track 2 yields the right 5A/5F24/57/5F34 (and a second case for an
+      odd-length PAN's F-pad, and one proving a later explicit tag wins);
+      a block with no chain tags loads with the warning, at both the
+      LoadedCard level and through the dialog (summary shows "WARNING" and
+      names what's missing); a block with no PAN (and separately, no
+      expiry) is refused, naming which; the dialog's live preview shows
+      the parsed PAN/expiry or the refusal reason before Save is pressed.
+- [x] 122 tests green under --rerun-tasks; assembleDebug green.

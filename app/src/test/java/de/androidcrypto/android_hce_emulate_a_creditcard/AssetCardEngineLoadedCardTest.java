@@ -58,6 +58,7 @@ public class AssetCardEngineLoadedCardTest {
     public void loadedCard_servesItsOwn8FCertsAndPan() {
         String block = "# a real card, pasted\n"
                 + "5A=9999888877776666\n"
+                + "5F24=291231\n"
                 + "8F=07\n"
                 + "90=AABBCCDD0011223344\n"
                 + "92=1122334455\n"
@@ -105,6 +106,8 @@ public class AssetCardEngineLoadedCardTest {
         assertEquals("03", eng.tag("9F47"));
 
         String block = "# card missing 9F47\n"
+                + "5A=9999888877776666\n"
+                + "5F24=291231\n"
                 + "8F=07\n"
                 + "90=AABBCCDD0011223344\n"
                 + "92=1122334455\n"
@@ -120,7 +123,9 @@ public class AssetCardEngineLoadedCardTest {
 
     @Test
     public void clearLoadedCard_restoresTheSharedProfile() {
-        String block = "8F=07\n"
+        String block = "5A=9999888877776666\n"
+                + "5F24=291231\n"
+                + "8F=07\n"
                 + "90=AABBCCDD0011223344\n"
                 + "92=1122334455\n"
                 + "9F46=EEFF00112233445566\n"

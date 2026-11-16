@@ -178,6 +178,7 @@ public class MainActivity extends AppCompatActivity {
      */
     EditText etLoadCardBlock;
     TextView tvLoadCardSummary;
+    TextView tvLoadCardPreview;
     TextView tvLoadCardError;
     AlertDialog loadCardDialog;
 
@@ -1792,8 +1793,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * "Load card": paste a full EMV card's TAG=HEX block and have it override
-     * the test card/scheme profile - see LoadedCard and LoadedCardStore.
+     * "Load card": paste a full EMV card's TAG=HEX block (or a bare track 2
+     * line) and have it override the test card/scheme profile - see
+     * LoadedCard and LoadedCardStore.
      *
      * Kept entirely in this dialog rather than on the main screen, which the
      * asset-scheme spinner already earns the space on. Save does not dismiss
@@ -1802,6 +1804,12 @@ public class MainActivity extends AppCompatActivity {
      * decide that themselves: a refusal leaves the block on screen with
      * every missing field named, success updates the summary in place so it
      * is obvious the new card is now active without losing the dialog.
+     *
+     * A TextWatcher re-parses on every keystroke and shows the result in
+     * tvLoadCardPreview, BEFORE Save is pressed - LoadedCard.parse() now
+     * succeeds for far more input than it refuses (a missing certificate
+     * chain is a warning, not a refusal - see LoadedCard's class doc), so
+     * this is the moment to confirm the read, not after committing it.
      */
     void showLoadCardDialog() {
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -1819,9 +1827,15 @@ public class MainActivity extends AppCompatActivity {
         etLoadCardBlock.setMinLines(10);
         etLoadCardBlock.setGravity(Gravity.TOP | Gravity.START);
         etLoadCardBlock.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        etLoadCardBlock.setHint("TAG=HEX per line, REC sfi:rec=TAG,TAG, ICCKEY=hex, ACKEY=hex");
+        etLoadCardBlock.setHint("TAG=HEX per line, a bare track 2 (PAN=YYMMSVC...), "
+                + "REC sfi:rec=TAG,TAG, ICCKEY=hex, ACKEY=hex");
         etLoadCardBlock.setText(LoadedCardStore.rawBlock(this));
         box.addView(etLoadCardBlock);
+
+        tvLoadCardPreview = new TextView(this);
+        tvLoadCardPreview.setTextColor(0xFF60A5FA);
+        tvLoadCardPreview.setTextSize(12);
+        box.addView(tvLoadCardPreview);
 
         tvLoadCardError = new TextView(this);
         tvLoadCardError.setTextColor(0xFFEF4444);
@@ -1829,6 +1843,12 @@ public class MainActivity extends AppCompatActivity {
         box.addView(tvLoadCardError);
 
         refreshLoadedCardSummary();
+        refreshLoadCardPreview();
+        etLoadCardBlock.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) { }
+            @Override public void afterTextChanged(Editable s) { refreshLoadCardPreview(); }
+        });
 
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Load card")
@@ -1863,7 +1883,7 @@ public class MainActivity extends AppCompatActivity {
         dialog.show();
     }
 
-    /** Shows the currently stored card's PAN/expiry/scheme, or that none is loaded. */
+    /** Shows the currently stored card's PAN/expiry/scheme/warnings, or that none is loaded. */
     private void refreshLoadedCardSummary() {
         tvLoadCardSummary.setText(loadedCardSummaryText());
     }
@@ -1876,7 +1896,26 @@ public class MainActivity extends AppCompatActivity {
             c = null;
         }
         if (c == null) return "No card loaded - taps use the test card/profile.";
+        return "Active: " + summarize(c);
+    }
 
+    /** Live, pre-save feedback for whatever is currently typed - see showLoadCardDialog()'s doc. */
+    private void refreshLoadCardPreview() {
+        String block = etLoadCardBlock.getText().toString();
+        if (block.trim().isEmpty()) {
+            tvLoadCardPreview.setText("");
+            return;
+        }
+        try {
+            LoadedCard c = LoadedCard.parse(block);
+            tvLoadCardPreview.setText("Parsed: " + summarize(c));
+        } catch (IllegalArgumentException e) {
+            tvLoadCardPreview.setText("Would be refused: " + e.getMessage());
+        }
+    }
+
+    /** "PAN ..., exp ..., SCHEME" plus a warning clause when the chain/ICC key is incomplete. */
+    private String summarize(LoadedCard c) {
         String pan = c.pan();
         String expiry = c.expiry();
         String aidHex = c.aid();
@@ -1889,9 +1928,12 @@ public class MainActivity extends AppCompatActivity {
                 scheme = aidHex;
             }
         }
-        return "Active: PAN " + (pan == null ? "?" : pan)
+        String base = "PAN " + (pan == null ? "?" : pan)
                 + ", exp " + (expiry == null ? "?" : expiry)
                 + ", " + scheme;
+        if (c.warnings().isEmpty()) return base;
+        return base + " - WARNING: missing " + String.join(", ", c.warnings())
+                + " (no certificate chain; MSD only, no INTERNAL AUTHENTICATE)";
     }
 
     /** Try the Keystore again after a plaintext fallback. See Prefs.reset(). */

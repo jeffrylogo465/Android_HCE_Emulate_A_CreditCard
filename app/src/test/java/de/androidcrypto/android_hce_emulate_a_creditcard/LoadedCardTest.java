@@ -84,6 +84,7 @@ public class LoadedCardTest {
 
         assertEquals(ICC_MODULUS, c.iccModulus());
         assertEquals("0123456789ABCDEFFEDCBA9876543210", c.acKey());
+        assertTrue("a complete chain must carry no warnings: " + c.warnings(), c.warnings().isEmpty());
     }
 
     @Test
@@ -92,39 +93,103 @@ public class LoadedCardTest {
         assertNull(c.acKey());
     }
 
+    /**
+     * 9F46 (and 8F/90/92/ICCKEY) used to be refused outright. Split
+     * validation downgrades these to warnings: PAN and expiry are present,
+     * so this card still loads - it simply cannot answer INTERNAL
+     * AUTHENTICATE or carry 9F46 in a record once bound, which already
+     * fails loud elsewhere (AssetCardEngine.tag()'s chain-tag block), not
+     * here.
+     */
     @Test
-    public void missing9F46_refusedNamingTheTag() {
+    public void missing9F46_loadsWithAWarningNotARefusal() {
         String block = goodBlock().replace("9F46=18C47E9742500142A530DCC683431982\n", "");
-        try {
-            LoadedCard.parse(block);
-            fail("a card with no 9F46 must be refused");
-        } catch (IllegalArgumentException e) {
-            assertTrue("must name the missing tag: " + e.getMessage(), e.getMessage().contains("9F46"));
-        }
+        LoadedCard c = LoadedCard.parse(block);
+        assertNull("no fallback to some other value - simply absent", c.tag("9F46"));
+        assertTrue("must warn about 9F46: " + c.warnings(), c.warnings().contains("9F46"));
     }
 
     @Test
-    public void missingIccKey_refusedNamingIt() {
+    public void missingIccKey_loadsWithAWarningAndNoIccKey() {
         String block = goodBlock().replaceAll("(?m)^ICCKEY=.*\\n", "");
-        try {
-            LoadedCard.parse(block);
-            fail("a card with no ICCKEY must be refused");
-        } catch (IllegalArgumentException e) {
-            assertTrue("must name the missing key: " + e.getMessage(), e.getMessage().contains("ICCKEY"));
-        }
+        LoadedCard c = LoadedCard.parse(block);
+        assertNull(c.iccModulus());
+        assertNull(c.iccPrivateExponent());
+        assertTrue("must warn about ICCKEY: " + c.warnings(), c.warnings().contains("ICCKEY"));
     }
 
     @Test
-    public void multipleMissingFields_namedTogetherInOneMessage() {
+    public void multipleMissingChainFields_allWarnedTogether() {
         String block = goodBlock()
                 .replace("8F=06\n", "")
                 .replaceAll("(?m)^ICCKEY=.*\\n", "");
+        LoadedCard c = LoadedCard.parse(block);
+        assertTrue(c.warnings().toString(), c.warnings().contains("8F"));
+        assertTrue(c.warnings().toString(), c.warnings().contains("ICCKEY"));
+    }
+
+    /**
+     * The task's own test: a bare track 2 loads and yields the right
+     * 5A/5F24/57/5F34. PAN 1234560012345608, expiry 2912 (YYMM), service
+     * code 201, no discretionary data.
+     */
+    @Test
+    public void bareTrack2_yieldsTheRightDerivedTags() {
+        LoadedCard c = LoadedCard.parse("1234560012345608=2912201\n");
+
+        assertEquals("1234560012345608", c.tag("5A"));
+        assertEquals("1234560012345608", c.pan());
+        assertEquals("291231", c.tag("5F24")); // YYMM + a defaulted day of 31
+        assertEquals("291231", c.expiry());
+        assertEquals("01", c.tag("5F34"));
+        assertEquals("1234560012345608D2912201", c.tag("57")); // PAN, D, YYMM, SVC
+
+        // No chain, no key - this is the common dump shape, so it is a
+        // warning on an otherwise-loaded card, not a refusal.
+        assertTrue(c.warnings().contains("8F"));
+        assertTrue(c.warnings().contains("90"));
+        assertTrue(c.warnings().contains("92"));
+        assertTrue(c.warnings().contains("9F46"));
+        assertTrue(c.warnings().contains("ICCKEY"));
+    }
+
+    /** A PAN with an odd digit count pads 5A with a trailing F, same as any other BCD field. */
+    @Test
+    public void bareTrack2_oddLengthPan_padsWithF() {
+        LoadedCard c = LoadedCard.parse("123456001234560=2912311\n");
+        assertEquals("123456001234560F", c.tag("5A"));
+        assertEquals("123456001234560", c.pan());
+    }
+
+    /** A later explicit tag line overrides what the bare track 2 derived, simple top-to-bottom order. */
+    @Test
+    public void explicitTagAfterBareTrack2_overridesTheDerivedValue() {
+        LoadedCard c = LoadedCard.parse(
+                "1234560012345608=2912201\n"
+                        + "5F24=301130\n");
+        assertEquals("301130", c.tag("5F24"));
+    }
+
+    /** The task's own test: a block with no PAN is refused. */
+    @Test
+    public void noPan_refused() {
         try {
-            LoadedCard.parse(block);
-            fail("must be refused");
+            LoadedCard.parse("8F=06\n90=AABB\n92=CCDD\n9F46=EEFF\n");
+            fail("a card with no PAN must be refused");
         } catch (IllegalArgumentException e) {
-            assertTrue(e.getMessage(), e.getMessage().contains("8F"));
-            assertTrue(e.getMessage(), e.getMessage().contains("ICCKEY"));
+            assertTrue(e.getMessage(), e.getMessage().contains("PAN"));
+            assertTrue(e.getMessage(), e.getMessage().contains("5A"));
+        }
+    }
+
+    @Test
+    public void noExpiry_refused() {
+        try {
+            LoadedCard.parse("5A=1234560012345608\n");
+            fail("a card with no expiry must be refused");
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("expiry"));
+            assertTrue(e.getMessage(), e.getMessage().contains("5F24"));
         }
     }
 
