@@ -49,9 +49,15 @@ public class MainActivityCardLoadTest {
         etAtc = activity.findViewById(R.id.etAtc);
     }
 
+    /**
+     * MainActivity now debounces the track2/PAN filler 250ms (see
+     * FILLER_TOKEN) - idle() alone only runs what is already due at the
+     * current virtual time, so it never fires a postDelayed(..., 250).
+     * idleFor() advances the clock past the debounce window first.
+     */
     private void type(EditText field, String text) {
         field.setText(text);
-        shadowOf(Looper.getMainLooper()).idle();
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(300));
     }
 
     /** The task's own test: pasting a track 2 into the editor fills PAN/expiry/SC/discretionary. */

@@ -235,9 +235,10 @@ public class MainActivity extends AppCompatActivity {
      * cycle. 250 ms coalesces a typed PAN into one write and is short enough
      * that the wallet card updates before you look at it.
      *
-     * Only the generic field watcher is debounced. Save, Clone, the profile
-     * picker and the arm path still write immediately - they are one-shot and
-     * everything downstream reads the boxes, not prefs.
+     * Only the generic field watcher and the track2/PAN filler below are
+     * debounced. Save, Clone, the profile picker and the arm path still
+     * write immediately - they are one-shot and everything downstream reads
+     * the boxes, not prefs.
      */
     private final android.os.Handler ui =
             new android.os.Handler(android.os.Looper.getMainLooper());
@@ -245,6 +246,15 @@ public class MainActivity extends AppCompatActivity {
     private final Runnable collectNow = new Runnable() {
         @Override public void run() { collect(); }
     };
+
+    /**
+     * Token for the debounced etTrack2/etPan filler (autoFill/maybeProfile/
+     * applyDump/applyCardBlock/seedFromPan) - see where it is posted, below.
+     * A token, not a stored Runnable, because a fresh lambda is posted on
+     * every keystroke; removeCallbacksAndMessages(FILLER_TOKEN) drops
+     * whichever one is still pending regardless of identity.
+     */
+    private static final Object FILLER_TOKEN = new Object();
 
     private void scheduleCollect() {
         ui.removeCallbacks(collectNow);
@@ -389,14 +399,25 @@ public class MainActivity extends AppCompatActivity {
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
             public void afterTextChanged(Editable s) {
                 if (binding || dumping) return;
-                autoFill();
-                maybeProfile();
+                // Debounced: a paste (or fast typing) into etTrack2/etPan
+                // fires this once per character/chunk, and running
+                // applyCardBlock on every intermediate, not-yet-complete
+                // value is wasted work at best and a spurious refusal at
+                // worst. removeCallbacksAndMessages(FILLER_TOKEN) drops
+                // whatever was pending before posting the new one, so only
+                // the value still there 250ms after the last change runs.
+                ui.removeCallbacksAndMessages(FILLER_TOKEN);
+                ui.postDelayed(() -> {
+                    if (binding || dumping) return;
+                    autoFill();
+                    maybeProfile();
 
-                String t2 = t(etTrack2);
-                if (looksLikeFullDump(t2)) applyDump(t2);
-                else if (looksLikeCardBlock(t2)) applyCardBlock(t2);
+                    String t2 = t(etTrack2);
+                    if (looksLikeFullDump(t2)) applyDump(t2);
+                    else if (looksLikeCardBlock(t2)) applyCardBlock(t2);
 
-                seedFromPan(digits(t(etPan)));
+                    seedFromPan(digits(t(etPan)));
+                }, FILLER_TOKEN, 250);
             }
         };
         etTrack2.addTextChangedListener(filler);

@@ -182,6 +182,31 @@ public class LoadedCardTest {
         assertEquals("123456001234560", c.pan());
     }
 
+    /**
+     * A reader-framed, whitespace-padded line (leading ';', trailing '?',
+     * surrounding spaces, '=' as the separator) must parse to exactly the
+     * same card as the clean, unframed form - the normalisation choke point
+     * is LoadedCard.parse() itself, not whatever reads the box.
+     */
+    @Test
+    public void bareTrack2_readerFramedAndWhitespacePadded_parsesSameAsClean() {
+        LoadedCard framed = LoadedCard.parse("  ;5400495148651596=29122211229424900200F?  \n");
+        LoadedCard clean = LoadedCard.parse("5400495148651596=29122211229424900200F\n");
+
+        assertEquals(clean.tag("5A"), framed.tag("5A"));
+        assertEquals(clean.pan(), framed.pan());
+        assertEquals(clean.tag("5F24"), framed.tag("5F24"));
+        assertEquals(clean.expiry(), framed.expiry());
+        assertEquals(clean.tag("5F34"), framed.tag("5F34"));
+        assertEquals(clean.tag("57"), framed.tag("57"));
+        assertEquals(clean.serviceCode(), framed.serviceCode());
+        assertEquals(clean.discretionary(), framed.discretionary());
+
+        assertEquals("5400495148651596", framed.pan());
+        assertEquals("291231", framed.expiry());
+        assertEquals("221", framed.serviceCode());
+    }
+
     /** A later explicit tag line overrides what the bare track 2 derived, simple top-to-bottom order. */
     @Test
     public void explicitTagAfterBareTrack2_overridesTheDerivedValue() {
