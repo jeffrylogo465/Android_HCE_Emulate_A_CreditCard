@@ -180,6 +180,36 @@ public final class OdaVerifier {
         return new Result(true, null, "", null, null, slice(b, 4, padStart), null);
     }
 
+    // --------------------------------------------------------------------- SDA
+
+    /**
+     * Full SDA per Book 2 6.2: recover the issuer certificate under the CA
+     * key, rebuild the static data the AFL names, then recover and hash-check
+     * the SSAD against it. No ICC key or ICC certificate anywhere in this
+     * path - SDA never touches them.
+     *
+     * @param ca         the CA key the issuer cert claims (by RID + tag 8F)
+     * @param issuerCert tag 90
+     * @param issuerRem  tag 92, empty when absent
+     * @param issuerExp  tag 9F32
+     * @param afl        tag 94
+     * @param records    the AFL-named records (see {@link #buildStaticData})
+     * @param aip        tag 82
+     * @param sdaTagList tag 9F4A, null when absent
+     * @param ssad       tag 93, null when the dump carried none
+     */
+    public static Result verifySda(CaKeySet.Key ca, byte[] issuerCert, byte[] issuerRem, byte[] issuerExp,
+                                   byte[] afl, RecordSource records, byte[] aip, byte[] sdaTagList, byte[] ssad) {
+        Result issuer = verifyIssuerCert(ca, issuerCert, issuerRem, issuerExp);
+        if (!issuer.ok) return issuer;
+
+        byte[] staticData = buildStaticData(afl, records, aip, sdaTagList);
+        if (staticData == null) return Result.fail(Step.STATIC_DATA, "could not build the AFL's static data");
+
+        if (ssad == null) return Result.fail(Step.SSAD_RECOVER, "no tag 93 (SSAD) in the dump");
+        return verifySsad(issuer.modulus, issuerExp, ssad, staticData);
+    }
+
     // -------------------------------------------------------------------- SSAD
 
     /**

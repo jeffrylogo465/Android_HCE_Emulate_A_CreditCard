@@ -20,6 +20,9 @@ local.properties
 # DDA test-card keys / terminal logs. The asset key is the public mrautio test card key, shipped on purpose.
 *.pem
 !app/src/main/assets/icc_private_key.pem
+# ODA/SDA test fixtures: same mrautio test-card chain, the CA and issuer halves.
+!app/src/test/resources/iin_313233343536_e3_private_key.pem
+!app/src/test/resources/ca_92.pam
 term_*.log
 term-*.log
 tap.log
