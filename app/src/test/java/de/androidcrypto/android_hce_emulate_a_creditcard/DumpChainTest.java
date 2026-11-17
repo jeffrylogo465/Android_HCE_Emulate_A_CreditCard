@@ -24,7 +24,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
+import java.security.interfaces.RSAPublicKey;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -183,6 +186,72 @@ public class DumpChainTest {
                 Hex.hex(tags.get("90")), Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
         assertTrue(r.toString(), r.ok);
         assertEquals(176, r.modulus.length);
+    }
+
+    /**
+     * A synthetic issuer cert, but signed with the real ca_92.pam private
+     * exponent (not a generated CA, unlike OdaVerifierTest) - the point is
+     * CA_92's real 176-byte block size, not a fresh key pair end to end.
+     *
+     * 1024-bit issuer key (128 bytes) with a 36-byte remainder: leftmost =
+     * 128-36 = 92. region = len-hdr-trailer = 176-15-21 = 140, so pad =
+     * region-leftmost = 48. Both the remainder (36) and the padding (48)
+     * are present at once - the exact shape the deleted guard used to
+     * reject outright, before ever reaching the hash check. It is not an
+     * EMV-plausible cert (a real issuer would size the region to avoid
+     * padding when a remainder exists), only a probe at the removed guard's
+     * boundary.
+     */
+    @Test
+    public void issuerCert_remainderAndPaddingBothPresent_okAfterGuardRemoval() throws Exception {
+        KeyPairGenerator g = KeyPairGenerator.getInstance("RSA");
+        g.initialize(1024);
+        KeyPair issuer = g.generateKeyPair();
+        byte[] n = unsignedLocal(((RSAPublicKey) issuer.getPublic()).getModulus(), 128);
+        byte[] e = unsignedLocal(((RSAPublicKey) issuer.getPublic()).getPublicExponent(), -1);
+
+        int remLen = 36;
+        int leftmostLen = 128 - remLen;
+        byte[] leftmost = java.util.Arrays.copyOfRange(n, 0, leftmostLen);
+        byte[] rem = java.util.Arrays.copyOfRange(n, leftmostLen, 128);
+
+        byte[] head = Tlv.cat(new byte[]{0x6A, 0x02}, new byte[]{0x12, 0x34, 0x56, (byte) 0xFF},
+                new byte[]{0x12, 0x30}, new byte[]{0, 0, 1}, new byte[]{0x01, 0x01, (byte) 0x80, (byte) e.length});
+        int region = 176 - 15 - 21; // 140
+        int pad = region - leftmostLen; // 48
+        assertTrue("fixture must actually exercise remainder AND padding together", rem.length > 0 && pad > 0);
+        byte[] body = Tlv.cat(head, leftmost, fillLocal(pad, 0xBB));
+        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+        sha1.update(body, 1, body.length - 1);
+        sha1.update(rem);
+        sha1.update(e);
+        byte[] block = Tlv.cat(body, sha1.digest(), new byte[]{(byte) 0xBC});
+        assertEquals(176, block.length);
+
+        BigInteger sig = new BigInteger(1, block).modPow(caPrivateExponent, caModulus);
+        byte[] cert = unsignedLocal(sig, 176);
+
+        OdaVerifier.Result r = OdaVerifier.verifyIssuerCert(realCaKey(ridConst()), cert, rem, e);
+        assertTrue(r.toString(), r.ok);
+        assertEquals(128, r.modulus.length);
+        assertArrayEquals(Tlv.cat(leftmost, rem), r.modulus);
+        assertArrayEquals(n, r.modulus);
+    }
+
+    private static byte[] unsignedLocal(BigInteger v, int len) {
+        byte[] raw = v.toByteArray();
+        int start = (raw.length > 1 && raw[0] == 0) ? 1 : 0;
+        byte[] t = java.util.Arrays.copyOfRange(raw, start, raw.length);
+        if (len < 0) return t;
+        byte[] out = new byte[len];
+        System.arraycopy(t, 0, out, len - t.length, t.length);
+        return out;
+    }
+
+    private static byte[] fillLocal(int n, int v) {
+        byte[] b = new byte[n];
+        java.util.Arrays.fill(b, (byte) v);
+        return b;
     }
 
     // --------------------------------------------------------- mutation tests
