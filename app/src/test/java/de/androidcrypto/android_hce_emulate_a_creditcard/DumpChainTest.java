@@ -295,6 +295,13 @@ public class DumpChainTest {
      * app/src/test/resources/real-dump.txt (hex, whitespace ignored) and
      * remove @Ignore. The CA key for whatever RID/index it declares needs its
      * own CaKeySet entry - capk-test.txt only carries MasterCard index 04.
+     *
+     * If this fails at Step.SSAD_HASH: flip OdaVerifier.STATIC_DATA_PAD first
+     * (true -> false or back) and rerun before suspecting anything else - the
+     * padding sentence it implements is unverified against the Book 3 10.3
+     * text itself, and a real card's own static data is exactly what settles
+     * which reading (padded or not) actually matches a real terminal's own
+     * hash input.
      */
     @Test
     @Ignore("no real captured dump has been supplied yet - see app/src/test/resources/real-dump.txt")

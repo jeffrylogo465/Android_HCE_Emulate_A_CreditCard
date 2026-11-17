@@ -250,6 +250,26 @@ public final class OdaVerifier {
     static final boolean STATIC_DATA_PAD = true;
 
     /**
+     * Whether the AFL's 4th byte (the count of records, from "first", that
+     * are involved in offline data authentication - Book 3 10.3) is read
+     * literally (true, the default) or ignored in favour of treating every
+     * record in [first, last] as an ODA record (count = last - first + 1).
+     *
+     * The redundancy argument for defaulting to the literal reading: Book 3
+     * never requires a card to put a record in an SFI's AFL range that is
+     * NOT used for ODA - there is no other reason for a record to be there
+     * at all, since the AFL range outside of READ RECORD's own use is only
+     * ever consulted for ODA. So on every real card we have seen, byte 4
+     * already equals last-first+1, and the two readings agree; the literal
+     * reading is kept as the one Book 3 actually specifies, with the
+     * [first,last] reading available behind this switch for a captured dump
+     * where the two disagree - e.g. a card that puts a record in the AFL for
+     * READ RECORD only, outside of any ODA use, which byte 4 would then
+     * correctly exclude but the switch's alternate reading would not.
+     */
+    static final boolean COUNT_FROM_FOURTH_BYTE = true;
+
+    /**
      * Static data to be authenticated: the records the AFL flags for offline
      * data authentication, in AFL order (SFI 1-10: contents of the 70 template;
      * SFI 11+: the whole record), then the AIP only if the 9F4A tag list is
@@ -265,7 +285,8 @@ public final class OdaVerifier {
         for (int i = 0; i < afl.length; i += 4) {
             int sfi = (afl[i] & 0xFF) >> 3;
             int first = afl[i + 1] & 0xFF;
-            int count = afl[i + 3] & 0xFF;   // records involved in offline data authentication
+            int last = afl[i + 2] & 0xFF;
+            int count = COUNT_FROM_FOURTH_BYTE ? (afl[i + 3] & 0xFF) : (last - first + 1);
             for (int r = first; r < first + count; r++) {
                 byte[] rec = records.read(sfi, r);
                 if (rec == null) return null;
