@@ -53,7 +53,7 @@ public class DumpChainTest {
     private static Map<String, String[]> records;
     private static String afl, aip;
 
-    private static BigInteger caModulus, caExponent;
+    private static BigInteger caModulus, caExponent, caPrivateExponent;
     private static BigInteger issuerModulus, issuerPrivateExponent;
 
     @BeforeClass
@@ -76,6 +76,7 @@ public class DumpChainTest {
         RSAPrivateKey ca = pkcs1(CA_PEM);
         caModulus = ca.getModulus();
         caExponent = ca.getPublicExponent();
+        caPrivateExponent = ca.getPrivateExponent();
 
         RSAPrivateKey issuer = pkcs1(ISSUER_PEM);
         issuerModulus = issuer.getModulus();
@@ -182,6 +183,138 @@ public class DumpChainTest {
                 Hex.hex(tags.get("90")), Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
         assertTrue(r.toString(), r.ok);
         assertEquals(176, r.modulus.length);
+    }
+
+    // --------------------------------------------------------- mutation tests
+
+    private static byte[] ridConst() {
+        return new byte[]{(byte) 0xAF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF};
+    }
+
+    private static OdaVerifier.RecordSource recordSourceFrom(final Map<String, String[]> src) {
+        return new OdaVerifier.RecordSource() {
+            @Override
+            public byte[] read(int sfi, int rec) {
+                String[] list = src.get(sfi + ":" + rec);
+                if (list == null) return null;
+                ByteArrayOutputStream body = new ByteArrayOutputStream();
+                for (String t : list) {
+                    byte[] enc = Tlv.t(Integer.parseInt(t, 16), Hex.hex(tags.get(t)));
+                    body.write(enc, 0, enc.length);
+                }
+                return Tlv.t(0x70, body.toByteArray());
+            }
+        };
+    }
+
+    /**
+     * Flipping one byte of the SIGNED PLAINTEXT's hash field (not the final
+     * RSA signature - that has no byte locality, so flipping it there would
+     * almost certainly fail at SSAD_HEADER instead, not SSAD_HASH, since the
+     * recovered block would not even start 6A 03 01). This isolates exactly
+     * the hash-comparison step.
+     */
+    @Test
+    public void ssad_oneByteFlippedInTheHash_failsAtSsadHash() throws Exception {
+        byte[] staticData = OdaVerifier.buildStaticData(Hex.hex(afl), recordSourceFrom(records),
+                Hex.hex(aip), Hex.hex(tags.get("9F4A")));
+        assertNotNull(staticData);
+
+        int len = (issuerModulus.bitLength() + 7) / 8;
+        byte[] dac = {0x00, 0x00};
+        byte[] body = Tlv.cat(new byte[]{0x6A, 0x03, 0x01}, dac);
+        byte[] pad = new byte[len - body.length - 21];
+        java.util.Arrays.fill(pad, (byte) 0xBB);
+        body = Tlv.cat(body, pad);
+        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+        sha1.update(body, 1, body.length - 1);
+        sha1.update(staticData);
+        byte[] hash = sha1.digest();
+        hash[10] ^= 0x01; // one byte inside the 20-byte hash field, flipped before signing
+        byte[] block = Tlv.cat(body, hash, new byte[]{(byte) 0xBC});
+        byte[] ssad = issuerSign(block);
+
+        OdaVerifier.Result issuer = OdaVerifier.verifyIssuerCert(realCaKey(ridConst()),
+                Hex.hex(tags.get("90")), Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
+        assertTrue(issuer.toString(), issuer.ok);
+        OdaVerifier.Result r = OdaVerifier.verifySsad(issuer.modulus, Hex.hex(tags.get("9F32")), ssad, staticData);
+        assertEquals(r.toString(), OdaVerifier.Step.SSAD_HASH, r.failedStep);
+    }
+
+    /**
+     * Flipping one byte of the RECOVERED (plaintext) issuer cert at offset
+     * 20 - inside the leftmost key digits, not the header, not the hash,
+     * not the BB padding - then re-signing that mutated plaintext with the
+     * CA's own private key (ca_92.pam is a full key pair, not just the
+     * public half DumpChainTest otherwise uses). Header and layout checks
+     * are all untouched by this mutation, so only the hash can catch it -
+     * unless re-signing loses a leading zero byte and the "ciphertext"
+     * comes back short, which would fail at ISSUER_RECOVER instead. Both
+     * are accepted; which one actually happens is reported, not assumed.
+     */
+    @Test
+    public void issuerCert_oneByteFlippedAtOffset20_failsAtRecoverOrHash() {
+        byte[] cert90 = Hex.hex(tags.get("90"));
+        byte[] recovered = OdaVerifier.recover(unsigned(caModulus, (caModulus.bitLength() + 7) / 8),
+                unsigned(caExponent, 1), cert90);
+        assertNotNull("real fixture must recover under the real CA key", recovered);
+        recovered[20] ^= 0x01;
+
+        BigInteger mutatedSig = new BigInteger(1, recovered).modPow(caPrivateExponent, caModulus);
+        byte[] mutatedCert = unsigned(mutatedSig, cert90.length);
+
+        OdaVerifier.Result r = OdaVerifier.verifyIssuerCert(realCaKey(ridConst()), mutatedCert,
+                Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
+        assertFalse("a corrupted cert must not verify", r.ok);
+        System.out.println("issuerCert_oneByteFlippedAtOffset20_failsAtRecoverOrHash: " + r);
+        assertTrue(r.toString(),
+                r.failedStep == OdaVerifier.Step.ISSUER_RECOVER || r.failedStep == OdaVerifier.Step.ISSUER_HASH);
+    }
+
+    /**
+     * The SSAD stays exactly as correctly signed over the real static data;
+     * only what verifySda itself rebuilds the static data FROM (one PAN
+     * digit in record 3:1's tag 5A) is mutated at verification time. Proves
+     * the hash check actually binds to the record content, not just to
+     * whatever buildStaticData happens to return once per test run.
+     */
+    @Test
+    public void staticData_oneDigitOfPanChanged_failsAtSsadHash() throws Exception {
+        byte[] staticData = OdaVerifier.buildStaticData(Hex.hex(afl), recordSourceFrom(records),
+                Hex.hex(aip), Hex.hex(tags.get("9F4A")));
+        byte[] ssad = synthesizeSsad(staticData);
+
+        Map<String, String[]> mutatedRecords = new LinkedHashMap<>(records);
+        String realPan = tags.get("5A"); // 1234560012345608
+        String mutatedPan = realPan.substring(0, realPan.length() - 1)
+                + (((realPan.charAt(realPan.length() - 1) - '0' + 1) % 10));
+        Map<String, String> mutatedTags = new LinkedHashMap<>(tags);
+        mutatedTags.put("5A", mutatedPan);
+
+        OdaVerifier.RecordSource mutatedSource = new OdaVerifier.RecordSource() {
+            @Override
+            public byte[] read(int sfi, int rec) {
+                String[] list = mutatedRecords.get(sfi + ":" + rec);
+                if (list == null) return null;
+                ByteArrayOutputStream body = new ByteArrayOutputStream();
+                for (String t : list) {
+                    byte[] enc = Tlv.t(Integer.parseInt(t, 16), Hex.hex(mutatedTags.get(t)));
+                    body.write(enc, 0, enc.length);
+                }
+                return Tlv.t(0x70, body.toByteArray());
+            }
+        };
+
+        OdaVerifier.Result issuer = OdaVerifier.verifyIssuerCert(realCaKey(ridConst()),
+                Hex.hex(tags.get("90")), Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
+        assertTrue(issuer.toString(), issuer.ok);
+        byte[] mutatedStaticData = OdaVerifier.buildStaticData(Hex.hex(afl), mutatedSource,
+                Hex.hex(aip), Hex.hex(tags.get("9F4A")));
+        assertFalse("mutating the PAN digit must actually change the static data",
+                java.util.Arrays.equals(staticData, mutatedStaticData));
+
+        OdaVerifier.Result r = OdaVerifier.verifySsad(issuer.modulus, Hex.hex(tags.get("9F32")), ssad, mutatedStaticData);
+        assertEquals(r.toString(), OdaVerifier.Step.SSAD_HASH, r.failedStep);
     }
 
     @Test
