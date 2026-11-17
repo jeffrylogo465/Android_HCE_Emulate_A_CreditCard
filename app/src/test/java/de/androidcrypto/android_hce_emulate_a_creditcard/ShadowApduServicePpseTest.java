@@ -2,6 +2,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
@@ -384,5 +385,41 @@ public class ShadowApduServicePpseTest {
         assertEquals("CDA bit must still be cleared", 0, b1 & 0x01);
         assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
         assertEquals("0x1A00 - 0x18 survivors plus the CDCVM bit", "1A00", aip);
+    }
+
+    // ---- term-new6.log fix: the scripted Mastercard GPO is built, not replayed ----
+
+    /**
+     * A real Mastercard contactless kernel reads the AIP right after GPO and,
+     * with every ODA bit clear, judged this card offered no CAM at all and
+     * ended the tap there - before a single READ RECORD (term-new6.log).
+     * The default profile script's canned GPO line for Mastercard's shape
+     * (format 2, no AC yet) is no longer served verbatim:
+     * mastercardGpoFromCard() builds 82/94/9F6B fresh instead, and this is
+     * what a terminal receives with the default script still armed - no
+     * disableDefaultProfileScript() here, unlike the synthetic-branch tests
+     * above.
+     */
+    @Test
+    public void scriptedMastercardGpo_isBuiltFromTheCard_notReplayed() {
+        setProfile("MASTERCARD");
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        byte[] body = Hex.hex(gpo.substring(0, gpo.length() - 4));
+        assertNotNull("82 (AIP) missing", Emv.findTag(body, 0x82));
+        assertNotNull("94 (AFL) missing", Emv.findTag(body, 0x94));
+        assertNotNull("9F6B (track 2) missing", Emv.findTag(body, 0x9F6B));
+
+        byte[] aip = Emv.findTag(body, 0x82);
+        int b1 = aip[0] & 0xFF;
+        assertEquals("SDA bit (0x40) must be claimed", 0x40, b1 & 0x40);
+        assertEquals("DDA bit (0x20) must stay clear", 0, b1 & 0x20);
+        assertEquals("CDA bit (0x01) must stay clear", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
     }
 }

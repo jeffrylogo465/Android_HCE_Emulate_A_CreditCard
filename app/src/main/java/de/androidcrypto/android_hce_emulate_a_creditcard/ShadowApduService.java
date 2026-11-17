@@ -1777,6 +1777,53 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
+     * The Mastercard GPO, built from the card's own state instead of
+     * replayed from the canned script line: 77 { 82 aip, 94 afl, 9F6B track2 }.
+     *
+     * term-new6.log is why this exists: a real Mastercard contactless kernel
+     * reads the AIP right after GPO, and with the old, fully-cleared AIP
+     * (no SDA/DDA/CDA at all) it judged the card had no CAM and ended the
+     * tap there - before a single READ RECORD. The script's canned GPO line
+     * (Profiles.gpoMastercard(), built once from the old AIP_MC) could not
+     * fix that on its own without this method, because scriptMatch() serves
+     * it byte for byte; this method is called instead of using those bytes,
+     * for the GPO only - PPSE and SELECT still come from the script.
+     *
+     * 82: Profiles.aipMc() (now claiming SDA on purpose - see that constant's
+     * own doc) through Emv.clearOdaKeepSda() then Emv.setCdcvm() - the same
+     * two-step edit the captured-replay and synthetic/boxed-AIP branches run
+     * on their own AIPs in gpo(), just with clearOda()'s SDA-stripping mask
+     * swapped for the one sibling that leaves SDA alone, because this AIP is
+     * this app's own deliberate claim, not a captured one.
+     *
+     * 94: the one-entry AFL constant every Mastercard GPO serves (SFI 1,
+     * record 1 to 1, none for offline auth) - Profiles.aflOneRaw(), not a
+     * second hand-typed copy.
+     *
+     * 9F6B: msdRecord()'s own track 2 equivalent for this slot - 9F6B first
+     * (Mastercard's own tag), falling back to 57 (the shape some hand-typed
+     * skeletons use) and finally to the live track2() field when no
+     * skeleton is configured at all, so a bare slot still serves a real
+     * track rather than an empty tag.
+     */
+    private byte[] mastercardGpoFromCard() {
+        byte[] wrap = tlv(0x77, tlv(0x82, Profiles.aipMc()));
+        Emv.clearOdaKeepSda(wrap);
+        Emv.setCdcvm(wrap);
+        byte[] aip = capturedAip(wrap);
+
+        byte[] rec = msdRecord();
+        byte[] t2 = rec == null ? null : findTag(rec, 0x9F6B);
+        if (t2 == null && rec != null) t2 = findTag(rec, 0x57);
+        if (t2 == null) t2 = track2();
+
+        return tlv(0x77, cat(
+                tlv(0x82, aip),
+                tlv(0x94, Profiles.aflOneRaw()),
+                tlv(0x9F6B, t2)));
+    }
+
+    /**
      * SFI/record that carries the skeleton, as "ssrr" hex.
      *
      * Falls back to the first AFL entry, then to SFI 1 rec 1.
@@ -2001,6 +2048,20 @@ public class ShadowApduService extends HostApduService {
                         tap("-- msd: gpo format 1 aip=" + bytesToHex(capturedAip(body))
                                 + " afl=" + bytesToHex(Arrays.copyOfRange(body, 2, body.length))
                                 + " payload=" + body.length + "B " + bytesToHex(body));
+                    } else if (readTag(body, new int[]{0}) == 0x77
+                            && findTag(body, 0x9F26) == null) {
+                        // Format 2, no AC in it yet - the Mastercard shape
+                        // (Visa's qVSDC script always carries 9F26/9F27, MSD
+                        // is format 1 and already handled above). Build the
+                        // response from the card instead of replaying the
+                        // canned line - see mastercardGpoFromCard()'s own doc
+                        // and term-new6.log for why the canned AIP alone
+                        // stalled a real terminal before READ RECORD.
+                        body = mastercardGpoFromCard();
+                        tap("-- script: GPO built from the card, not replayed | aip="
+                                + bytesToHex(findTag(body, 0x82))
+                                + " afl=" + bytesToHex(findTag(body, 0x94))
+                                + " track2=" + bytesToHex(findTag(body, 0x9F6B)));
                     }
                     byte[] sa = capturedAip(body);
                     if (sa != null && sa.length >= 2) {

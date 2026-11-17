@@ -13,12 +13,26 @@ public final class Profiles {
 
     private static final String PPSE = "325041592E5359532E4444463031";
 
-    // Mastercard AIP 18 80. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
+    // Mastercard AIP 58 80. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
     // 0x08 TRM 0x04 issuer auth 0x02 on-device CVM 0x01 CDA.
-    // 0x18 = CV + TRM. Every ODA bit clear - a clone cannot sign and has no
-    // certificates, so claiming them invites a failed check. Byte 2 b8 is
-    // "EMV mode supported" and stays on; the MSD path masks it in the service.
-    private static final String AIP_MC = "1880";
+    // 0x58 = SDA + CV + TRM. DDA, issuer auth and CDA stay clear - a clone
+    // cannot do a real DDA/CDA signature and has no ARPC to answer issuer
+    // auth with, so those three still buy nothing but a failed check.
+    //
+    // SDA (0x40) IS CLAIMED ON PURPOSE despite this clone having no SDA
+    // chain either - see term-new6.log: a real Mastercard contactless
+    // kernel reads the AIP right after GPO and, with every ODA bit clear
+    // (the old 0x18), decided this card offered no CAM at all and ended the
+    // tap there, before a single READ RECORD. Claiming SDA gets the kernel
+    // past that check; the SDA signature itself is a separate, later
+    // failure (a TVR bit and a forced-online) rather than an immediate
+    // stop with no records read, which is the actual, reproducible failure
+    // this bit fixes. Emv.clearOda() no longer strips this bit for exactly
+    // this reason - see its own doc.
+    //
+    // Byte 2 b8 is "EMV mode supported" and stays on; the MSD path masks it
+    // in the service.
+    private static final String AIP_MC = "5880";
 
     // Visa 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM.
     //
@@ -53,6 +67,13 @@ public final class Profiles {
     // The same AFL entry RAW, for format 1. A tag 80 body is AIP || AFL with no
     // inner TLVs - the 94 wrapper is format 2 shape and belongs only in a 77.
     private static final String AFL_RAW = "08010100";
+
+    // Accessors for the service's own GPO builder (ShadowApduService
+    // mastercardGpoFromCard()), which assembles a 77 from scratch rather than
+    // replaying the canned script line and needs the same AIP/AFL bytes this
+    // class already carries, not a second hand-typed copy.
+    static byte[] aipMc() { return Hex.hex(AIP_MC); }
+    static byte[] aflOneRaw() { return Hex.hex(AFL_RAW); }
 
     // Visa CTQ (9F6C): 30 = go online and switch interface if ODA fails.
     // VISA ONLY - in Kernel 2 the same tag is the mag-stripe app version.
