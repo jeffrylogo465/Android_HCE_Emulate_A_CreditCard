@@ -312,6 +312,47 @@ public class ShadowApduServicePpseTest {
         assertEquals("CDA bit must be cleared", 0, b1 & 0x01);
         assertEquals("CV bit must survive", 0x10, b1 & 0x10);
         assertEquals("TRM bit must survive", 0x08, b1 & 0x08);
-        assertEquals("0x1800 exactly", "1800", aip);
+        // F02: gpo() now also ORs in Emv.AIP_CDCVM unconditionally in the
+        // non-MSD case, so 0x18's survivors pick up 0x02 too - see F02's own
+        // test just below for that bit in isolation.
+        assertEquals("0x1A00 - 0x18 survivors plus F02's CDCVM bit", "1A00", aip);
+    }
+
+    /**
+     * F02. The typed AIP has every ODA bit set and CDCVM clear, same shape
+     * as the test above - clearOda() must still clear the four ODA bits
+     * (its mask, ~0x65, does not even cover 0x02), and separately gpo()
+     * must now OR in Emv.AIP_CDCVM. Both are checked on the SAME served
+     * byte so one cannot mask a regression in the other. The READ RECORD
+     * that follows checks the served CVMLIST is the new CDCVM-first list,
+     * not the old signature-bearing one.
+     */
+    @Test
+    public void syntheticGpo_setsCdcvmBit_andServesTheCdcvmFirstCvmList() {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_aip", "7D00").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must still be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must still be cleared", 0, b1 & 0x20);
+        assertEquals("Issuer Authentication bit must still be cleared", 0, b1 & 0x04);
+        assertEquals("CDA bit must still be cleared", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x1A00 exactly - 0x18 survivors plus CDCVM", "1A00", aip);
+
+        String rec = send("00B2010C00");
+        int rAt = rec.indexOf("8E0C") + 4;
+        String list = rec.substring(rAt, rAt + 24);
+        assertEquals("00000000000000005E071F03", list);
     }
 }

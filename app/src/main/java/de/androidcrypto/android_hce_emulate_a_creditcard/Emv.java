@@ -29,6 +29,14 @@ final class Emv {
     static final byte CID_TC   = (byte) 0x40;
     static final byte CID_ARQC = (byte) 0x80;
 
+    /**
+     * AIP byte 1 bit 0x02: on-device (CDCVM) cardholder verification
+     * supported. Not in clearOda's 0x65 mask - that mask is the four ODA
+     * bits (SDA/DDA/IssuerAuth/CDA), a disjoint concern from CVM capability,
+     * so clearOda() must leave this bit exactly as it finds it.
+     */
+    static final int AIP_CDCVM = 0x02;
+
     static byte[] hex(String s) { return Hex.hex(s); }
 
     static String toHex(byte[] d) { return Hex.toHex(d); }

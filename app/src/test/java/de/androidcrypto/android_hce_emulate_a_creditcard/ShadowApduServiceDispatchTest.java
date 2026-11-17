@@ -63,10 +63,10 @@ public class ShadowApduServiceDispatchTest {
     @Test
     public void readRecord_returnsRecordAnd9000() {
         assertEquals(
-                "70818F9F420208405F24033112015A0841111111111111115F3401019F0702FFC0"
+                "70818D9F420208405F24033112015A0841111111111111115F3401019F0702FFC0"
                         + "9F080200028C159F02069F03069F1A0295055F2A029A039C019F37048D18"
-                        + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0E"
-                        + "000003E8" + "000003E8" + "1F061E071F039F0D0500000000009F0E0500000000009F0F05"
+                        + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0C"
+                        + "00000000" + "00000000" + "5E071F039F0D0500000000009F0E0500000000009F0F05"
                         + "00000000005F28020840570C4111111111111111D31122019000",
                 Hex.toHex(send("00B2010C00")));
     }
@@ -85,26 +85,31 @@ public class ShadowApduServiceDispatchTest {
     }
 
     /**
-     * Amount-gated again (see ShadowApduService.CVMLIST): 1F06 no CVM under
-     * X, 1E07 signature over Y, 1F03 no CVM as the unconditional fallback
-     * for exactly X (X == Y here, so there is a single point, not a gap,
-     * that neither amount condition covers) or anything else that reaches
-     * rule 3. 1E, not 5E: no continue bit, since AIP byte 1 bit 0x02
-     * (on-device CVM) is not set - see the constant's own comment.
+     * F02 (see ShadowApduService.CVMLIST): X and Y are both 0, so the old
+     * amount-gated under-X/over-Y split no longer applies - any positive
+     * amount hits rule 1 (CDCVM, condition 0x07 "over Y") unconditionally,
+     * and only an exact 0 falls through to rule 2 (no CVM, condition 0x03,
+     * the unconditional fallback).
+     *
+     * cvmChosen()'s "& 0x3F" strips bit 0x40 along with the continue bit,
+     * so it cannot distinguish 0x5E from 0x1E by itself - this test checks
+     * the served byte (0x5E) directly instead of trusting that helper to
+     * tell CDCVM apart from signature.
      */
     @Test
-    public void cvmList_underLimitSelectsNoCvm_overLimitSelectsSignature_elseFallsBack() {
+    public void cvmList_isCdcvmFirst_noAmountGateLeft() {
         String rec = Hex.toHex(send("00B2010C00"));
-        int at = rec.indexOf("8E0E") + 4;
-        String list = rec.substring(at, at + 28);
-        assertEquals("000003E8000003E81F061E071F03", list);
-        assertEquals("1F", cvmChosen(list, 999));
-        assertEquals("1E", cvmChosen(list, 1001));
-        assertEquals("1F", cvmChosen(list, 1000)); // exactly X == Y: falls through to rule 3
+        int at = rec.indexOf("8E0C") + 4;
+        String list = rec.substring(at, at + 24);
+        assertEquals("00000000000000005E071F03", list);
+        assertEquals("1E", cvmChosen(list, 1));    // decodes to the same 6-bit code as signature -
+        assertEquals("1E", cvmChosen(list, 1000)); // see the class doc above; this helper can't tell them apart.
+        assertEquals("1F", cvmChosen(list, 0));     // Y==0, so "over Y" does not catch exactly 0 - falls to rule 2.
 
-        // Rule 2's continue bit, explicitly: 1E not 5E.
-        int rule2At = 16 + 4;
-        assertEquals("1E", list.substring(rule2At, rule2At + 2));
+        // Rule 1 is 5E, not 1E: bit 0x40 is set, same bit the old F02-era
+        // comment on CVMLIST named explicitly.
+        int rule1At = 16;
+        assertEquals("5E", list.substring(rule1At, rule1At + 2));
     }
 
     @Test

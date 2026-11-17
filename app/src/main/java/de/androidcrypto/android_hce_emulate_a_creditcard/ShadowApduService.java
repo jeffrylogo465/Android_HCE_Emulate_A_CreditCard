@@ -172,24 +172,20 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL_MSD = "9F3704";
 
     /**
-     * CVM list. Amount X and Amount Y are both 000003E8 (10.00 in minor
-     * units), then three rules:
-     *   1F 06 - no CVM required, if the transaction is under X.
-     *   1E 07 - signature, if the transaction is over Y.
-     *   1F 03 - no CVM required, if the terminal supports the CVM (i.e.
-     *           unconditionally) - the well-formed fallback for exactly X,
-     *           or anything else that reaches here without having hit
-     *           either amount condition above.
+     * CVM list. F02: AIP byte 1 bit 0x02 (Emv.AIP_CDCVM) is now set on the
+     * served AIP (see gpo()), so the earlier reasoning against the 0x5E
+     * continue bit no longer applies - the device-credential prompt it used
+     * to route to without this bit now has the capability flag to back it.
      *
-     * Rule 2 is 1E, NOT 5E: the continue-bit (0x40, "apply the succeeding CV
-     * rule if this one is unsuccessful") would route a failed signature on
-     * to on-device cardholder verification, which needs AIP byte 1 bit 0x02
-     * set - a device-credential prompt this app does not implement yet. Set
-     * the continue bit only once that prompt exists; until then 1E keeps
-     * signature's failure path a plain decline rather than a reference to a
-     * capability this card does not have.
+     * Amount X and Amount Y are both 00000000, so neither amount condition
+     * ever applies and every transaction falls straight to the fallback:
+     *   5E 07 - on-device CVM (CDCVM), continue bit set, if over Y - and
+     *           since Y is 0, that is every transaction's first rule hit.
+     *   1F 03 - no CVM required, if the terminal supports the CVM, the
+     *           fallback were CDCVM itself ever unsuccessful.
+     * No signature rule remains, so nothing prompts for one.
      */
-    private static final String CVMLIST = "000003E8000003E81F061E071F03";
+    private static final String CVMLIST = "00000000000000005E071F03";
 
     /** Documentation only - the terminal owns 9F34 and sends it in CDOL1. */
     private static final String CVM_RESULTS = "1F0302";
@@ -2322,6 +2318,12 @@ public class ShadowApduService extends HostApduService {
             byte[] wrap = tlv(0x77, tlv(0x82, used));
             Emv.clearOda(wrap);
             used = capturedAip(wrap);
+
+            // F02: on-device CVM (CDCVM) support, so a tap can clear CVM
+            // without a signature prompt this app cannot show. Emv.AIP_CDCVM
+            // names the bit so it cannot drift from clearOda's own mask,
+            // which deliberately excludes it (see Emv.AIP_CDCVM's doc).
+            used = new byte[]{(byte) (used[0] | Emv.AIP_CDCVM), used[1]};
         }
 
         // MSD: a profile that declares its own MSD AIP wins outright. Under
