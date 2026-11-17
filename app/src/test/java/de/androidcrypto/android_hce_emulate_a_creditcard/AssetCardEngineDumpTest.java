@@ -154,21 +154,24 @@ public class AssetCardEngineDumpTest {
     // --------------------------------------------------------------------------
 
     @Test
-    public void dumpWithTag93_servesSdaAip_andTheChainTagsVerbatim() throws Exception {
+    public void sourceAipWithDdaAndTag93_setsSdaClearsDda_6985OnInternalAuthenticate() throws Exception {
         eng.loadDump(dumpBlob(true), null);
         send(SELECT_AID);
 
-        // profile.json's own base AIP is 3C00: byte 1 is 0011_1100, so masking
-        // to CV(0x10)+TRM(0x08) leaves 0x18, and SDA(0x40) is added because
-        // this dump carries a tag 93 - independent of whether it verifies
-        // (loadDump() was given no CA key, so it does not).
-        assertTrue(send(GPO).startsWith("771282025800940C080202001001020018010201"));
-        assertEquals("5800", eng.aip());
-        assertEquals("5800", eng.tag("82"));
+        // Provenance, not a mask: profile.json's own captured AIP is 3C00
+        // (0011_1100 - DDA(0x20) and Issuer Authentication(0x04) already
+        // set, CV(0x10)/TRM(0x08) too). With tag 93 present, SDA(0x40) is
+        // set and DDA(0x20) is cleared; CDA(0x01) is always cleared (was
+        // already 0 here); every other bit is carried over unchanged ->
+        // 0x3C | 0x40 = 0x7C, & ~0x20 = 0x5C. Byte 2 is the source's own (00).
+        assertTrue(send(GPO).startsWith("771282025C00940C080202001001020018010201"));
+        assertEquals("5C00", eng.aip());
+        assertEquals("5C00", eng.tag("82"));
         int b1 = Integer.parseInt(eng.aip().substring(0, 2), 16);
         assertEquals("SDA bit", 0x40, b1 & 0x40);
         assertEquals("DDA bit", 0, b1 & 0x20);
         assertEquals("CDA bit", 0, b1 & 0x01);
+        assertEquals("Issuer Authentication bit carried from the source", 0x04, b1 & 0x04);
 
         assertFalse("no CA key was given to loadDump(), so this must not claim to verify",
                 eng.lastDumpVerify().ok);
@@ -177,33 +180,38 @@ public class AssetCardEngineDumpTest {
         // verbatim, byte for byte, from the dump - not rebuilt from a tag
         // list, so this is exactly profile.json's own record bytes.
         assertEquals(Hex.toHex(record("2:2")) + "9000", send("00B2021400"));
+
+        assertEquals("6985 - the dump has no ICC key, even though the served AIP no longer claims DDA",
+                "6985", send(INT_AUTH));
     }
 
     @Test
-    public void dumpWithoutTag93_clearsSdaToo_and6D00OnInternalAuthenticate() throws Exception {
+    public void sourceAipWithDdaAndNoTag93_preservesDda_6985OnInternalAuthenticate() throws Exception {
         eng.loadDump(dumpBlob(false), null);
         send(SELECT_AID);
 
-        // No SDA bit either: with no tag 93, this dump can prove neither SDA
-        // nor DDA (it never carries an ICC key, so DDA is categorically
-        // impossible for a dump - see internalAuthenticate() below), so the
-        // honest AIP is 1800 (CV+TRM only), not a claim this engine cannot
-        // back. The task's "DDA AIP" phrase would mean byte 1 bit 0x20 set;
-        // that is NOT what this asserts, on purpose - see the commit message.
-        assertEquals("18", eng.aip().substring(0, 2));
+        // No tag 93, so nothing supersedes the source's own SDA/DDA bits:
+        // the provenance rule leaves them exactly as the source card had
+        // them. profile.json's captured AIP (3C00) already had DDA(0x20)
+        // set and SDA(0x40) clear, so the served AIP is unchanged - still
+        // 3C00 - even though this engine cannot back that DDA claim.
+        assertEquals("3C00", eng.aip());
         int b1 = Integer.parseInt(eng.aip().substring(0, 2), 16);
         assertEquals("SDA bit", 0, b1 & 0x40);
-        assertEquals("DDA bit", 0, b1 & 0x20);
+        assertEquals("DDA bit, preserved from the source", 0x20, b1 & 0x20);
+        assertEquals("CDA bit", 0, b1 & 0x01);
 
         send(GPO);
-        assertEquals("6D00", send(INT_AUTH));
+        // 6985, not 6D00: the card still claims DDA (see above), so this is
+        // a real refusal of a capability it claims, not "no such command".
+        assertEquals("6985", send(INT_AUTH));
     }
 
     @Test
     public void clearDump_restoresTheSchemeOnlyAip() throws Exception {
         eng.loadDump(dumpBlob(true), null);
         send(SELECT_AID);
-        assertEquals("58", eng.aip().substring(0, 2));
+        assertEquals("5C", eng.aip().substring(0, 2));
 
         eng.clearDump();
         send(SELECT_AID);

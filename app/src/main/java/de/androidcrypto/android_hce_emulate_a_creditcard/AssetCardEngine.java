@@ -369,19 +369,29 @@ final class AssetCardEngine {
     }
 
     /**
-     * Dump mode's AIP: SDA (0x40) set exactly when the dump carries a tag 93,
-     * independent of whether that SSAD actually verifies - this is a
-     * capability flag the card declares, not a terminal's verdict. DDA
-     * (0x20) and CDA (0x01) are always clear: a captured dump never carries
-     * an ICC private key, so this engine cannot actually do either for it
-     * (see internalAuthenticate()). Cardholder Verification (0x10) and
-     * Terminal Risk Management (0x08) are kept from the dump's own captured
-     * AIP; every other bit, including all of byte 2, is cleared.
+     * Dump mode's AIP: provenance, not a mask. Start from the dump's own
+     * captured AIP (every bit, both bytes) and touch only what this mode's
+     * own capabilities actually change:
+     *  - CDA (0x01) is always cleared - a captured dump never carries an ICC
+     *    private key, so CDA (which needs one) is never possible here.
+     *  - When the dump carries a tag 93, SDA (0x40) is set and DDA (0x20) is
+     *    cleared - the dump itself is now how this card does ODA.
+     *  - When the dump carries no tag 93, SDA and DDA are left exactly as
+     *    the source card declared them, DDA included, even though this
+     *    engine cannot back a DDA claim (internalAuthenticate() answers
+     *    6985, not a silent 6D00, for exactly that reason: a real refusal
+     *    to a capability the replayed AIP still claims, not "no such
+     *    command").
      */
     private byte[] dumpAip() {
-        int base = dumpChain.aip[0] & 0xFF;
-        int b1 = (base & 0x18) | (dumpChain.ssad != null ? 0x40 : 0);
-        return new byte[]{(byte) b1, 0x00};
+        int b1 = dumpChain.aip[0] & 0xFF;
+        b1 &= ~0x01; // CDA: never possible in dump mode
+        if (dumpChain.ssad != null) {
+            b1 |= 0x40;  // SDA: this dump is the SSAD
+            b1 &= ~0x20; // DDA: superseded by SDA, not also claimed
+        }
+        int b2 = dumpChain.aip.length > 1 ? (dumpChain.aip[1] & 0xFF) : 0;
+        return new byte[]{(byte) b1, (byte) b2};
     }
 
     /** The AFL to serve/walk: a loaded dump's own, else the bound scheme's (none today), else this card's own. */
@@ -558,8 +568,12 @@ final class AssetCardEngine {
         // A captured dump never carries an ICC private key - that is
         // terminal-side data, never transmitted - so dump mode can never do
         // DDA, regardless of whatever ICC key this engine was constructed
-        // with for its own (non-dump) identity.
-        if (dumpChain != null || iccModulus == null) return sw("6D00");
+        // with for its own (non-dump) identity. 6985, not 6D00: the dump's
+        // own AIP may still claim DDA (see dumpAip()) when it had no tag
+        // 93 to supersede it, so this is a real refusal of a capability the
+        // card still claims, not "no such command".
+        if (dumpChain != null) return sw("6985");
+        if (iccModulus == null) return sw("6D00");
         byte[] ddol = Hex.hex(need("9F49"));
         byte[] data = dataOf(apdu);
         if (data == null || data.length != dolLength(parseDol(ddol))) return sw("6700");
