@@ -56,10 +56,12 @@ public final class DumpChain {
     public final byte[] aid;
 
     private final Map<String, byte[]> records; // "sfi:rec" -> raw 70 template
+    private final Map<Integer, byte[]> flat;   // every tag the walk found, first occurrence
 
     private DumpChain(int caIndex, byte[] issuerCert, byte[] issuerRemainder, byte[] issuerExponent,
                        byte[] iccCert, byte[] iccExponent, byte[] iccRemainder, byte[] aip, byte[] afl,
-                       byte[] sdaTagList, byte[] ssad, byte[] aid, Map<String, byte[]> records) {
+                       byte[] sdaTagList, byte[] ssad, byte[] aid, Map<String, byte[]> records,
+                       Map<Integer, byte[]> flat) {
         this.caIndex = caIndex;
         this.issuerCert = issuerCert;
         this.issuerRemainder = issuerRemainder;
@@ -73,7 +75,11 @@ public final class DumpChain {
         this.ssad = ssad;
         this.aid = aid;
         this.records = records;
+        this.flat = flat;
     }
+
+    /** Any tag the walk found anywhere in the blob, or null. Not limited to the chain tags above. */
+    public byte[] tag(int t) { return flat.get(t); }
 
     /** First 5 bytes of the AID (tag 84), i.e. the RID, or null when no AID was found. */
     public byte[] rid() {
@@ -143,7 +149,8 @@ public final class DumpChain {
                 flat.get(0x9F4A),
                 flat.get(0x93),
                 flat.get(0x84),
-                records);
+                records,
+                flat);
         return Result.ok(c);
     }
 
