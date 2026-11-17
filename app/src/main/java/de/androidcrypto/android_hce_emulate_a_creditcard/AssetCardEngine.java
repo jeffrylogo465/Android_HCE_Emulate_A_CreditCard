@@ -374,6 +374,9 @@ final class AssetCardEngine {
      * own capabilities actually change:
      *  - CDA (0x01) is always cleared - a captured dump never carries an ICC
      *    private key, so CDA (which needs one) is never possible here.
+     *  - Issuer Authentication (0x04) is always cleared - it needs an ARPC
+     *    from the issuer's own authorisation network, which a dump cannot
+     *    obtain any more than it can sign a cryptogram.
      *  - When the dump carries a tag 93, SDA (0x40) is set and DDA (0x20) is
      *    cleared - the dump itself is now how this card does ODA.
      *  - When the dump carries no tag 93, SDA and DDA are left exactly as
@@ -386,6 +389,7 @@ final class AssetCardEngine {
     private byte[] dumpAip() {
         int b1 = dumpChain.aip[0] & 0xFF;
         b1 &= ~0x01; // CDA: never possible in dump mode
+        b1 &= ~0x04; // Issuer Authentication: needs an ARPC a dump cannot obtain
         if (dumpChain.ssad != null) {
             b1 |= 0x40;  // SDA: this dump is the SSAD
             b1 &= ~0x20; // DDA: superseded by SDA, not also claimed

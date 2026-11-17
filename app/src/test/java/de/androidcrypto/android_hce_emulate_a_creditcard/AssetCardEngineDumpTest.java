@@ -160,18 +160,20 @@ public class AssetCardEngineDumpTest {
 
         // Provenance, not a mask: profile.json's own captured AIP is 3C00
         // (0011_1100 - DDA(0x20) and Issuer Authentication(0x04) already
-        // set, CV(0x10)/TRM(0x08) too). With tag 93 present, SDA(0x40) is
-        // set and DDA(0x20) is cleared; CDA(0x01) is always cleared (was
-        // already 0 here); every other bit is carried over unchanged ->
-        // 0x3C | 0x40 = 0x7C, & ~0x20 = 0x5C. Byte 2 is the source's own (00).
-        assertTrue(send(GPO).startsWith("771282025C00940C080202001001020018010201"));
-        assertEquals("5C00", eng.aip());
-        assertEquals("5C00", eng.tag("82"));
+        // set, CV(0x10)/TRM(0x08) too). CDA(0x01) and Issuer Authentication
+        // (0x04) are always cleared in dump mode (0x04 needs an ARPC from
+        // the issuer's own authorisation network, which a dump cannot
+        // obtain any more than it can sign a cryptogram) -> 0x38. With tag
+        // 93 present, SDA(0x40) is then set and DDA(0x20) cleared:
+        // 0x38 | 0x40 = 0x78, & ~0x20 = 0x58. Byte 2 is the source's own (00).
+        assertTrue(send(GPO).startsWith("771282025800940C080202001001020018010201"));
+        assertEquals("5800", eng.aip());
+        assertEquals("5800", eng.tag("82"));
         int b1 = Integer.parseInt(eng.aip().substring(0, 2), 16);
         assertEquals("SDA bit", 0x40, b1 & 0x40);
         assertEquals("DDA bit", 0, b1 & 0x20);
         assertEquals("CDA bit", 0, b1 & 0x01);
-        assertEquals("Issuer Authentication bit carried from the source", 0x04, b1 & 0x04);
+        assertEquals("Issuer Authentication bit, cleared even though the source had it", 0, b1 & 0x04);
 
         assertFalse("no CA key was given to loadDump(), so this must not claim to verify",
                 eng.lastDumpVerify().ok);
@@ -193,13 +195,16 @@ public class AssetCardEngineDumpTest {
         // No tag 93, so nothing supersedes the source's own SDA/DDA bits:
         // the provenance rule leaves them exactly as the source card had
         // them. profile.json's captured AIP (3C00) already had DDA(0x20)
-        // set and SDA(0x40) clear, so the served AIP is unchanged - still
-        // 3C00 - even though this engine cannot back that DDA claim.
-        assertEquals("3C00", eng.aip());
+        // set and SDA(0x40) clear. CDA(0x01) and Issuer Authentication
+        // (0x04) are still always cleared in dump mode regardless (0x04
+        // needs an ARPC a dump cannot obtain) - 0x01 was already 0 here,
+        // 0x04 was not, so 3C00 becomes 3800, not unchanged.
+        assertEquals("3800", eng.aip());
         int b1 = Integer.parseInt(eng.aip().substring(0, 2), 16);
         assertEquals("SDA bit", 0, b1 & 0x40);
         assertEquals("DDA bit, preserved from the source", 0x20, b1 & 0x20);
         assertEquals("CDA bit", 0, b1 & 0x01);
+        assertEquals("Issuer Authentication bit, cleared even though the source had it", 0, b1 & 0x04);
 
         send(GPO);
         // 6985, not 6D00: the card still claims DDA (see above), so this is
@@ -211,7 +216,7 @@ public class AssetCardEngineDumpTest {
     public void clearDump_restoresTheSchemeOnlyAip() throws Exception {
         eng.loadDump(dumpBlob(true), null);
         send(SELECT_AID);
-        assertEquals("5C", eng.aip().substring(0, 2));
+        assertEquals("58", eng.aip().substring(0, 2));
 
         eng.clearDump();
         send(SELECT_AID);
