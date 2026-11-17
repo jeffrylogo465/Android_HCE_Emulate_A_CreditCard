@@ -33,6 +33,7 @@ public class ShadowApduServiceAssetCardTest {
 
     private void start(boolean assetCard) {
         Prefs.reset(RuntimeEnvironment.getApplication());
+        AssetCardHolder.reset();
         if (assetCard) {
             Prefs.get(RuntimeEnvironment.getApplication()).edit()
                     .putString("asset_profile", "1").commit();

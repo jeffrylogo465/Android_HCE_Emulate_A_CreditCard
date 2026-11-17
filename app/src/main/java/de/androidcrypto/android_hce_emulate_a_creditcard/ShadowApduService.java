@@ -1813,8 +1813,6 @@ public class ShadowApduService extends HostApduService {
      */
     private static final String PREF_ASSET_SCHEME = "asset_scheme";
 
-    private AssetCardEngine assetCard;
-
     private boolean assetCardOn() {
         try {
             return "1".equals(prefs().getString(PREF_ASSET_PROFILE, ""));
@@ -1833,23 +1831,20 @@ public class ShadowApduService extends HostApduService {
         return AssetSchemeProfile.MASTERCARD;
     }
 
+    /**
+     * Process-wide now, not a service-private field - see AssetCardHolder.
+     * MainActivity reaches the same instance through the same holder, so a
+     * dump it loads is the card this method, and every tap, actually serves.
+     */
     private AssetCardEngine assetCard() throws java.io.IOException {
-        if (assetCard == null) {
-            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET);
-                 java.io.InputStream key = getAssets().open(AssetCardEngine.ICC_KEY_ASSET)) {
-                assetCard = AssetCardEngine.load(in, key);
-            }
-            String saved = prefs().getString(PREF_ASSET_ATC, "");
-            if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));
-        }
-        return assetCard;
+        return AssetCardHolder.get(this);
     }
 
     /** Written with commit(): a tap that dies right after the GPO must not reuse the ATC. */
     @android.annotation.SuppressLint("ApplySharedPref")
-    private void persistAssetAtc() {
+    private void persistAssetAtc() throws java.io.IOException {
         prefs().edit().putString(PREF_ASSET_ATC,
-                String.format(java.util.Locale.US, "%04X", assetCard.atc())).commit();
+                String.format(java.util.Locale.US, "%04X", assetCard().atc())).commit();
     }
 
     @Override

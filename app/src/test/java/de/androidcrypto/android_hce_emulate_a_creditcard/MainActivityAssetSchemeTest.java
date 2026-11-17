@@ -28,6 +28,7 @@ public class MainActivityAssetSchemeTest {
     @Before
     public void setUp() {
         Prefs.reset(RuntimeEnvironment.getApplication());
+        AssetCardHolder.reset();
     }
 
     private MainActivity create() {
