@@ -1,0 +1,290 @@
+package de.androidcrypto.android_hce_emulate_a_creditcard;
+
+import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+
+/**
+ * Offline data authentication per EMV Book 2: the issuer and ICC certificate
+ * chains, the Signed Dynamic Application Data (DDA) and the Signed Static
+ * Application Data (SDA). Pure Java, no Android types. Hash is SHA-1 (algo 01).
+ *
+ * Nothing here hardcodes a key or certificate length. They come from the
+ * recovered block and from the key the block was recovered with.
+ *
+ * Hash ranges (all start at the format byte, offset 1):
+ *   issuer: block[1 .. len-21) || remainder || exponent
+ *   ICC:    block[1 .. len-21) || remainder || exponent || staticData
+ *   SDAD:   block[1 .. len-21) || DDOL data
+ *   SSAD:   block[1 .. len-21) || staticData
+ * The 0xBB padding sits inside block[1 .. len-21), so it IS hashed.
+ */
+public final class OdaVerifier {
+
+    public enum Step {
+        CA_KEY,
+        ISSUER_RECOVER, ISSUER_HEADER, ISSUER_LAYOUT, ISSUER_HASH,
+        ICC_RECOVER, ICC_HEADER, ICC_LAYOUT, ICC_HASH,
+        SDAD_RECOVER, SDAD_HEADER, SDAD_LAYOUT, SDAD_HASH,
+        SSAD_RECOVER, SSAD_HEADER, SSAD_LAYOUT, SSAD_HASH,
+        STATIC_DATA
+    }
+
+    public static final class Result {
+        public final boolean ok;
+        /** First step that failed, null when ok. */
+        public final Step failedStep;
+        public final String detail;
+        /** Recovered issuer or ICC public key modulus (certificate steps). */
+        public final byte[] modulus;
+        /** PAN field of the ICC certificate (10 bytes, as stored). */
+        public final byte[] pan;
+        /** ICC Dynamic Data (SDAD) */
+        public final byte[] dynamicData;
+        /** Data Authentication Code (SSAD) */
+        public final byte[] dac;
+
+        private Result(boolean ok, Step s, String d, byte[] modulus, byte[] pan, byte[] dyn, byte[] dac) {
+            this.ok = ok;
+            this.failedStep = s;
+            this.detail = d;
+            this.modulus = modulus;
+            this.pan = pan;
+            this.dynamicData = dyn;
+            this.dac = dac;
+        }
+
+        static Result fail(Step s, String d) {
+            return new Result(false, s, d, null, null, null, null);
+        }
+
+        @Override
+        public String toString() {
+            return ok ? "OK" : failedStep + ": " + detail;
+        }
+    }
+
+    public interface RecordSource {
+        /** @return the full record (including its 70 template) or null when absent. */
+        byte[] read(int sfi, int record);
+    }
+
+    private static final int ISSUER_HEADER_LEN = 15;
+    private static final int ICC_HEADER_LEN = 21;
+    private static final int TRAILER_LEN = 21; // 20 hash + BC
+
+    private OdaVerifier() {
+    }
+
+    // ------------------------------------------------------------------ issuer
+
+    /**
+     * @param cert      tag 90, as long as the CA modulus
+     * @param remainder tag 92, null or empty when absent
+     * @param exponent  tag 9F32
+     */
+    public static Result verifyIssuerCert(CaKeySet.Key ca, byte[] cert, byte[] remainder, byte[] exponent) {
+        if (ca == null) return Result.fail(Step.CA_KEY, "no CA key for this RID/index");
+        return verifyCert("ISSUER", (byte) 0x02, ISSUER_HEADER_LEN, ca.modulus, ca.exponent,
+                cert, remainder, exponent, new byte[0]);
+    }
+
+    /**
+     * @param issuerModulus   recovered by {@link #verifyIssuerCert}
+     * @param issuerExponent  tag 9F32
+     * @param cert            tag 9F46, as long as the issuer modulus
+     * @param remainder       tag 9F48, null or empty when absent
+     * @param iccExponent     tag 9F47
+     * @param staticData      from {@link #buildStaticData}
+     */
+    public static Result verifyIccCert(byte[] issuerModulus, byte[] issuerExponent, byte[] cert,
+                                       byte[] remainder, byte[] iccExponent, byte[] staticData) {
+        return verifyCert("ICC", (byte) 0x04, ICC_HEADER_LEN, issuerModulus, issuerExponent,
+                cert, remainder, iccExponent, staticData);
+    }
+
+    private static Result verifyCert(String p, byte format, int hdr, byte[] mod, byte[] e,
+                                     byte[] cert, byte[] remainder, byte[] exponent, byte[] extra) {
+        Step recoverStep = Step.valueOf(p + "_RECOVER");
+        Step headerStep = Step.valueOf(p + "_HEADER");
+        Step layoutStep = Step.valueOf(p + "_LAYOUT");
+        Step hashStep = Step.valueOf(p + "_HASH");
+        byte[] rem = remainder == null ? new byte[0] : remainder;
+
+        byte[] b = recover(mod, e, cert);
+        if (b == null) return Result.fail(recoverStep, "signature length " + cert.length + " vs modulus " + mod.length);
+        int len = b.length;
+        if (b[0] != 0x6A) return Result.fail(headerStep, "header byte is not 6A");
+        if (b[1] != format) return Result.fail(headerStep, "format byte is not " + hex(format));
+        if (b[len - 1] != (byte) 0xBC) return Result.fail(headerStep, "trailer byte is not BC");
+        if (b[hdr - 4] != 0x01) return Result.fail(headerStep, "hash algorithm indicator is not 01 (SHA-1)");
+
+        int keyLen = b[hdr - 2] & 0xFF;
+        int expLen = b[hdr - 1] & 0xFF;
+        if (expLen != exponent.length) {
+            return Result.fail(layoutStep, "exponent length field " + expLen + " vs supplied " + exponent.length);
+        }
+        int leftmost = keyLen - rem.length;
+        if (leftmost < 0) return Result.fail(layoutStep, "remainder longer than key length");
+        int region = len - hdr - TRAILER_LEN;           // bytes between header and hash
+        int pad = region - leftmost;
+        if (pad < 0) return Result.fail(layoutStep, "leftmost digits overrun the certificate");
+        if (hdr + leftmost + pad + TRAILER_LEN != len) {
+            return Result.fail(layoutStep, "header + leftmost + pad + 21 != cert length");
+        }
+        if (rem.length > 0 && pad != 0) {
+            return Result.fail(layoutStep, "remainder present but " + pad + " pad bytes");
+        }
+        for (int i = hdr + leftmost; i < len - TRAILER_LEN; i++) {
+            if (b[i] != (byte) 0xBB) return Result.fail(layoutStep, "pad byte at " + i + " is not BB");
+        }
+
+        byte[] expected = sha1(slice(b, 1, len - TRAILER_LEN), rem, exponent, extra);
+        byte[] actual = slice(b, len - TRAILER_LEN, len - 1);
+        if (!Arrays.equals(expected, actual)) return Result.fail(hashStep, "hash mismatch");
+
+        ByteArrayOutputStream m = new ByteArrayOutputStream();
+        m.write(b, hdr, leftmost);
+        m.write(rem, 0, rem.length);
+        byte[] pan = format == 0x04 ? slice(b, 2, 12) : null;
+        return new Result(true, null, "", m.toByteArray(), pan, null, null);
+    }
+
+    // -------------------------------------------------------------------- SDAD
+
+    /**
+     * @param iccModulus  recovered by {@link #verifyIccCert}
+     * @param sdad        tag 9F4B
+     * @param ddolData    the terminal data the DDOL asked for (e.g. the UN)
+     */
+    public static Result verifySdad(byte[] iccModulus, byte[] iccExponent, byte[] sdad, byte[] ddolData) {
+        byte[] b = recover(iccModulus, iccExponent, sdad);
+        if (b == null) return Result.fail(Step.SDAD_RECOVER, "signature length " + sdad.length + " vs modulus " + iccModulus.length);
+        int len = b.length;
+        if (b[0] != 0x6A || b[1] != 0x05 || b[len - 1] != (byte) 0xBC) {
+            return Result.fail(Step.SDAD_HEADER, "not 6A 05 .. BC");
+        }
+        if (b[2] != 0x01) return Result.fail(Step.SDAD_HEADER, "hash algorithm indicator is not 01 (SHA-1)");
+        int ldd = b[3] & 0xFF;
+        int padStart = 4 + ldd;
+        if (padStart > len - TRAILER_LEN) return Result.fail(Step.SDAD_LAYOUT, "dynamic data overruns the block");
+        for (int i = padStart; i < len - TRAILER_LEN; i++) {
+            if (b[i] != (byte) 0xBB) return Result.fail(Step.SDAD_LAYOUT, "pad byte at " + i + " is not BB");
+        }
+        byte[] expected = sha1(slice(b, 1, len - TRAILER_LEN), ddolData);
+        if (!Arrays.equals(expected, slice(b, len - TRAILER_LEN, len - 1))) {
+            return Result.fail(Step.SDAD_HASH, "hash mismatch");
+        }
+        return new Result(true, null, "", null, null, slice(b, 4, padStart), null);
+    }
+
+    // -------------------------------------------------------------------- SSAD
+
+    /**
+     * @param issuerModulus recovered by {@link #verifyIssuerCert}
+     * @param ssad          tag 93
+     */
+    public static Result verifySsad(byte[] issuerModulus, byte[] issuerExponent, byte[] ssad, byte[] staticData) {
+        byte[] b = recover(issuerModulus, issuerExponent, ssad);
+        if (b == null) return Result.fail(Step.SSAD_RECOVER, "signature length " + ssad.length + " vs modulus " + issuerModulus.length);
+        int len = b.length;
+        if (b[0] != 0x6A || b[1] != 0x03 || b[len - 1] != (byte) 0xBC) {
+            return Result.fail(Step.SSAD_HEADER, "not 6A 03 .. BC");
+        }
+        if (b[2] != 0x01) return Result.fail(Step.SSAD_HEADER, "hash algorithm indicator is not 01 (SHA-1)");
+        // 6A, 03, hash algo, DAC(2), pad BB.., hash(20), BC
+        for (int i = 5; i < len - TRAILER_LEN; i++) {
+            if (b[i] != (byte) 0xBB) return Result.fail(Step.SSAD_LAYOUT, "pad byte at " + i + " is not BB");
+        }
+        byte[] expected = sha1(slice(b, 1, len - TRAILER_LEN), staticData);
+        if (!Arrays.equals(expected, slice(b, len - TRAILER_LEN, len - 1))) {
+            return Result.fail(Step.SSAD_HASH, "hash mismatch");
+        }
+        return new Result(true, null, "", null, null, null, slice(b, 3, 5));
+    }
+
+    // -------------------------------------------------------------- static data
+
+    /**
+     * Static data to be authenticated: the records the AFL flags for offline
+     * data authentication, in AFL order (SFI 1-10: contents of the 70 template;
+     * SFI 11+: the whole record), then the AIP only if the 9F4A tag list is
+     * exactly tag 82. The AFL itself is not hashed. No padding is added; see
+     * the note in the commit message.
+     *
+     * @param sdaTagList tag 9F4A, null when the card has none
+     * @return the bytes, or null when a flagged record is missing or malformed
+     */
+    public static byte[] buildStaticData(byte[] afl, RecordSource records, byte[] aip, byte[] sdaTagList) {
+        if (afl.length % 4 != 0) return null;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (int i = 0; i < afl.length; i += 4) {
+            int sfi = (afl[i] & 0xFF) >> 3;
+            int first = afl[i + 1] & 0xFF;
+            int count = afl[i + 3] & 0xFF;   // records involved in offline data authentication
+            for (int r = first; r < first + count; r++) {
+                byte[] rec = records.read(sfi, r);
+                if (rec == null) return null;
+                if (sfi >= 1 && sfi <= 10) {
+                    int off = templateContentOffset(rec);
+                    if (off < 0) return null;
+                    out.write(rec, off, rec.length - off);
+                } else {
+                    out.write(rec, 0, rec.length);
+                }
+            }
+        }
+        if (sdaTagList != null && sdaTagList.length > 0) {
+            if (sdaTagList.length != 1 || sdaTagList[0] != (byte) 0x82) return null;
+            out.write(aip, 0, aip.length);
+        }
+        return out.toByteArray();
+    }
+
+    /** Offset of the content after tag 70 and its length bytes, or -1. */
+    private static int templateContentOffset(byte[] rec) {
+        if (rec.length < 2 || rec[0] != 0x70) return -1;
+        int l = rec[1] & 0xFF;
+        int off;
+        if (l < 0x80) off = 2;
+        else if (l == 0x81) off = 3;
+        else if (l == 0x82) off = 4;
+        else return -1;
+        return off <= rec.length ? off : -1;
+    }
+
+    // ----------------------------------------------------------------- helpers
+
+    /** Raw RSA public operation; null if the input is not exactly modulus-long or is >= modulus. */
+    static byte[] recover(byte[] modulus, byte[] exponent, byte[] sig) {
+        if (sig.length != modulus.length) return null;
+        BigInteger n = new BigInteger(1, modulus);
+        BigInteger s = new BigInteger(1, sig);
+        if (s.compareTo(n) >= 0) return null;
+        byte[] raw = s.modPow(new BigInteger(1, exponent), n).toByteArray();
+        byte[] out = new byte[modulus.length];
+        int copy = Math.min(raw.length, out.length);
+        System.arraycopy(raw, raw.length - copy, out, out.length - copy, copy);
+        return out;
+    }
+
+    private static byte[] sha1(byte[]... parts) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-1");
+            for (byte[] p : parts) md.update(p);
+            return md.digest();
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    private static byte[] slice(byte[] b, int from, int to) {
+        return Arrays.copyOfRange(b, from, to);
+    }
+
+    private static String hex(byte b) {
+        return String.format("%02X", b & 0xFF);
+    }
+}
