@@ -2236,7 +2236,14 @@ public class ShadowApduService extends HostApduService {
             if (capMsd == msd) {
                 // A captured card's own ODA bits survive a replay untouched
                 // otherwise, and every one of them is a check we cannot pass.
-                if (!capMsd) Emv.clearOda(raw);
+                if (!capMsd) {
+                    Emv.clearOda(raw);
+                    // F02, same argument as F01: the synthetic/boxed-AIP
+                    // branch (below) ORs this bit in too, through the same
+                    // Emv.setCdcvm() - one behaviour, no drift between the
+                    // two paths on what "CDCVM is set" means.
+                    Emv.setCdcvm(raw);
+                }
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
@@ -2317,13 +2324,11 @@ public class ShadowApduService extends HostApduService {
         if (!msd) {
             byte[] wrap = tlv(0x77, tlv(0x82, used));
             Emv.clearOda(wrap);
+            // F02, same argument as F01: through Emv.setCdcvm(), the same
+            // method the captured-replay branch above now calls, so the two
+            // paths cannot drift on what "CDCVM is set" means either.
+            Emv.setCdcvm(wrap);
             used = capturedAip(wrap);
-
-            // F02: on-device CVM (CDCVM) support, so a tap can clear CVM
-            // without a signature prompt this app cannot show. Emv.AIP_CDCVM
-            // names the bit so it cannot drift from clearOda's own mask,
-            // which deliberately excludes it (see Emv.AIP_CDCVM's doc).
-            used = new byte[]{(byte) (used[0] | Emv.AIP_CDCVM), used[1]};
         }
 
         // MSD: a profile that declares its own MSD AIP wins outright. Under

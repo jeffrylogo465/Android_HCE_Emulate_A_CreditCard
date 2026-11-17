@@ -355,4 +355,34 @@ public class ShadowApduServicePpseTest {
         String list = rec.substring(rAt, rAt + 24);
         assertEquals("00000000000000005E071F03", list);
     }
+
+    /**
+     * F02, the captured-replay branch's half of the same fix: a captured
+     * GPO (card0_cap_rawgpo) with CDCVM clear must come back with it set,
+     * through the same Emv.setCdcvm() the synthetic branch above now also
+     * calls - one behaviour for both paths, the same argument F01 already
+     * established for clearOda().
+     */
+    @Test
+    public void capturedGpoReplay_setsCdcvmBitToo() {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_cap_rawgpo", "770F82027D009404080101009F36020001").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must still be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must still be cleared", 0, b1 & 0x20);
+        assertEquals("CDA bit must still be cleared", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x1A00 - 0x18 survivors plus the CDCVM bit", "1A00", aip);
+    }
 }

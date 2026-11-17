@@ -144,12 +144,33 @@ final class Emv {
      * set - both now use this one mask, so they cannot drift apart on it.
      */
     static void clearOda(byte[] tpl) {
+        editAipByte1(tpl, b -> (byte) (b & ~0x65));
+    }
+
+    /**
+     * Set the CDCVM bit (AIP_CDCVM) on a GPO template's AIP byte 1, in
+     * place - same walk as clearOda(), same two call sites (the
+     * captured-replay branch and the synthetic/boxed-AIP branch in the
+     * service), so the two cannot drift on what "CDCVM is set" means
+     * either, the same argument that gave clearOda() a single shared mask.
+     */
+    static void setCdcvm(byte[] tpl) {
+        editAipByte1(tpl, b -> (byte) (b | AIP_CDCVM));
+    }
+
+    /**
+     * The one AIP-byte-1 walk clearOda() and setCdcvm() both run: format 1
+     * (outer 80, no inner TLVs, two raw AIP bytes then the track 2) or
+     * format 2 (find the inner 0x82). Shared so the two edits cannot find
+     * the byte differently from one another.
+     */
+    private static void editAipByte1(byte[] tpl, java.util.function.UnaryOperator<Byte> edit) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x65;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] = edit.apply(tpl[pos[0]]);
             return;
         }
 
@@ -160,7 +181,7 @@ final class Emv {
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~0x65;
+                tpl[q[0]] = edit.apply(tpl[q[0]]);
                 return;
             }
             i = q[0] + l;
