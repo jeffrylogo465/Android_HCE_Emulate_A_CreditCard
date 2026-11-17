@@ -61,20 +61,23 @@ public class EmvTest {
     }
 
     /**
-     * Only 0x40, 0x20 and 0x01 go. Everything else in byte 1 survives.
+     * Only 0x40, 0x20, 0x04 and 0x01 go. Everything else in byte 1 survives.
      *
      * 0x9F is 0x80 RFU | 0x10 CV | 0x08 TRM | 0x04 issuer auth | 0x02 CVM |
-     * 0x01 CDA | 0x20 DDA | 0x40 SDA. Expected 0x9E.
+     * 0x01 CDA | 0x20 DDA | 0x40 SDA. Issuer Authentication needs an ARPC a
+     * clone cannot produce either, same reasoning as the other three.
+     * Expected 0x9A.
      */
     @Test
     public void clearOdaKeepsTheBitsACloneCanHonour() {
         byte[] tpl = Emv.hex("770A82029F00940408010100");
         Emv.clearOda(tpl);
         byte[] aip = Emv.findTag(tpl, 0x82);
-        assertEquals(0x9E, aip[0] & 0xFF);
+        assertEquals(0x9A, aip[0] & 0xFF);
         assertEquals(0x80, aip[0] & 0x80);
         assertEquals(0x10, aip[0] & 0x10);
         assertEquals(0x08, aip[0] & 0x08);
+        assertEquals(0, aip[0] & 0x04);
     }
 
     /** An AIP already free of ODA bits is unchanged. */

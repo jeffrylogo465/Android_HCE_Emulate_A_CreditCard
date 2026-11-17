@@ -279,18 +279,19 @@ public class ShadowApduServicePpseTest {
     // ---- F01: the synthetic GPO branch must clear ODA bits too ----
 
     /**
-     * A typed/boxed AIP with SDA(0x40)/DDA(0x20)/CDA(0x01) all set must come
-     * back with those three cleared and CV(0x10)/TRM(0x08)/Issuer Auth(0x04)
-     * untouched - the same mask the captured-replay branch already applies
-     * via Emv.clearOda() at gpo()'s line 2248. This engine has no cert chain
-     * and no CA key, so claiming any of the three bought nothing but a
+     * A typed/boxed AIP with SDA(0x40)/DDA(0x20)/Issuer Auth(0x04)/CDA(0x01)
+     * all set must come back with all four cleared and CV(0x10)/TRM(0x08)
+     * untouched - Emv.clearOda()'s mask is now 0x65, not 0x61, so this
+     * branch and the captured-replay branch (gpo()'s line 2248) agree on
+     * what "cleared" means. This engine has no cert chain, no CA key and no
+     * way to get an ARPC, so claiming any of the four bought nothing but a
      * failed ODA attempt on a real terminal.
      */
     @Test
-    public void syntheticGpo_clearsOdaBitsOnATypedAip_keepsCvTrmIssuerAuth() {
-        // 0x7D = 0111_1101: SDA/DDA/CDA (0x40/0x20/0x01) set, plus
-        // CV/TRM/IssuerAuth (0x10/0x08/0x04) also set, so the test can tell
-        // "cleared" from "never there in the first place".
+    public void syntheticGpo_clearsOdaBitsOnATypedAip_keepsCvAndTrm() {
+        // 0x7D = 0111_1101: SDA/DDA/IssuerAuth/CDA (0x40/0x20/0x04/0x01) set,
+        // plus CV/TRM (0x10/0x08) also set, so the test can tell "cleared"
+        // from "never there in the first place".
         Prefs.get(RuntimeEnvironment.getApplication()).edit()
                 .putString("card0_aip", "7D00").commit();
         disableDefaultProfileScript();
@@ -307,10 +308,10 @@ public class ShadowApduServicePpseTest {
 
         assertEquals("SDA bit must be cleared", 0, b1 & 0x40);
         assertEquals("DDA bit must be cleared", 0, b1 & 0x20);
+        assertEquals("Issuer Authentication bit must be cleared", 0, b1 & 0x04);
         assertEquals("CDA bit must be cleared", 0, b1 & 0x01);
         assertEquals("CV bit must survive", 0x10, b1 & 0x10);
         assertEquals("TRM bit must survive", 0x08, b1 & 0x08);
-        assertEquals("Issuer Authentication bit must survive", 0x04, b1 & 0x04);
-        assertEquals("0x1C00 exactly", "1C00", aip);
+        assertEquals("0x1800 exactly", "1800", aip);
     }
 }

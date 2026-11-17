@@ -116,9 +116,12 @@ final class Emv {
     /**
      * Clear the ODA bits in the AIP of a GPO template, in place.
      *
-     * SDA 0x40, DDA 0x20 and CDA 0x01 together, as one mask of 0x61. A clone
-     * with no certificates can pass none of the three, and an AIP that claims
-     * one buys a failed ODA attempt and a TVR bit rather than a clean start.
+     * SDA 0x40, DDA 0x20, Issuer Authentication 0x04 and CDA 0x01 together,
+     * as one mask of 0x65. A clone with no certificates can pass none of the
+     * three ODA methods, and Issuer Authentication needs an ARPC from the
+     * issuer's own authorisation network - also not something a clone with
+     * no real key can produce - so an AIP that claims any of the four buys a
+     * failed ODA attempt and a TVR bit rather than a clean start.
      *
      * FIX: this used to clear 0x01 only, so SDA and DDA survived and a captured
      * card replayed its own claims verbatim.
@@ -126,6 +129,11 @@ final class Emv {
      * FIX: format 1 (outer 80) has NO inner TLVs - the payload is two raw AIP
      * bytes then the track 2. The old TLV walk found no 82, returned, and left
      * CDA set in MSD mode.
+     *
+     * FIX: 0x04 (Issuer Authentication) was not in the mask, so the
+     * captured-replay branch and the synthetic/boxed-AIP branch disagreed on
+     * what "cleared" meant the moment a captured card's own AIP had that bit
+     * set - both now use this one mask, so they cannot drift apart on it.
      */
     static void clearOda(byte[] tpl) {
         int[] pos = new int[1];
@@ -133,7 +141,7 @@ final class Emv {
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x61;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x65;
             return;
         }
 
@@ -144,7 +152,7 @@ final class Emv {
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~0x61;
+                tpl[q[0]] &= (byte) ~0x65;
                 return;
             }
             i = q[0] + l;
