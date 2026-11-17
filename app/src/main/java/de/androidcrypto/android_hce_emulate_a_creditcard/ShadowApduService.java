@@ -128,6 +128,15 @@ public class ShadowApduService extends HostApduService {
      * FORCE_OFFLINE_TC is the one flag of the two that is a PREF, see
      * forceOfflineTc(). It changes what the card tells a terminal, and whether
      * an offline approve is wanted depends on the shop, not on the build.
+     *
+     * Stays false. Going online with no real IMK-AC is not IMPOSSIBLE - the
+     * acInGpo path (qVSDC, AC-in-GPO) already does it without consulting
+     * haveKey() at all, and this flag would do it deliberately for the
+     * GENERATE AC path too - it is POINTLESS: the issuer gets a cryptogram
+     * that cannot verify and declines, same zero-ARQC outcome either way,
+     * just reached a step later and with a tap that looked, locally, like it
+     * might succeed. Forcing it on would not break anything new; it would
+     * just manufacture a decline this card can already produce for free.
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
 
@@ -164,14 +173,21 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * CVM list. Amount X and Amount Y are both 000003E8 (10.00 in minor
-     * units), then two rules: 1F 06 no CVM if the transaction is under X,
-     * 1E 07 signature if it is over X. Conditions 06 and 07 are the amount
-     * tests; 03 ("if the terminal supports the CVM") is always true for No CVM
-     * and would make rule 1 win every time. Signature cannot fail, so the
-     * fallback sets no TVR bit. Twelve bytes - the two amount fields are
-     * mandatory.
+     * units, unused by either rule below - the two amount fields are
+     * mandatory regardless), then two rules:
+     *   5E 03 - signature (continue to the next rule if unsuccessful),
+     *           if the terminal supports the CVM.
+     *   1F 03 - no CVM required, if the terminal supports the CVM.
+     * Both conditions are 03 ("if the terminal supports the CVM") on
+     * purpose this time, not the bug the amount-gated 06/07 list before this
+     * one fixed: rule 1 is meant to win unconditionally, pairing with
+     * Mastercard's EMV-path TC default (see MainActivity.cidDefault()) so
+     * Kernel 2's TAC path has a CVM to carry rather than skipping straight to
+     * No CVM Required. Rule 1's continue bit is set so a terminal that
+     * somehow does not support signature still reaches rule 2, which every
+     * terminal trivially supports - the list always resolves to something.
      */
-    private static final String CVMLIST = "000003E8000003E81F061E07";
+    private static final String CVMLIST = "000003E8000003E85E031F03";
 
     /** Documentation only - the terminal owns 9F34 and sends it in CDOL1. */
     private static final String CVM_RESULTS = "1F0302";
@@ -3048,11 +3064,11 @@ public class ShadowApduService extends HostApduService {
      * 9F13 is the last-online-ATC register, two bytes. 0000 means "never been
      * online", which is the correct state for a fresh card.
      *
-     * 9F17 is deliberately ABSENT. The CVM list is 1F06 / 1E07 - no CVM below
-     * the limit, signature above - so nothing here ever consumes an offline
-     * PIN and there is no counter to report. 00 is the one value that means
-     * "zero tries left", a different claim from "no PIN capability", so the tag
-     * falls through to 6A88 instead.
+     * 9F17 is deliberately ABSENT. The CVM list is 5E03 / 1F03 - signature,
+     * falling through to no CVM required - so nothing here ever consumes an
+     * offline PIN and there is no counter to report. 00 is the one value that
+     * means "zero tries left", a different claim from "no PIN capability", so
+     * the tag falls through to 6A88 instead.
      */
     private byte[] getData(byte[] apdu) {
         int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);

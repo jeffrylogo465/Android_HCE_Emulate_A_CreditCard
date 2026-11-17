@@ -27,6 +27,24 @@ public final class Profiles {
     // the bit cannot be cleared the way Mastercard's can. The consequence is a
     // failed ODA attempt, the TVR bit, and the CTQ's b6 sending the tap online -
     // which is why the CID below follows the key rather than a constant.
+    //
+    // Because of exactly that, this is no longer what a Visa slot gets by
+    // default - MainActivity.msdDefault() now starts Visa on MSD (1880) and
+    // leaves this constant reachable only by typing 0 into the per-slot MSD
+    // box. The constant itself, and its bug, are unchanged; only which path a
+    // fresh Visa tap takes without being asked has moved.
+    //
+    // DOCUMENTED LATER OPTION, NOT DONE HERE: qVSDC's ODA failure is a missing
+    // certificate, not an unfixable architectural gap - a card's own DDA
+    // chain (an ICC key pair plus an issuer cert signed by a CA this app
+    // injects, the same shape DumpChain/OdaVerifier/CaKeySet already parse
+    // and verify for the asset-card dump path) would let this profile answer
+    // INTERNAL AUTHENTICATE for real and clear the SDA/DDA bits correctly -
+    // SDA clear, DDA set, backed by an actual signature - instead of leaving
+    // 0x40 overloaded between "qVSDC supported" and "SDA supported, with no
+    // certificate to back it." That is new plumbing specific to this
+    // script-driven Visa profile (its own key pair, its own cert, its own
+    // CA entry) and is not part of this change.
     private static final String AIP_VISA = "5800";
 
     // One AFL entry, TLV-wrapped: SFI 1, rec 1 to 1, none for offline auth.

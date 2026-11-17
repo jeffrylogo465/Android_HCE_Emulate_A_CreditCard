@@ -66,32 +66,55 @@ public class ShadowApduServiceDispatchTest {
                 "70818D9F420208405F24033112015A0841111111111111115F3401019F0702FFC0"
                         + "9F080200028C159F02069F03069F1A0295055F2A029A039C019F37048D18"
                         + "9F02069F03069F1A0295055F2A029A039C019F37049F34038E0C"
-                        + "000003E8" + "000003E8" + "1F061E079F0D0500000000009F0E0500000000009F0F05"
+                        + "000003E8" + "000003E8" + "5E031F039F0D0500000000009F0E0500000000009F0F05"
                         + "00000000005F28020840570C4111111111111111D31122019000",
                 Hex.toHex(send("00B2010C00")));
     }
 
-    /** Terminal-side CVM rule walk for the amount-only conditions 06 and 07. */
+    /**
+     * Terminal-side CVM rule walk. Condition 03 ("if the terminal supports
+     * the CVM") always hits here - this harness has no notion of a terminal
+     * that lacks signature or No CVM Required support - so it exists to
+     * prove the LIST ORDER decides, not amount: rule 1 (signature) is always
+     * reached first and always hits, same as a real terminal would resolve
+     * it, regardless of the transaction amount.
+     */
     private static String cvmChosen(String list, long amount) {
         long x = Long.parseLong(list.substring(0, 8), 16);
         long y = Long.parseLong(list.substring(8, 16), 16);
         for (int i = 16; i < list.length(); i += 4) {
             int method = Integer.parseInt(list.substring(i, i + 2), 16) & 0x3F;
             int cond = Integer.parseInt(list.substring(i + 2, i + 4), 16);
-            boolean hit = (cond == 0x06 && amount < x) || (cond == 0x07 && amount > y);
+            boolean hit = cond == 0x03 || (cond == 0x06 && amount < x) || (cond == 0x07 && amount > y);
             if (hit) return String.format("%02X", method);
         }
         return "none";
     }
 
+    /**
+     * Signature (5E03) is rule 1 with condition 03, so it wins at any
+     * amount - this list is no longer amount-gated, on purpose (see
+     * ShadowApduService.CVMLIST). No CVM Required (1F03) is rule 2, reached
+     * only if rule 1's continue bit let a terminal fall through it - this
+     * test cannot exercise that without a terminal that lacks signature
+     * support, so it only proves rule 2 is present and well-formed, not that
+     * it is ever reached by a real one.
+     */
     @Test
-    public void cvmList_underLimitSelectsNoCvm_overLimitSelectsSignature() {
+    public void cvmList_signatureWinsUnconditionally_noCvmIsTheWellFormedFallback() {
         String rec = Hex.toHex(send("00B2010C00"));
         int at = rec.indexOf("8E0C") + 4;
         String list = rec.substring(at, at + 24);
-        assertEquals("000003E8000003E81F061E07", list);
-        assertEquals("1F", cvmChosen(list, 999));
-        assertEquals("1E", cvmChosen(list, 1001));
+        assertEquals("000003E8000003E85E031F03", list);
+        assertEquals("1E", cvmChosen(list, 1));
+        assertEquals("1E", cvmChosen(list, 999));
+        assertEquals("1E", cvmChosen(list, 1000));
+        assertEquals("1E", cvmChosen(list, 1_000_000));
+
+        // Rule 2 on its own: present, well-formed, condition 03.
+        int rule2At = 16 + 4;
+        assertEquals("1F", list.substring(rule2At, rule2At + 2));
+        assertEquals("03", list.substring(rule2At + 2, rule2At + 4));
     }
 
     @Test

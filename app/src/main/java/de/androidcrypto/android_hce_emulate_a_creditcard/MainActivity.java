@@ -543,16 +543,29 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * The profile's own MSD default. Off for Mastercard and Visa, on for Amex.
+     * The profile's own MSD default. Off for Mastercard, on for Visa and Amex.
      *
      * Mastercard is capable of MSD, but the record and script path is a replay:
      * the script carries the cryptogram, so ccc() never runs and the ATC is
      * driven by the DD field instead of by the tap. qVSDC is the default
-     * because it is what a modern terminal does and what the ATC patch is
-     * about. Amex stays on MSD - ExpressPay has no qVSDC shape here.
+     * because it is what a modern terminal does, what the ATC patch is
+     * about, AND because Profiles.AIP_MC (1880) claims no ODA bit - nothing
+     * here invites the failed-SDA path qVSDC Visa has.
+     *
+     * Visa moved to MSD by default for the opposite reason: Profiles.AIP_VISA
+     * (5800) keeps qVSDC's bit set because a Visa kernel rejects the app
+     * without it, and that bit is also the generic SDA bit - with no
+     * certificate behind it, a qVSDC tap fails ODA, picks up the TVR bit and
+     * goes online per the CTQ, where a keyless card's zero ARQC gets
+     * declined (see AIP_VISA's own comment). qVSDC itself is UNCHANGED and
+     * still reachable - typing 0 into the per-slot MSD box keeps it, same as
+     * before this default flipped - it is just no longer what a fresh or
+     * auto-detected Visa slot gets without asking.
+     *
+     * Amex stays on MSD - ExpressPay has no qVSDC shape here.
      */
     private static String msdDefault(String net) {
-        return "AMEX".equals(net) ? "1" : "0";
+        return "AMEX".equals(net) || "VISA".equals(net) ? "1" : "0";
     }
 
     /**
