@@ -137,9 +137,6 @@ public final class OdaVerifier {
         if (hdr + leftmost + pad + TRAILER_LEN != len) {
             return Result.fail(layoutStep, "header + leftmost + pad + 21 != cert length");
         }
-        if (rem.length > 0 && pad != 0) {
-            return Result.fail(layoutStep, "remainder present but " + pad + " pad bytes");
-        }
         for (int i = hdr + leftmost; i < len - TRAILER_LEN; i++) {
             if (b[i] != (byte) 0xBB) return Result.fail(layoutStep, "pad byte at " + i + " is not BB");
         }
@@ -151,6 +148,11 @@ public final class OdaVerifier {
         ByteArrayOutputStream m = new ByteArrayOutputStream();
         m.write(b, hdr, leftmost);
         m.write(rem, 0, rem.length);
+        // ICC-only: the issuer cert has no PAN field at all (Book 2 Table 6 -
+        // confirmed against the real recovered cert, see commit history).
+        // This exists for the DDA verifier (verifyIccCert's PAN comes back
+        // here), not for SDA, which never calls this with format 0x02's PAN
+        // in mind.
         byte[] pan = format == 0x04 ? slice(b, 2, 12) : null;
         return new Result(true, null, "", m.toByteArray(), pan, null, null);
     }

@@ -169,6 +169,21 @@ public class DumpChainTest {
         assertArrayEquals(unsigned(issuerModulus, (issuerModulus.bitLength() + 7) / 8), r.modulus);
     }
 
+    /**
+     * Minimal regression anchor on this exact fixture, separate from the
+     * modulus-equality check above: ca_92.pam's modulus is 176 bytes
+     * (1408-bit), so a real issuer cert recovered under it must come back
+     * exactly that long.
+     */
+    @Test
+    public void verifyIssuerCert_onRealFixture_okAndModulusIs176Bytes() {
+        OdaVerifier.Result r = OdaVerifier.verifyIssuerCert(realCaKey(new byte[]{
+                (byte) 0xAF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF}),
+                Hex.hex(tags.get("90")), Hex.hex(tags.get("92")), Hex.hex(tags.get("9F32")));
+        assertTrue(r.toString(), r.ok);
+        assertEquals(176, r.modulus.length);
+    }
+
     @Test
     public void syntheticDump_fromProfileJson_verifiesSda() throws Exception {
         byte[] staticData = OdaVerifier.buildStaticData(Hex.hex(afl), new OdaVerifier.RecordSource() {

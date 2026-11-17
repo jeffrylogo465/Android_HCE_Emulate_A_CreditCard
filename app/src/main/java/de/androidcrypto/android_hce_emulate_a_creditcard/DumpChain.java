@@ -118,6 +118,11 @@ public final class DumpChain {
         byte[] afl = flat.get(0x94);
         if (afl.length % 4 != 0) return Result.fail("AFL length is not a multiple of 4");
 
+        if (templates70.size() > countAflRecords(afl)) {
+            return Result.fail("AFL names " + countAflRecords(afl)
+                    + " record(s) but the dump has " + templates70.size() + " record template(s) - surplus is not allowed");
+        }
+
         Map<String, byte[]> records = new HashMap<>();
         int next = 0;
         for (int i = 0; i < afl.length; i += 4) {
@@ -134,10 +139,13 @@ public final class DumpChain {
             }
         }
 
+        byte[] caIndexTag = flat.get(0x8F);
+        if (caIndexTag == null || caIndexTag.length < 1) return Result.fail("tag 8F is empty");
+
         byte[] issuerRem = flat.get(0x92);
         byte[] iccRem = flat.get(0x9F48);
         DumpChain c = new DumpChain(
-                flat.get(0x8F)[0] & 0xFF,
+                caIndexTag[0] & 0xFF,
                 flat.get(0x90),
                 issuerRem == null ? new byte[0] : issuerRem,
                 flat.get(0x9F32),
