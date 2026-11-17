@@ -235,9 +235,10 @@ public class MainActivity extends AppCompatActivity {
      * cycle. 250 ms coalesces a typed PAN into one write and is short enough
      * that the wallet card updates before you look at it.
      *
-     * Only the generic field watcher is debounced. Save, Clone, the profile
-     * picker and the arm path still write immediately - they are one-shot and
-     * everything downstream reads the boxes, not prefs.
+     * Only the generic field watcher and the track2/PAN filler below are
+     * debounced. Save, Clone, the profile picker and the arm path still
+     * write immediately - they are one-shot and everything downstream reads
+     * the boxes, not prefs.
      */
     private final android.os.Handler ui =
             new android.os.Handler(android.os.Looper.getMainLooper());
@@ -245,6 +246,15 @@ public class MainActivity extends AppCompatActivity {
     private final Runnable collectNow = new Runnable() {
         @Override public void run() { collect(); }
     };
+
+    /**
+     * Token for the debounced etTrack2/etPan filler (autoFill/maybeProfile/
+     * applyDump/applyCardBlock/seedFromPan) - see where it is posted, below.
+     * A token, not a stored Runnable, because a fresh lambda is posted on
+     * every keystroke; removeCallbacksAndMessages(FILLER_TOKEN) drops
+     * whichever one is still pending regardless of identity.
+     */
+    private static final Object FILLER_TOKEN = new Object();
 
     private void scheduleCollect() {
         ui.removeCallbacks(collectNow);
@@ -389,14 +399,39 @@ public class MainActivity extends AppCompatActivity {
             public void onTextChanged(CharSequence s, int a, int b, int c) { }
             public void afterTextChanged(Editable s) {
                 if (binding || dumping) return;
-                autoFill();
-                maybeProfile();
+                // Debounced: a paste (or fast typing) into etTrack2/etPan
+                // fires this once per character/chunk, and running
+                // applyCardBlock on every intermediate, not-yet-complete
+                // value is wasted work at best and a spurious refusal at
+                // worst. removeCallbacksAndMessages(FILLER_TOKEN) drops
+                // whatever was pending before posting the new one, so only
+                // the value still there 250ms after the last change runs.
+                ui.removeCallbacksAndMessages(FILLER_TOKEN);
+                ui.postDelayed(() -> {
+                    if (binding || dumping) return;
+                    autoFill();
+                    maybeProfile();
 
-                String t2 = t(etTrack2);
-                if (looksLikeFullDump(t2)) applyDump(t2);
-                else if (looksLikeCardBlock(t2)) applyCardBlock(t2);
+                    String t2 = t(etTrack2);
+                    // A captured EMV chain and a bare track 2 can both start
+                    // with a character that reads as a decimal digit - 0x70
+                    // (a real BER template tag) is ALSO the text '7'. Decide
+                    // which this is before either path runs, and refuse
+                    // outright rather than guess when both heuristics agree.
+                    boolean chainLike = looksLikeChain(t2);
+                    boolean track2Like = looksLikeFullDump(t2);
+                    if (chainLike && track2Like) {
+                        status("box: looks like both a chain and a track 2 - refusing to guess", COL_STALE);
+                    } else if (chainLike) {
+                        applyChain(t2);
+                    } else if (track2Like) {
+                        applyDump(t2);
+                    } else if (looksLikeCardBlock(t2)) {
+                        applyCardBlock(t2);
+                    }
 
-                seedFromPan(digits(t(etPan)));
+                    seedFromPan(digits(t(etPan)));
+                }, FILLER_TOKEN, 250);
             }
         };
         etTrack2.addTextChangedListener(filler);
@@ -413,6 +448,24 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.addTextChangedListener(cscTyped);
 
         showPage(0);
+    }
+
+    /**
+     * A captured EMV chain, not a track 2 line - DumpChain.parse()'s own
+     * shape, cheaply: opens with a BER template tag (bit 0x20 set in byte 0
+     * - a captured SELECT FCI, GPO response or READ RECORD response all
+     * start with one) and carries tags 90 (issuer cert) and 9F4B (SDAD)
+     * somewhere in it. A substring check, not a full TLV walk - this only
+     * has to decide which handler to call; DumpChain.parse() inside
+     * applyChain() does the real validation and can still refuse.
+     */
+    private static boolean looksLikeChain(String t2) {
+        if (t2 == null) return false;
+        String hex = t2.replaceAll("\\s", "").toUpperCase(java.util.Locale.ROOT);
+        if (hex.isEmpty() || hex.length() % 2 != 0 || !hex.matches("[0-9A-F]+")) return false;
+        int b0 = Integer.parseInt(hex.substring(0, 2), 16);
+        if ((b0 & 0x20) == 0) return false;
+        return hex.contains("90") && hex.contains("9F4B");
     }
 
     /** A track 2 long enough to carry a CSC and an ATC. */
@@ -543,16 +596,29 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * The profile's own MSD default. Off for Mastercard and Visa, on for Amex.
+     * The profile's own MSD default. Off for Mastercard, on for Visa and Amex.
      *
      * Mastercard is capable of MSD, but the record and script path is a replay:
      * the script carries the cryptogram, so ccc() never runs and the ATC is
      * driven by the DD field instead of by the tap. qVSDC is the default
-     * because it is what a modern terminal does and what the ATC patch is
-     * about. Amex stays on MSD - ExpressPay has no qVSDC shape here.
+     * because it is what a modern terminal does, what the ATC patch is
+     * about, AND because Profiles.AIP_MC (1880) claims no ODA bit - nothing
+     * here invites the failed-SDA path qVSDC Visa has.
+     *
+     * Visa moved to MSD by default for the opposite reason: Profiles.AIP_VISA
+     * (5800) keeps qVSDC's bit set because a Visa kernel rejects the app
+     * without it, and that bit is also the generic SDA bit - with no
+     * certificate behind it, a qVSDC tap fails ODA, picks up the TVR bit and
+     * goes online per the CTQ, where a keyless card's zero ARQC gets
+     * declined (see AIP_VISA's own comment). qVSDC itself is UNCHANGED and
+     * still reachable - typing 0 into the per-slot MSD box keeps it, same as
+     * before this default flipped - it is just no longer what a fresh or
+     * auto-detected Visa slot gets without asking.
+     *
+     * Amex stays on MSD - ExpressPay has no qVSDC shape here.
      */
     private static String msdDefault(String net) {
-        return "AMEX".equals(net) ? "1" : "0";
+        return "AMEX".equals(net) || "VISA".equals(net) ? "1" : "0";
     }
 
     /**
@@ -955,6 +1021,50 @@ public class MainActivity extends AppCompatActivity {
         if (!armed) return;
         status("dump loaded " + d[0] + " " + net
                 + " - record, ATC and script armed. Tap it.", COL_WARM);
+    }
+
+    /**
+     * Paste a captured EMV chain (DumpChain's shape - a SELECT FCI, a GPO
+     * response and the READ RECORD responses, concatenated) into TRACK 2
+     * RAW HEX and it loads into AssetCardHolder's shared AssetCardEngine -
+     * a different card from this slot's own fields, which belong to the
+     * CardProfile/script engine ShadowApduService otherwise runs. Loading
+     * here does NOT turn the asset-card routing on by itself; the
+     * chkAssetCard box still decides whether a tap actually reaches it.
+     *
+     * No CA keyset is wired in here - loadDump(blob, null) always reports
+     * CA_KEY (or NO_AID) from lastDumpVerify(), same as any caller with no
+     * real CA key on file. That is a warning, not a gate: the dump's own
+     * bytes still serve.
+     *
+     * FAILS LOUDLY on purpose - this replaces the one card every tap
+     * answers from while asset-card routing is on, so a silent parse
+     * rejection here is a worse surprise than the quieter status-line-only
+     * refusals applyDump()/applyCardBlock() use for a single slot's own
+     * fields.
+     */
+    private void applyChain(String raw) {
+        // hexToBytes() is lenient (strips non-hex, pads an odd length) - but
+        // looksLikeChain() already proved this exact string is clean,
+        // even-length hex before ever calling here, so that leniency is
+        // moot in practice. Anything actually wrong with the bytes is
+        // DumpChain.parse()'s job to catch, inside loadDump() below.
+        byte[] blob = hexToBytes(raw);
+
+        AssetCardEngine engine;
+        try {
+            engine = AssetCardHolder.get(this);
+            engine.loadDump(blob, null);
+        } catch (Exception e) {
+            Toast.makeText(this, "Chain rejected: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            status("chain: " + e.getMessage(), COL_STALE);
+            return;
+        }
+
+        String badge = engine.lastDumpVerify() == null ? "?" : engine.lastDumpVerify().toString();
+        status("chain loaded into the shared asset card - SDA: " + badge
+                + (chkAssetCard != null && chkAssetCard.isChecked() ? "" : " (asset-card routing is OFF - check the box to tap it)"),
+                COL_WARM);
     }
 
     /**

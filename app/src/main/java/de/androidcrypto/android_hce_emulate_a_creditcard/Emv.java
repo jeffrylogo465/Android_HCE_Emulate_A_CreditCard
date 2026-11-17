@@ -29,6 +29,14 @@ final class Emv {
     static final byte CID_TC   = (byte) 0x40;
     static final byte CID_ARQC = (byte) 0x80;
 
+    /**
+     * AIP byte 1 bit 0x02: on-device (CDCVM) cardholder verification
+     * supported. Not in clearOda's 0x65 mask - that mask is the four ODA
+     * bits (SDA/DDA/IssuerAuth/CDA), a disjoint concern from CVM capability,
+     * so clearOda() must leave this bit exactly as it finds it.
+     */
+    static final int AIP_CDCVM = 0x02;
+
     static byte[] hex(String s) { return Hex.hex(s); }
 
     static String toHex(byte[] d) { return Hex.toHex(d); }
@@ -116,9 +124,12 @@ final class Emv {
     /**
      * Clear the ODA bits in the AIP of a GPO template, in place.
      *
-     * SDA 0x40, DDA 0x20 and CDA 0x01 together, as one mask of 0x61. A clone
-     * with no certificates can pass none of the three, and an AIP that claims
-     * one buys a failed ODA attempt and a TVR bit rather than a clean start.
+     * SDA 0x40, DDA 0x20, Issuer Authentication 0x04 and CDA 0x01 together,
+     * as one mask of 0x65. A clone with no certificates can pass none of the
+     * three ODA methods, and Issuer Authentication needs an ARPC from the
+     * issuer's own authorisation network - also not something a clone with
+     * no real key can produce - so an AIP that claims any of the four buys a
+     * failed ODA attempt and a TVR bit rather than a clean start.
      *
      * FIX: this used to clear 0x01 only, so SDA and DDA survived and a captured
      * card replayed its own claims verbatim.
@@ -126,14 +137,40 @@ final class Emv {
      * FIX: format 1 (outer 80) has NO inner TLVs - the payload is two raw AIP
      * bytes then the track 2. The old TLV walk found no 82, returned, and left
      * CDA set in MSD mode.
+     *
+     * FIX: 0x04 (Issuer Authentication) was not in the mask, so the
+     * captured-replay branch and the synthetic/boxed-AIP branch disagreed on
+     * what "cleared" meant the moment a captured card's own AIP had that bit
+     * set - both now use this one mask, so they cannot drift apart on it.
      */
     static void clearOda(byte[] tpl) {
+        editAipByte1(tpl, b -> (byte) (b & ~0x65));
+    }
+
+    /**
+     * Set the CDCVM bit (AIP_CDCVM) on a GPO template's AIP byte 1, in
+     * place - same walk as clearOda(), same two call sites (the
+     * captured-replay branch and the synthetic/boxed-AIP branch in the
+     * service), so the two cannot drift on what "CDCVM is set" means
+     * either, the same argument that gave clearOda() a single shared mask.
+     */
+    static void setCdcvm(byte[] tpl) {
+        editAipByte1(tpl, b -> (byte) (b | AIP_CDCVM));
+    }
+
+    /**
+     * The one AIP-byte-1 walk clearOda() and setCdcvm() both run: format 1
+     * (outer 80, no inner TLVs, two raw AIP bytes then the track 2) or
+     * format 2 (find the inner 0x82). Shared so the two edits cannot find
+     * the byte differently from one another.
+     */
+    private static void editAipByte1(byte[] tpl, java.util.function.UnaryOperator<Byte> edit) {
         int[] pos = new int[1];
         int outer = readTag(tpl, pos);
         readLen(tpl, pos);
 
         if (outer == 0x80) {
-            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] &= (byte) ~0x61;
+            if (pos[0] + 2 <= tpl.length) tpl[pos[0]] = edit.apply(tpl[pos[0]]);
             return;
         }
 
@@ -144,7 +181,7 @@ final class Emv {
             int l = readLen(tpl, q);
             if (q[0] + l > tpl.length) return;
             if (t == 0x82 && l >= 1) {
-                tpl[q[0]] &= (byte) ~0x61;
+                tpl[q[0]] = edit.apply(tpl[q[0]]);
                 return;
             }
             i = q[0] + l;

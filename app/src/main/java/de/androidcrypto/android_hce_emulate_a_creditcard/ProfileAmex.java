@@ -134,6 +134,7 @@ public final class ProfileAmex implements CardProfile {
         return Profiles.selectPpse(PPSE);
     }
 
+    /** `label` is deliberately unused - FCI is byte-exact, label included. See ProfileMastercard's selectApp(). */
     @Override public String[] selectApp(String aid, String label) {
         return new String[]{"00A4040006A00000002501=" + FCI + "9000"};
     }

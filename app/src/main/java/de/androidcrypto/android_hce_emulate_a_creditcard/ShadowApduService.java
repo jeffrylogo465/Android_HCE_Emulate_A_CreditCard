@@ -128,6 +128,15 @@ public class ShadowApduService extends HostApduService {
      * FORCE_OFFLINE_TC is the one flag of the two that is a PREF, see
      * forceOfflineTc(). It changes what the card tells a terminal, and whether
      * an offline approve is wanted depends on the shop, not on the build.
+     *
+     * Stays false. Going online with no real IMK-AC is not IMPOSSIBLE - the
+     * acInGpo path (qVSDC, AC-in-GPO) already does it without consulting
+     * haveKey() at all, and this flag would do it deliberately for the
+     * GENERATE AC path too - it is POINTLESS: the issuer gets a cryptogram
+     * that cannot verify and declines, same zero-ARQC outcome either way,
+     * just reached a step later and with a tap that looked, locally, like it
+     * might succeed. Forcing it on would not break anything new; it would
+     * just manufacture a decline this card can already produce for free.
      */
     private static final boolean FORCE_ONLINE_ARQC = false;
 
@@ -163,15 +172,20 @@ public class ShadowApduService extends HostApduService {
     private static final String CDOL_MSD = "9F3704";
 
     /**
-     * CVM list. Amount X and Amount Y are both 000003E8 (10.00 in minor
-     * units), then two rules: 1F 06 no CVM if the transaction is under X,
-     * 1E 07 signature if it is over X. Conditions 06 and 07 are the amount
-     * tests; 03 ("if the terminal supports the CVM") is always true for No CVM
-     * and would make rule 1 win every time. Signature cannot fail, so the
-     * fallback sets no TVR bit. Twelve bytes - the two amount fields are
-     * mandatory.
+     * CVM list. F02: AIP byte 1 bit 0x02 (Emv.AIP_CDCVM) is now set on the
+     * served AIP (see gpo()), so the earlier reasoning against the 0x5E
+     * continue bit no longer applies - the device-credential prompt it used
+     * to route to without this bit now has the capability flag to back it.
+     *
+     * Amount X and Amount Y are both 00000000, so neither amount condition
+     * ever applies and every transaction falls straight to the fallback:
+     *   5E 07 - on-device CVM (CDCVM), continue bit set, if over Y - and
+     *           since Y is 0, that is every transaction's first rule hit.
+     *   1F 03 - no CVM required, if the terminal supports the CVM, the
+     *           fallback were CDCVM itself ever unsuccessful.
+     * No signature rule remains, so nothing prompts for one.
      */
-    private static final String CVMLIST = "000003E8000003E81F061E07";
+    private static final String CVMLIST = "00000000000000005E071F03";
 
     /** Documentation only - the terminal owns 9F34 and sends it in CDOL1. */
     private static final String CVM_RESULTS = "1F0302";
@@ -1795,8 +1809,6 @@ public class ShadowApduService extends HostApduService {
      */
     private static final String PREF_ASSET_SCHEME = "asset_scheme";
 
-    private AssetCardEngine assetCard;
-
     private boolean assetCardOn() {
         try {
             return "1".equals(prefs().getString(PREF_ASSET_PROFILE, ""));
@@ -1815,23 +1827,20 @@ public class ShadowApduService extends HostApduService {
         return AssetSchemeProfile.MASTERCARD;
     }
 
+    /**
+     * Process-wide now, not a service-private field - see AssetCardHolder.
+     * MainActivity reaches the same instance through the same holder, so a
+     * dump it loads is the card this method, and every tap, actually serves.
+     */
     private AssetCardEngine assetCard() throws java.io.IOException {
-        if (assetCard == null) {
-            try (java.io.InputStream in = getAssets().open(AssetCardEngine.ASSET);
-                 java.io.InputStream key = getAssets().open(AssetCardEngine.ICC_KEY_ASSET)) {
-                assetCard = AssetCardEngine.load(in, key);
-            }
-            String saved = prefs().getString(PREF_ASSET_ATC, "");
-            if (saved.length() == 4) assetCard.setAtc(Integer.parseInt(saved, 16));
-        }
-        return assetCard;
+        return AssetCardHolder.get(this);
     }
 
     /** Written with commit(): a tap that dies right after the GPO must not reuse the ATC. */
     @android.annotation.SuppressLint("ApplySharedPref")
-    private void persistAssetAtc() {
+    private void persistAssetAtc() throws java.io.IOException {
         prefs().edit().putString(PREF_ASSET_ATC,
-                String.format(java.util.Locale.US, "%04X", assetCard.atc())).commit();
+                String.format(java.util.Locale.US, "%04X", assetCard().atc())).commit();
     }
 
     @Override
@@ -2112,6 +2121,27 @@ public class ShadowApduService extends HostApduService {
             name = hex(a);
         }
 
+        // Honest rejection, not a fabricated FCI for an AID this card is not.
+        // apduservice.xml's own aid-group declares dozens of real-world
+        // scheme AIDs so Android routes them here at all (see that file's
+        // rule 2) - that is a ROUTING list, not a claim that every one of
+        // them is actually answered. Known here is any AID belonging to one
+        // of the three CardProfiles this app actually emulates (not just
+        // the currently active one - Profiles.forAid() checks all three,
+        // same as forPan()/forAid() already do elsewhere), plus the
+        // asset-card test identity (AFFFFFFFFF1234, reachable through this
+        // same generic path even with assetCardOn() off - see
+        // selectAffffffffff1234_stillSucceedsAfterPpseSelect). Anything
+        // else - JCB, Discover, UnionPay, every AID none of the three
+        // profiles claims - gets 6A82, logged, instead of a generated FCI
+        // claiming to be a card it is not.
+        String nameHex = bytesToHex(name);
+        boolean known = Profiles.forAid(nameHex) != null || Arrays.equals(name, hex(AssetCardEngine.AID));
+        if (!known) {
+            tap("-- unknown AID " + nameHex + " -> 6A82");
+            return SW_BAD;
+        }
+
         String real = capAid();
         if (real.isEmpty()) real = hexBox("aid", "");
         tap("-- selected " + bytesToHex(name)
@@ -2206,7 +2236,14 @@ public class ShadowApduService extends HostApduService {
             if (capMsd == msd) {
                 // A captured card's own ODA bits survive a replay untouched
                 // otherwise, and every one of them is a check we cannot pass.
-                if (!capMsd) Emv.clearOda(raw);
+                if (!capMsd) {
+                    Emv.clearOda(raw);
+                    // F02, same argument as F01: the synthetic/boxed-AIP
+                    // branch (below) ORs this bit in too, through the same
+                    // Emv.setCdcvm() - one behaviour, no drift between the
+                    // two paths on what "CDCVM is set" means.
+                    Emv.setCdcvm(raw);
+                }
                 byte[] aip = capturedAip(raw);
                 if (aip != null && aip.length >= 2) {
                     capturedIad = findTag(raw, 0x9F10);
@@ -2273,6 +2310,26 @@ public class ShadowApduService extends HostApduService {
         if (aip.length < 2) aip = hex(DEFAULT_AIP);
 
         byte[] used = new byte[]{aip[0], aip[1]};
+
+        // Same ODA mask the captured-replay branch applies at Emv.clearOda(raw)
+        // above - via the real method, not a second hand-rolled copy of its
+        // 0x61 mask, so the two paths cannot drift apart (see Emv.java's own
+        // class doc on exactly that risk). A typed/boxed AIP with SDA/DDA/CDA
+        // set was being served to a terminal verbatim - this app has no cert
+        // chain, no CA key and no OdaVerifier/DumpChain in this engine, so
+        // those bits bought nothing but a failed ODA attempt and a TVR bit.
+        // Only the non-MSD case: MSD gets its own separate masking just below
+        // (AIP_MSD_KEEP_1/2), mirroring the replay branch's own "!capMsd"
+        // guard on when it calls Emv.clearOda() at all.
+        if (!msd) {
+            byte[] wrap = tlv(0x77, tlv(0x82, used));
+            Emv.clearOda(wrap);
+            // F02, same argument as F01: through Emv.setCdcvm(), the same
+            // method the captured-replay branch above now calls, so the two
+            // paths cannot drift on what "CDCVM is set" means either.
+            Emv.setCdcvm(wrap);
+            used = capturedAip(wrap);
+        }
 
         // MSD: a profile that declares its own MSD AIP wins outright. Under
         // Visa the MSD bit is byte 2 0x80 and has to be SET, the opposite of
@@ -3048,11 +3105,12 @@ public class ShadowApduService extends HostApduService {
      * 9F13 is the last-online-ATC register, two bytes. 0000 means "never been
      * online", which is the correct state for a fresh card.
      *
-     * 9F17 is deliberately ABSENT. The CVM list is 1F06 / 1E07 - no CVM below
-     * the limit, signature above - so nothing here ever consumes an offline
-     * PIN and there is no counter to report. 00 is the one value that means
-     * "zero tries left", a different claim from "no PIN capability", so the tag
-     * falls through to 6A88 instead.
+     * 9F17 is deliberately ABSENT. The CVM list is 1F06 / 1E07 / 1F03 - no CVM
+     * under X, signature over Y, no CVM as the unconditional fallback - so
+     * nothing here ever consumes an offline PIN and there is no counter to
+     * report. 00 is the one value that means "zero tries left", a different
+     * claim from "no PIN capability", so the tag falls through to 6A88
+     * instead.
      */
     private byte[] getData(byte[] apdu) {
         int tag = ((apdu[2] & 0xFF) << 8) | (apdu[3] & 0xFF);

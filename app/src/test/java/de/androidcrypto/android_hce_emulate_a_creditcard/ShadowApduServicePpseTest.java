@@ -228,4 +228,161 @@ public class ShadowApduServicePpseTest {
         send(SELECT_PPSE);
         assertTrue(send(SELECT_A0000000041010).endsWith("9000"));
     }
+
+    // ---- honest AID rejection: select() answers only what it actually is ----
+
+    private void setProfile(String name) {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_profile", name).commit();
+    }
+
+    /**
+     * Each profile's own default AID still selects clean once its canned
+     * script is disarmed (disableDefaultProfileScript()) and select() itself
+     * has to answer it - not a regression from the new rejection below.
+     */
+    @Test
+    public void eachProfileAid_stillSelectsCleanThroughSelect() {
+        disableDefaultProfileScript();
+        setProfile("MASTERCARD");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send(SELECT_A0000000041010).endsWith("9000"));
+
+        disableDefaultProfileScript();
+        setProfile("VISA");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040007A0000000031010").endsWith("9000"));
+
+        disableDefaultProfileScript();
+        setProfile("AMEX");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040006A00000002501").endsWith("9000"));
+    }
+
+    /**
+     * JCB's AID is declared in apduservice.xml's own aid-group (so Android
+     * routes it here at all), but no CardProfile answers for JCB - select()
+     * must say so (6A82), not fabricate an FCI claiming to be a card this
+     * app is not.
+     */
+    @Test
+    public void unknownAid_jcb_isRejectedNotFabricated() {
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040007A0000000651010").endsWith("6A82"));
+    }
+
+    // ---- F01: the synthetic GPO branch must clear ODA bits too ----
+
+    /**
+     * A typed/boxed AIP with SDA(0x40)/DDA(0x20)/Issuer Auth(0x04)/CDA(0x01)
+     * all set must come back with all four cleared and CV(0x10)/TRM(0x08)
+     * untouched - Emv.clearOda()'s mask is now 0x65, not 0x61, so this
+     * branch and the captured-replay branch (gpo()'s line 2248) agree on
+     * what "cleared" means. This engine has no cert chain, no CA key and no
+     * way to get an ARPC, so claiming any of the four bought nothing but a
+     * failed ODA attempt on a real terminal.
+     */
+    @Test
+    public void syntheticGpo_clearsOdaBitsOnATypedAip_keepsCvAndTrm() {
+        // 0x7D = 0111_1101: SDA/DDA/IssuerAuth/CDA (0x40/0x20/0x04/0x01) set,
+        // plus CV/TRM (0x10/0x08) also set, so the test can tell "cleared"
+        // from "never there in the first place".
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_aip", "7D00").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must be cleared", 0, b1 & 0x20);
+        assertEquals("Issuer Authentication bit must be cleared", 0, b1 & 0x04);
+        assertEquals("CDA bit must be cleared", 0, b1 & 0x01);
+        assertEquals("CV bit must survive", 0x10, b1 & 0x10);
+        assertEquals("TRM bit must survive", 0x08, b1 & 0x08);
+        // F02: gpo() now also ORs in Emv.AIP_CDCVM unconditionally in the
+        // non-MSD case, so 0x18's survivors pick up 0x02 too - see F02's own
+        // test just below for that bit in isolation.
+        assertEquals("0x1A00 - 0x18 survivors plus F02's CDCVM bit", "1A00", aip);
+    }
+
+    /**
+     * F02. The typed AIP has every ODA bit set and CDCVM clear, same shape
+     * as the test above - clearOda() must still clear the four ODA bits
+     * (its mask, ~0x65, does not even cover 0x02), and separately gpo()
+     * must now OR in Emv.AIP_CDCVM. Both are checked on the SAME served
+     * byte so one cannot mask a regression in the other. The READ RECORD
+     * that follows checks the served CVMLIST is the new CDCVM-first list,
+     * not the old signature-bearing one.
+     */
+    @Test
+    public void syntheticGpo_setsCdcvmBit_andServesTheCdcvmFirstCvmList() {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_aip", "7D00").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must still be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must still be cleared", 0, b1 & 0x20);
+        assertEquals("Issuer Authentication bit must still be cleared", 0, b1 & 0x04);
+        assertEquals("CDA bit must still be cleared", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x1A00 exactly - 0x18 survivors plus CDCVM", "1A00", aip);
+
+        String rec = send("00B2010C00");
+        int rAt = rec.indexOf("8E0C") + 4;
+        String list = rec.substring(rAt, rAt + 24);
+        assertEquals("00000000000000005E071F03", list);
+    }
+
+    /**
+     * F02, the captured-replay branch's half of the same fix: a captured
+     * GPO (card0_cap_rawgpo) with CDCVM clear must come back with it set,
+     * through the same Emv.setCdcvm() the synthetic branch above now also
+     * calls - one behaviour for both paths, the same argument F01 already
+     * established for clearOda().
+     */
+    @Test
+    public void capturedGpoReplay_setsCdcvmBitToo() {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_cap_rawgpo", "770F82027D009404080101009F36020001").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must still be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must still be cleared", 0, b1 & 0x20);
+        assertEquals("CDA bit must still be cleared", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x1A00 - 0x18 survivors plus the CDCVM bit", "1A00", aip);
+    }
 }

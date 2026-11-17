@@ -41,8 +41,18 @@ final class LoadedCard {
     /** Missing here is a WARNING (warnings()), not a refusal - see the class doc. */
     private static final String[] WARN_TAGS = {"8F", "90", "92", "9F46"};
 
-    /** PAN=YYMMSVC[discretionary], no tag= prefix - the common bare track 2 dump shape. */
-    private static final Pattern BARE_TRACK2 = Pattern.compile("(\\d{12,19})=(\\d{7,})");
+    /**
+     * PAN D YYMMSVC[discretionary], no tag= prefix - the common bare track 2
+     * dump shape, in its canonical D-separated form (ISO 7813's own field
+     * separator sentinel, the same character applyBareTrack2() and tag 57
+     * already store it as). The tail allows hex, not just decimal, digits -
+     * an odd-length discretionary field BCD-pads with a trailing F, same
+     * convention as every other field here (5A, track2 itself). A line is
+     * normalised to this shape - see normaliseTrack2Candidate() - before
+     * being tested here; this pattern
+     * itself never sees a raw '=' line.
+     */
+    private static final Pattern BARE_TRACK2 = Pattern.compile("(\\d{12,19})D([0-9A-F]{7,})");
 
     private final Map<String, String> tags = new HashMap<>();
     private final Map<String, String[]> records = new HashMap<>();
@@ -96,8 +106,18 @@ final class LoadedCard {
                 continue;
             }
 
-            if (BARE_TRACK2.matcher(line).matches()) {
-                applyBareTrack2(line, tags);
+            // Choke point: every bare-track2 candidate is normalised here,
+            // in LoadedCard.parse, not at a call site - a leading ';' and
+            // trailing '?' (the ISO reader frame a typed or re-pasted dump
+            // often still carries), upper-cased, and '=' folded to the
+            // canonical 'D' separator (real readers emit both forms). Only
+            // this candidate is tested/used; `line` itself is untouched, so
+            // a genuine TAG=HEX or REC line's own '=' is never touched by
+            // this - it only ever applies to a line that ends up matching
+            // the bare-track2 shape in the first place.
+            String track2Candidate = normaliseTrack2Candidate(line);
+            if (BARE_TRACK2.matcher(track2Candidate).matches()) {
+                applyBareTrack2(track2Candidate, tags);
                 continue;
             }
 
@@ -156,7 +176,21 @@ final class LoadedCard {
     }
 
     /**
-     * A bare track 2 line - PAN=YYMMSVC[discretionary], no tag= prefix -
+     * Strips a single leading ';' and a single trailing '?' (the ISO reader
+     * frame), upper-cases, and folds '=' to 'D' - the two separator
+     * conventions real readers actually emit collapse to one before the
+     * bare-track2 pattern (or applyBareTrack2()) ever sees the line.
+     */
+    private static String normaliseTrack2Candidate(String line) {
+        String s = line;
+        if (s.startsWith(";")) s = s.substring(1);
+        if (s.endsWith("?")) s = s.substring(0, s.length() - 1);
+        s = s.toUpperCase(Locale.ROOT);
+        return s.replace('=', 'D');
+    }
+
+    /**
+     * A bare track 2 line - PAN D YYMMSVC[discretionary], no tag= prefix -
      * derives exactly the fields a real dump hands over and nothing it
      * does not: 5A (PAN, BCD-padded), 5F24 (YYMM plus a defaulted day of
      * 31 - track 2 carries no day), 57 (the full track 2 equivalent data:
@@ -168,7 +202,10 @@ final class LoadedCard {
      * simple top-to-bottom precedence, no special-casing which one "wins".
      */
     private static void applyBareTrack2(String line, Map<String, String> tags) {
-        int eq = line.indexOf('=');
+        // `line` is always normaliseTrack2Candidate()'s output by the time
+        // this runs, so the separator is always 'D' - a PAN is all digits,
+        // so the first 'D' can only be this one.
+        int eq = line.indexOf('D');
         String pan = line.substring(0, eq);
         String tail = line.substring(eq + 1);
         String yymm = tail.substring(0, 4);

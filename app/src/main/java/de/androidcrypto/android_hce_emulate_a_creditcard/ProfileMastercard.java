@@ -90,6 +90,12 @@ public final class ProfileMastercard implements CardProfile {
         return Profiles.selectPpse(PPSE);
     }
 
+    /**
+     * `label` is deliberately unused. FCI/MAESTRO_FCI are the replayed
+     * plastic's own bytes, label included (see the class comment) - not
+     * parameterised, not rebuilt from whatever the box holds. Only the AID
+     * selects which of the two scripted entries answers.
+     */
     @Override public String[] selectApp(String aid, String label) {
         return new String[]{
                 "00A4040007A0000000041010=" + FCI + "9000",

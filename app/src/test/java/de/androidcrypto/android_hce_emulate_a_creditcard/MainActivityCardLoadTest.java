@@ -49,9 +49,15 @@ public class MainActivityCardLoadTest {
         etAtc = activity.findViewById(R.id.etAtc);
     }
 
+    /**
+     * MainActivity now debounces the track2/PAN filler 250ms (see
+     * FILLER_TOKEN) - idle() alone only runs what is already due at the
+     * current virtual time, so it never fires a postDelayed(..., 250).
+     * idleFor() advances the clock past the debounce window first.
+     */
     private void type(EditText field, String text) {
         field.setText(text);
-        shadowOf(Looper.getMainLooper()).idle();
+        shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(300));
     }
 
     /** The task's own test: pasting a track 2 into the editor fills PAN/expiry/SC/discretionary. */
@@ -144,7 +150,15 @@ public class MainActivityCardLoadTest {
         String gpo = Hex.toHex(svc.processCommandApdu(Hex.hex("80A8000002830000"), null));
         assertFalse("GPO must not refuse: " + gpo, gpo.endsWith("6985"));
         assertTrue(gpo.endsWith("9000"));
-        assertTrue("GPO must answer with the saved AIP, not the profile default 1880: " + gpo,
-                gpo.contains("82025800"));
+        // The saved AIP was 5800 - SDA (0x40) set. This engine has no cert
+        // chain and no CA key (that is AssetCardEngine/DumpChain's job, a
+        // separate engine this one never touches), so F01's fix clears the
+        // ODA bits here same as the captured-replay branch already did:
+        // 0x58 & ~0x65 = 0x18, then F02 ORs in Emv.AIP_CDCVM (0x02) -> 0x1A.
+        // Still distinct from the profile default 1880 in both bytes, so
+        // this still proves the saved AIP (minus the claims this engine
+        // cannot back), not a fallback to the default.
+        assertTrue("GPO must answer with the saved AIP minus its ODA bits, not the profile default 1880: " + gpo,
+                gpo.contains("82021A00"));
     }
 }

@@ -81,6 +81,18 @@ final class AssetCardEngine {
     private boolean selected;
     /** The real brand this card is answering as, or null for its own AFFFFFFFFF1234 identity. */
     private AssetSchemeProfile scheme;
+    /**
+     * A captured real-card chain, loaded on top of the scheme/profile.json
+     * cascade - see loadDump(). Separate mode from AssetSchemeProfile: this
+     * never changes what a scheme profile serves, only what this engine
+     * serves when no scheme (or any scheme) is bound and a dump is active.
+     * Not reset by clearState(), same reasoning as a bound scheme used to
+     * follow for the retired LoadedCard integration: a loaded dump outlives
+     * one SELECT/GPO/GENERATE AC cycle.
+     */
+    private DumpChain dumpChain;
+    /** The SDA result from the dump's own load - a warning badge, never a gate. */
+    private OdaVerifier.Result dumpVerify;
     private boolean gpoOk;
     /** GENERATE ACs answered since the last GPO: 0, 1 or 2. */
     private int acCount;
@@ -164,12 +176,32 @@ final class AssetCardEngine {
 
     // ---------- profile accessors ----------
 
-    String pan() { return pan; }
-    String expiry() { return expiry; }
+    /** This engine's own PAN, or - when a dump is loaded and carries one - the dump's own PAN (tag 5A). */
+    String pan() {
+        byte[] v = dumpChain == null ? null : dumpChain.tag(0x5A);
+        return v == null ? pan : Hex.toHex(v);
+    }
+
+    /** Expiry (tag 5F24): the dump's own, when a dump is loaded and carries one. */
+    String expiry() {
+        byte[] v = dumpChain == null ? null : dumpChain.tag(0x5F24);
+        return v == null ? expiry : Hex.toHex(v);
+    }
+
+    /** PAN Sequence Number (tag 5F34): the dump's own, when a dump is loaded and carries one. */
+    String psn() {
+        byte[] v = dumpChain == null ? null : dumpChain.tag(0x5F34);
+        if (v != null) return Hex.toHex(v);
+        String own = tags.get("5F34");
+        return own == null ? null : own;
+    }
+
     String serviceCode() { return serviceCode; }
     String track2() { return track2; }
-    String afl() { return afl; }
-    String aip() { return aip; }
+    /** The AFL this engine actually serves/walks right now - see currentAfl(). */
+    String afl() { return currentAfl(); }
+    /** The AIP this engine actually serves/signs with right now - see currentAip(). */
+    String aip() { return currentAip(); }
     String cdol1() { return cdol1; }
     String cdol2() { return cdol2; }
     String mkAc() { return mkAc; }
@@ -181,6 +213,54 @@ final class AssetCardEngine {
     String terminalData(String t) { return terminal.get(t.toUpperCase(Locale.ROOT)); }
 
     boolean isSelected() { return selected; }
+
+    // ---------- dump mode ----------
+
+    /**
+     * Loads a captured TLV dump (see DumpChain) as this engine's active
+     * identity: its own chain tags and AFL-named records, served verbatim,
+     * replace the shared profile's; CDOL1/CDOL2/MK_AC/ATC and the generic
+     * wire mechanism are untouched, since a dump cannot carry a secret key.
+     *
+     * Runs the SDA verifier immediately and keeps the result for
+     * lastDumpVerify() - a badge, never a gate: a failed or unresolved
+     * verification still serves the dump's own bytes exactly as captured.
+     *
+     * @param cas the CA keys to check the dump's issuer cert against, or
+     *            null to skip straight to a CA_KEY failure (still just a
+     *            badge)
+     * @throws IllegalArgumentException naming the missing/malformed tag, if
+     *                                   the blob does not parse
+     */
+    void loadDump(byte[] blob, CaKeySet cas) {
+        DumpChain.Result r = DumpChain.parse(blob);
+        if (!r.ok) throw new IllegalArgumentException("dump: " + r.error);
+        dumpChain = r.chain;
+
+        // No AID at all (or too short to even plausibly be one) is a
+        // different failure from "AID present but not in the keyset": there
+        // is no RID to look a CA key up by in the first place, so this
+        // never reaches CA_KEY.
+        if (dumpChain.aid == null || dumpChain.aid.length < 6) {
+            dumpVerify = OdaVerifier.Result.fail(OdaVerifier.Step.NO_AID, "no tag 84 (AID), or under 6 bytes");
+            return;
+        }
+        byte[] rid = dumpChain.rid();
+        CaKeySet.Key ca = cas != null ? cas.find(rid, dumpChain.caIndex) : null;
+        dumpVerify = OdaVerifier.verifySda(ca, dumpChain.issuerCert, dumpChain.issuerRemainder,
+                dumpChain.issuerExponent, dumpChain.afl, dumpChain.recordSource(), dumpChain.aip,
+                dumpChain.sdaTagList, dumpChain.ssad);
+    }
+
+    void clearDump() {
+        dumpChain = null;
+        dumpVerify = null;
+    }
+
+    boolean hasDump() { return dumpChain != null; }
+
+    /** The SDA result from the dump's own load, or null when no dump is active. */
+    OdaVerifier.Result lastDumpVerify() { return dumpVerify; }
 
     // ---------- dispatch ----------
 
@@ -286,8 +366,49 @@ final class AssetCardEngine {
                 Tlv.t(0xA5, a5))));
     }
 
-    /** The AIP to serve/sign with: the bound scheme's, or this card's own. */
-    private String currentAip() { return scheme != null ? scheme.aip() : aip; }
+    /**
+     * The AIP to serve/sign with: a loaded dump's own (computed, not copied -
+     * see dumpAip()), else the bound scheme's, else this card's own.
+     * AssetSchemeProfile is never consulted once a dump is active - the two
+     * are separate modes.
+     */
+    private String currentAip() {
+        if (dumpChain != null) return Hex.toHex(dumpAip());
+        return scheme != null ? scheme.aip() : aip;
+    }
+
+    /**
+     * Dump mode's AIP: provenance, not a mask. Start from the dump's own
+     * captured AIP (every bit, both bytes) and touch only what this mode's
+     * own capabilities actually change:
+     *  - CDA (0x01) is always cleared - a captured dump never carries an ICC
+     *    private key, so CDA (which needs one) is never possible here.
+     *  - Issuer Authentication (0x04) is always cleared - it needs an ARPC
+     *    from the issuer's own authorisation network, which a dump cannot
+     *    obtain any more than it can sign a cryptogram.
+     *  - When the dump carries a tag 93, SDA (0x40) is set and DDA (0x20) is
+     *    cleared - the dump itself is now how this card does ODA.
+     *  - When the dump carries no tag 93, SDA and DDA are left exactly as
+     *    the source card declared them, DDA included, even though this
+     *    engine cannot back a DDA claim (internalAuthenticate() answers
+     *    6985, not a silent 6D00, for exactly that reason: a real refusal
+     *    to a capability the replayed AIP still claims, not "no such
+     *    command").
+     */
+    private byte[] dumpAip() {
+        int b1 = dumpChain.aip[0] & 0xFF;
+        b1 &= ~0x01; // CDA: never possible in dump mode
+        b1 &= ~0x04; // Issuer Authentication: needs an ARPC a dump cannot obtain
+        if (dumpChain.ssad != null) {
+            b1 |= 0x40;  // SDA: this dump is the SSAD
+            b1 &= ~0x20; // DDA: superseded by SDA, not also claimed
+        }
+        int b2 = dumpChain.aip.length > 1 ? (dumpChain.aip[1] & 0xFF) : 0;
+        return new byte[]{(byte) b1, (byte) b2};
+    }
+
+    /** The AFL to serve/walk: a loaded dump's own, else the bound scheme's (none today), else this card's own. */
+    private String currentAfl() { return dumpChain != null ? Hex.toHex(dumpChain.afl) : afl; }
 
     private String need(String t) {
         String v = tag(t);
@@ -303,6 +424,8 @@ final class AssetCardEngine {
      */
     String tag(String t) {
         String up = t.toUpperCase(Locale.ROOT);
+        if (up.equals("82")) return currentAip();
+        if (up.equals("94")) return currentAfl();
         if (scheme != null) {
             if (up.equals("8F")) return scheme.caIndex;
             if (up.equals("8E") && scheme.cvmListOverride() != null) return scheme.cvmListOverride();
@@ -331,7 +454,7 @@ final class AssetCardEngine {
         acCount = 0;
         return ok(Tlv.t(0x77, Tlv.cat(
                 Tlv.t(0x82, Hex.hex(currentAip())),
-                Tlv.t(0x94, Hex.hex(afl)))));
+                Tlv.t(0x94, Hex.hex(currentAfl())))));
     }
 
     /**
@@ -364,15 +487,27 @@ final class AssetCardEngine {
         if ((p2 & 0x07) != 0x04) return sw("6A86");
         int sfi = p2 >> 3;
 
-        byte[] a = Hex.hex(afl);
+        byte[] a = Hex.hex(currentAfl());
         boolean inAfl = false;
         for (int i = 0; i + 4 <= a.length; i += 4) {
             if (((a[i] & 0xFF) >> 3) == sfi && rec >= (a[i + 1] & 0xFF) && rec <= (a[i + 2] & 0xFF)) {
                 inAfl = true;
             }
         }
+        if (!inAfl) return sw("6A83");
+
+        if (dumpChain != null) {
+            // Served verbatim: the raw captured 70 template, byte for byte,
+            // including whichever of 8F/90/92/9F32/9F46/9F47/9F48/93 (and
+            // anything else) the real card actually put in it - nothing
+            // rebuilt from a tag list, so nothing added or dropped.
+            byte[] raw = dumpChain.recordSource().read(sfi, rec);
+            if (raw == null) return sw("6A83");
+            return ok(raw);
+        }
+
         String[] list = records.get(sfi + ":" + rec);
-        if (!inAfl || list == null) return sw("6A83");
+        if (list == null) return sw("6A83");
 
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         for (String t : list) {
@@ -443,6 +578,14 @@ final class AssetCardEngine {
      */
     private byte[] internalAuthenticate(byte[] apdu) {
         if (!selected || !gpoOk) return sw("6985");
+        // A captured dump never carries an ICC private key - that is
+        // terminal-side data, never transmitted - so dump mode can never do
+        // DDA, regardless of whatever ICC key this engine was constructed
+        // with for its own (non-dump) identity. 6985, not 6D00: the dump's
+        // own AIP may still claim DDA (see dumpAip()) when it had no tag
+        // 93 to supersede it, so this is a real refusal of a capability the
+        // card still claims, not "no such command".
+        if (dumpChain != null) return sw("6985");
         if (iccModulus == null) return sw("6D00");
         byte[] ddol = Hex.hex(need("9F49"));
         byte[] data = dataOf(apdu);
