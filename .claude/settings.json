@@ -19,7 +19,7 @@
       "Bash(git log:*)"
     ],
     "deny": [
-      "Bash(git push:*)",
+      "Bash(git push --force:*)",
       "Bash(rm -rf:*)",
       "Read(local.properties)"
     ]
