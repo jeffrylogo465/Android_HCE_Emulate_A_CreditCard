@@ -137,7 +137,7 @@ public final class ProfileAmex implements CardProfile {
 
     /**
      * F03: the FCI is now built from the AID actually selected and the
-     * label argument (Profiles.selectedFci: 84 = the AID, 5F2D = the
+     * label argument (Profiles.selectedFci: 84 = the AID, 50 = the
      * label), instead of baked verbatim. 9F2A (kernel 4) is passed through
      * as the extra tag - Amex still needs it, Mastercard carries none.
      * `aid` is still unused - this profile has only one entry.

@@ -92,7 +92,7 @@ public final class ProfileMastercard implements CardProfile {
 
     /**
      * F03: the FCI is now built from each entry's own AID and the label
-     * argument (Profiles.selectedFci: 84 = the AID, 5F2D = the label),
+     * argument (Profiles.selectedFci: 84 = the AID, 50 = the label),
      * instead of baked verbatim into FCI/MAESTRO_FCI. `aid` is still
      * unused - it never told the two lines apart (each is keyed on its own
      * literal SELECT prefix) - only `label` now flows through, into both.

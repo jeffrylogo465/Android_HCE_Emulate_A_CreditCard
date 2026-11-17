@@ -166,9 +166,10 @@ public final class Profiles {
 
     // F03: Mastercard's and Amex's FCI, built from the AID actually selected
     // and the label argument, instead of baking both into a hand-typed
-    // constant the way the two profiles used to. Tag 84 is the AID, 5F2D the
-    // label - NOT Visa's own tag 50 (labelFci() below), a deliberate choice
-    // for this shape, not a drift from it: Visa's selectApp() is untouched.
+    // constant the way the two profiles used to. Tag 84 is the AID, 50 the
+    // label - same tag labelFci() (below) uses for Visa. 5F2D is Language
+    // Preference, not the label - "en", matching AssetCardEngine:360, not
+    // the label argument.
     //
     // extra is an optional caller-built TLV (Amex's 9F2A kernel id) appended
     // inside the same A5, or null for Mastercard, which carries none.
@@ -176,7 +177,8 @@ public final class Profiles {
         String l = (label == null || label.isEmpty()) ? "CARD" : label;
         if (l.length() > 16) l = l.substring(0, 16);
         byte[] prop = cat(
-                tlv(0x5F2D, l.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x50, l.getBytes(StandardCharsets.US_ASCII)),
+                tlv(0x5F2D, Hex.hex("656E")),
                 tlv(0x87, new byte[]{0x01}));
         if (extra != null) prop = cat(prop, extra);
         return tlv(0x6F, cat(tlv(0x84, Hex.hex(aidHex)), tlv(0xA5, prop)));
