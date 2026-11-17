@@ -354,6 +354,12 @@ public class OdaVerifierTest {
     }
 
     @Test
+    public void staticData_nullAipWithSdaTagList_isNullNotNpe() {
+        byte[] afl = {0x08, 0x01, 0x01, 0x01};
+        assertNull(OdaVerifier.buildStaticData(afl, source(records()), null, new byte[]{(byte) 0x82}));
+    }
+
+    @Test
     public void staticData_missingRecord_isNull() {
         byte[] afl = {0x18, 0x01, 0x01, 0x01};   // SFI 3 rec 1 not served
         assertNull(OdaVerifier.buildStaticData(afl, source(records()), new byte[]{0, 0}, null));

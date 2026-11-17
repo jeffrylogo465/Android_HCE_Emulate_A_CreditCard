@@ -2130,6 +2130,27 @@ public class ShadowApduService extends HostApduService {
             name = hex(a);
         }
 
+        // Honest rejection, not a fabricated FCI for an AID this card is not.
+        // apduservice.xml's own aid-group declares dozens of real-world
+        // scheme AIDs so Android routes them here at all (see that file's
+        // rule 2) - that is a ROUTING list, not a claim that every one of
+        // them is actually answered. Known here is any AID belonging to one
+        // of the three CardProfiles this app actually emulates (not just
+        // the currently active one - Profiles.forAid() checks all three,
+        // same as forPan()/forAid() already do elsewhere), plus the
+        // asset-card test identity (AFFFFFFFFF1234, reachable through this
+        // same generic path even with assetCardOn() off - see
+        // selectAffffffffff1234_stillSucceedsAfterPpseSelect). Anything
+        // else - JCB, Discover, UnionPay, every AID none of the three
+        // profiles claims - gets 6A82, logged, instead of a generated FCI
+        // claiming to be a card it is not.
+        String nameHex = bytesToHex(name);
+        boolean known = Profiles.forAid(nameHex) != null || Arrays.equals(name, hex(AssetCardEngine.AID));
+        if (!known) {
+            tap("-- unknown AID " + nameHex + " -> 6A82");
+            return SW_BAD;
+        }
+
         String real = capAid();
         if (real.isEmpty()) real = hexBox("aid", "");
         tap("-- selected " + bytesToHex(name)

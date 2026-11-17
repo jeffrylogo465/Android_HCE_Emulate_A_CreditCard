@@ -228,4 +228,51 @@ public class ShadowApduServicePpseTest {
         send(SELECT_PPSE);
         assertTrue(send(SELECT_A0000000041010).endsWith("9000"));
     }
+
+    // ---- honest AID rejection: select() answers only what it actually is ----
+
+    private void setProfile(String name) {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_profile", name).commit();
+    }
+
+    /**
+     * Each profile's own default AID still selects clean once its canned
+     * script is disarmed (disableDefaultProfileScript()) and select() itself
+     * has to answer it - not a regression from the new rejection below.
+     */
+    @Test
+    public void eachProfileAid_stillSelectsCleanThroughSelect() {
+        disableDefaultProfileScript();
+        setProfile("MASTERCARD");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send(SELECT_A0000000041010).endsWith("9000"));
+
+        disableDefaultProfileScript();
+        setProfile("VISA");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040007A0000000031010").endsWith("9000"));
+
+        disableDefaultProfileScript();
+        setProfile("AMEX");
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040006A00000002501").endsWith("9000"));
+    }
+
+    /**
+     * JCB's AID is declared in apduservice.xml's own aid-group (so Android
+     * routes it here at all), but no CardProfile answers for JCB - select()
+     * must say so (6A82), not fabricate an FCI claiming to be a card this
+     * app is not.
+     */
+    @Test
+    public void unknownAid_jcb_isRejectedNotFabricated() {
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        assertTrue(send("00A4040007A0000000651010").endsWith("6A82"));
+    }
 }

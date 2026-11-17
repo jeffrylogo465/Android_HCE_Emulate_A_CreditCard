@@ -303,6 +303,7 @@ public final class OdaVerifier {
         }
         if (sdaTagList != null && sdaTagList.length > 0) {
             if (sdaTagList.length != 1 || sdaTagList[0] != (byte) 0x82) return null;
+            if (aip == null) return null;
             out.write(aip, 0, aip.length);
         }
         if (STATIC_DATA_PAD) {
