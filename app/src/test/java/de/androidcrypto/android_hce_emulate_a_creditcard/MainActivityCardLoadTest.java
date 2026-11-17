@@ -150,7 +150,14 @@ public class MainActivityCardLoadTest {
         String gpo = Hex.toHex(svc.processCommandApdu(Hex.hex("80A8000002830000"), null));
         assertFalse("GPO must not refuse: " + gpo, gpo.endsWith("6985"));
         assertTrue(gpo.endsWith("9000"));
-        assertTrue("GPO must answer with the saved AIP, not the profile default 1880: " + gpo,
-                gpo.contains("82025800"));
+        // The saved AIP was 5800 - SDA (0x40) set. This engine has no cert
+        // chain and no CA key (that is AssetCardEngine/DumpChain's job, a
+        // separate engine this one never touches), so F01's fix clears the
+        // ODA bits here same as the captured-replay branch already did:
+        // 0x58 & ~0x61 = 0x18. Still distinct from the profile default 1880
+        // in both bytes, so this still proves the saved AIP (minus the
+        // claim this engine cannot back), not a fallback to the default.
+        assertTrue("GPO must answer with the saved AIP minus its ODA bits, not the profile default 1880: " + gpo,
+                gpo.contains("82021800"));
     }
 }

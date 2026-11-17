@@ -2313,6 +2313,22 @@ public class ShadowApduService extends HostApduService {
 
         byte[] used = new byte[]{aip[0], aip[1]};
 
+        // Same ODA mask the captured-replay branch applies at Emv.clearOda(raw)
+        // above - via the real method, not a second hand-rolled copy of its
+        // 0x61 mask, so the two paths cannot drift apart (see Emv.java's own
+        // class doc on exactly that risk). A typed/boxed AIP with SDA/DDA/CDA
+        // set was being served to a terminal verbatim - this app has no cert
+        // chain, no CA key and no OdaVerifier/DumpChain in this engine, so
+        // those bits bought nothing but a failed ODA attempt and a TVR bit.
+        // Only the non-MSD case: MSD gets its own separate masking just below
+        // (AIP_MSD_KEEP_1/2), mirroring the replay branch's own "!capMsd"
+        // guard on when it calls Emv.clearOda() at all.
+        if (!msd) {
+            byte[] wrap = tlv(0x77, tlv(0x82, used));
+            Emv.clearOda(wrap);
+            used = capturedAip(wrap);
+        }
+
         // MSD: a profile that declares its own MSD AIP wins outright. Under
         // Visa the MSD bit is byte 2 0x80 and has to be SET, the opposite of
         // Mastercard, so a single mask cannot serve both.

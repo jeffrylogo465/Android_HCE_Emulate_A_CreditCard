@@ -275,4 +275,42 @@ public class ShadowApduServicePpseTest {
         send(SELECT_PPSE);
         assertTrue(send("00A4040007A0000000651010").endsWith("6A82"));
     }
+
+    // ---- F01: the synthetic GPO branch must clear ODA bits too ----
+
+    /**
+     * A typed/boxed AIP with SDA(0x40)/DDA(0x20)/CDA(0x01) all set must come
+     * back with those three cleared and CV(0x10)/TRM(0x08)/Issuer Auth(0x04)
+     * untouched - the same mask the captured-replay branch already applies
+     * via Emv.clearOda() at gpo()'s line 2248. This engine has no cert chain
+     * and no CA key, so claiming any of the three bought nothing but a
+     * failed ODA attempt on a real terminal.
+     */
+    @Test
+    public void syntheticGpo_clearsOdaBitsOnATypedAip_keepsCvTrmIssuerAuth() {
+        // 0x7D = 0111_1101: SDA/DDA/CDA (0x40/0x20/0x01) set, plus
+        // CV/TRM/IssuerAuth (0x10/0x08/0x04) also set, so the test can tell
+        // "cleared" from "never there in the first place".
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_aip", "7D00").commit();
+        disableDefaultProfileScript();
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        int at = gpo.indexOf("8202") + 4;
+        String aip = gpo.substring(at, at + 4);
+        int b1 = Integer.parseInt(aip.substring(0, 2), 16);
+
+        assertEquals("SDA bit must be cleared", 0, b1 & 0x40);
+        assertEquals("DDA bit must be cleared", 0, b1 & 0x20);
+        assertEquals("CDA bit must be cleared", 0, b1 & 0x01);
+        assertEquals("CV bit must survive", 0x10, b1 & 0x10);
+        assertEquals("TRM bit must survive", 0x08, b1 & 0x08);
+        assertEquals("Issuer Authentication bit must survive", 0x04, b1 & 0x04);
+        assertEquals("0x1C00 exactly", "1C00", aip);
+    }
 }
