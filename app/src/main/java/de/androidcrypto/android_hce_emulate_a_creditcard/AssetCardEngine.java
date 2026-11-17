@@ -236,8 +236,17 @@ final class AssetCardEngine {
         DumpChain.Result r = DumpChain.parse(blob);
         if (!r.ok) throw new IllegalArgumentException("dump: " + r.error);
         dumpChain = r.chain;
+
+        // No AID at all (or too short to even plausibly be one) is a
+        // different failure from "AID present but not in the keyset": there
+        // is no RID to look a CA key up by in the first place, so this
+        // never reaches CA_KEY.
+        if (dumpChain.aid == null || dumpChain.aid.length < 6) {
+            dumpVerify = OdaVerifier.Result.fail(OdaVerifier.Step.NO_AID, "no tag 84 (AID), or under 6 bytes");
+            return;
+        }
         byte[] rid = dumpChain.rid();
-        CaKeySet.Key ca = (cas != null && rid != null) ? cas.find(rid, dumpChain.caIndex) : null;
+        CaKeySet.Key ca = cas != null ? cas.find(rid, dumpChain.caIndex) : null;
         dumpVerify = OdaVerifier.verifySda(ca, dumpChain.issuerCert, dumpChain.issuerRemainder,
                 dumpChain.issuerExponent, dumpChain.afl, dumpChain.recordSource(), dumpChain.aip,
                 dumpChain.sdaTagList, dumpChain.ssad);

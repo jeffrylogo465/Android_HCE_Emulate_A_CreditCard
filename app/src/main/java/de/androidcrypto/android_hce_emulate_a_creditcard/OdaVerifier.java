@@ -24,6 +24,9 @@ import java.util.Arrays;
 public final class OdaVerifier {
 
     public enum Step {
+        /** No tag 84 (AID) in the dump, or it was under 6 bytes - no RID to look a CA key up by. */
+        NO_AID,
+        /** An AID/RID was available, but no CA key is on file for it at this index. */
         CA_KEY,
         ISSUER_RECOVER, ISSUER_HEADER, ISSUER_LAYOUT, ISSUER_HASH,
         ICC_RECOVER, ICC_HEADER, ICC_LAYOUT, ICC_HASH,
@@ -238,11 +241,20 @@ public final class OdaVerifier {
     // -------------------------------------------------------------- static data
 
     /**
+     * Whether buildStaticData() right-pads its result with 0x00 to a
+     * multiple of 8, per the padding sentence in Book 3 10.3. UNVERIFIED
+     * against the spec text itself - only a real SDA card's own static data,
+     * run through this and compared against a real terminal's verdict,
+     * settles whether this padding step belongs here at all.
+     */
+    static final boolean STATIC_DATA_PAD = true;
+
+    /**
      * Static data to be authenticated: the records the AFL flags for offline
      * data authentication, in AFL order (SFI 1-10: contents of the 70 template;
      * SFI 11+: the whole record), then the AIP only if the 9F4A tag list is
-     * exactly tag 82. The AFL itself is not hashed. No padding is added; see
-     * the note in the commit message.
+     * exactly tag 82, then (when STATIC_DATA_PAD) 0x00 bytes up to a multiple
+     * of 8. The AFL itself is not hashed.
      *
      * @param sdaTagList tag 9F4A, null when the card has none
      * @return the bytes, or null when a flagged record is missing or malformed
@@ -269,6 +281,12 @@ public final class OdaVerifier {
         if (sdaTagList != null && sdaTagList.length > 0) {
             if (sdaTagList.length != 1 || sdaTagList[0] != (byte) 0x82) return null;
             out.write(aip, 0, aip.length);
+        }
+        if (STATIC_DATA_PAD) {
+            int rem = out.size() % 8;
+            if (rem != 0) {
+                for (int i = rem; i < 8; i++) out.write(0);
+            }
         }
         return out.toByteArray();
     }

@@ -169,6 +169,16 @@ public final class DumpChain {
      * first occurrence of each primitive tag into {@code flat} and every 0x70
      * template encountered, at any depth, into {@code templates70} in
      * encounter order.
+     *
+     * Where in the blob a tag sits otherwise does not matter at all - the FCI,
+     * the GPO response and the READ RECORD responses can appear in any order,
+     * interleaved or not, since every tag is found by walking the whole blob
+     * regardless of position. The one exception is the 0x70 templates
+     * themselves: parse() consumes {@code templates70} in this exact
+     * encounter order to fill the AFL's (SFI, record) slots in AFL order, so
+     * the records' positions RELATIVE TO EACH OTHER still have to match the
+     * order a real READ RECORD walk would produce them in, even though
+     * nothing about where they sit relative to the FCI/GPO tags does.
      */
     private static void walk(byte[] b, int from, int to, Map<Integer, byte[]> flat, List<byte[]> templates70) {
         int i = from;

@@ -223,4 +223,32 @@ public class AssetCardEngineDumpTest {
         assertEquals("3C00", eng.aip());
         assertFalse(eng.hasDump());
     }
+
+    // ---------------------------------------------------------- NO_AID vs CA_KEY
+
+    @Test
+    public void dumpWithNoAidTag_givesNoAidStep_beforeAnyCaLookup() throws Exception {
+        // dumpBlob() always leads with tag 84; build the same blob without it.
+        byte[] withoutAid = Tlv.cat(allRecordsInAflOrder(),
+                Tlv.t(0x77, Tlv.cat(Tlv.t(0x82, Hex.hex(aip)), Tlv.t(0x94, Hex.hex(afl)))));
+
+        CaKeySet cas = new CaKeySet();
+        cas.add(new CaKeySet.Key(new byte[]{(byte) 0xAF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF},
+                0x92, new byte[]{3}, new byte[64])); // present, but never consulted: no RID to look it up by
+
+        eng.loadDump(withoutAid, cas);
+        assertEquals(OdaVerifier.Step.NO_AID, eng.lastDumpVerify().failedStep);
+    }
+
+    @Test
+    public void dumpWithUnknownAid_givesCaKeyStep_notNoAid() throws Exception {
+        // dumpBlob(true) carries tag 84 = AFFFFFFFFF1234 (7 bytes, so its
+        // RID is the first 5: AFFFFFFFFF) - a real RID, just not one this
+        // keyset happens to carry.
+        CaKeySet cas = new CaKeySet();
+        cas.add(new CaKeySet.Key(Hex.hex("A000000004"), 0x92, new byte[]{3}, new byte[64]));
+
+        eng.loadDump(dumpBlob(true), cas);
+        assertEquals(OdaVerifier.Step.CA_KEY, eng.lastDumpVerify().failedStep);
+    }
 }

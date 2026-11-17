@@ -334,7 +334,8 @@ public class OdaVerifierTest {
         byte[] afl = {0x08, 0x01, 0x02, 0x02, 0x10, 0x01, 0x01, 0x00, 0x58, 0x01, 0x01, 0x01};
         byte[] aip = {0x18, 0x00};
         byte[] got = OdaVerifier.buildStaticData(afl, source(records()), aip, new byte[]{(byte) 0x82});
-        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00};
+        // 11 content bytes, right-padded with 0x00 to 16 (STATIC_DATA_PAD).
+        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00, 0, 0, 0, 0, 0};
         assertArrayEquals(want, got);
     }
 
@@ -342,7 +343,8 @@ public class OdaVerifierTest {
     public void staticData_noTagList_noAip() {
         byte[] afl = {0x08, 0x01, 0x01, 0x01};
         byte[] got = OdaVerifier.buildStaticData(afl, source(records()), new byte[]{0x18, 0x00}, null);
-        assertArrayEquals(new byte[]{0x5A, 0x01, 0x11}, got);
+        // 3 content bytes, right-padded with 0x00 to 8 (STATIC_DATA_PAD).
+        assertArrayEquals(new byte[]{0x5A, 0x01, 0x11, 0, 0, 0, 0, 0}, got);
     }
 
     @Test
