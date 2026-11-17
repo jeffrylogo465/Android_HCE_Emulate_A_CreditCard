@@ -1,6 +1,9 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
@@ -21,7 +24,10 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -46,6 +52,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private static final String PPSE = "325041592E5359532E4444463031";
     private static final String TTQ_KEY = "readerttq";
     private static final String CURSOR_KEY = "sweepcursor";
+    private static final String DUMP_COUNTER_KEY = "readerdumpcounter";
     private static final int STEPS_PER_TAP = 16;
 
     /**
@@ -96,7 +103,16 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
     private NfcAdapter nfc;
 
     private TextView txtLog, txtHint;
-    private Button btnUse, btnTtq;
+    private Button btnUse, btnTtq, btnCopyDump, btnShareDump;
+
+    /**
+     * The ODA dump capture: SELECT FCI, GPO response, then each READ RECORD
+     * response, raw bytes, status word stripped, concatenated in that order
+     * and written as hex - separate from rPan/rExpiry/... below, which this
+     * does not touch. See DumpChain for what reads a file like this back.
+     */
+    private String lastDumpHex = null;
+    private File lastDumpFile = null;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private volatile boolean busy = false;
@@ -171,6 +187,18 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         btnUse.setEnabled(false);
         btnUse.setOnClickListener(v -> returnResult());
         root.addView(btnUse);
+
+        btnCopyDump = new Button(this);
+        btnCopyDump.setText("COPY DUMP");
+        btnCopyDump.setEnabled(false);
+        btnCopyDump.setOnClickListener(v -> copyDump());
+        root.addView(btnCopyDump);
+
+        btnShareDump = new Button(this);
+        btnShareDump.setText("SHARE DUMP");
+        btnShareDump.setEnabled(false);
+        btnShareDump.setOnClickListener(v -> shareDump());
+        root.addView(btnShareDump);
 
         Button btnCancel = new Button(this);
         btnCancel.setText("CANCEL");
@@ -259,9 +287,13 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         read = false;
         rPan = rExpiry = rService = rDisc = rAid = "";
         rTrack2 = rPsn = rIad = rAtc = rAip = rHolder = "";
+        lastDumpHex = null;
+        lastDumpFile = null;
         ui.post(() -> {
             txtLog.setText("");
             btnUse.setEnabled(false);
+            btnCopyDump.setEnabled(false);
+            btnShareDump.setEnabled(false);
         });
         clearStaging();
 
@@ -302,6 +334,14 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
         stage("cap_rawfci", bytesToHex(fci));
         stage("cap_aid", rAid);
 
+        // ODA dump capture: SELECT FCI first - the pieces GPO and READ RECORD
+        // add below are appended in the same order a terminal would read them.
+        int dumpResponses = 0;
+        ByteArrayOutputStream dump = new ByteArrayOutputStream();
+        dump.write(fci, 0, fci.length);
+        dumpResponses++;
+        log("   dump: FCI " + fci.length + " byte(s)");
+
         List<byte[]> labL = new ArrayList<>();
         collect(fci, 0x50, labL);
         if (!labL.isEmpty()) {
@@ -333,11 +373,15 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             gpo = gpoWithRetry(iso, pdol);
         } catch (IOException e) {
             log("   GPO not solved this tap: " + e.getMessage());
+            log("   dump: no GPO captured - dump will be truncated");
         }
 
         byte[] aip = null, afl = null;
         if (gpo != null) {
             stage("cap_rawgpo", bytesToHex(gpo));
+            dump.write(gpo, 0, gpo.length);
+            dumpResponses++;
+            log("   dump: GPO " + gpo.length + " byte(s)");
             if (gpo.length > 3 && (gpo[0] & 0xFF) == 0x80) {
                 int l = gpo[1] & 0xFF;
                 int off = 2;
@@ -395,7 +439,9 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                         stage("cap_rec" + sfi + "_" + r, bytesToHex(rec));
                         records.add(rec);
                         recNo++;
-                        log("   sfi " + sfi + " rec " + r + " ok");
+                        dump.write(rec, 0, rec.length);
+                        dumpResponses++;
+                        log("   sfi " + sfi + " rec " + r + " ok, " + rec.length + " byte(s)");
                     } catch (IOException e) {
                         log("   sfi " + sfi + " rec " + r + " " + e.getMessage());
                     }
@@ -403,6 +449,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
             }
         }
         log("   " + recNo + " record(s)");
+        writeDump(dump.toByteArray(), dumpResponses);
 
         byte[] cdol1 = null;
         for (byte[] rec : records) {
@@ -786,6 +833,62 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
 
     private void stage(String name, String value) {
         prefs.edit().putString(name, value).apply();
+    }
+
+    /**
+     * Writes the ODA dump capture (SELECT FCI || GPO response || each READ
+     * RECORD response, raw bytes, status word stripped, no re-wrapping - see
+     * where each piece is appended above) to the app's files dir as hex, one
+     * file per tap, so a truncated capture is still saved and still visible
+     * as truncated (see the per-response length log lines above).
+     */
+    private void writeDump(byte[] blob, int responseCount) {
+        int n = prefs.getInt(DUMP_COUNTER_KEY, 0);
+        prefs.edit().putInt(DUMP_COUNTER_KEY, n + 1).apply();
+        File f = new File(getFilesDir(), "dump-" + n + ".txt");
+        String hex = bytesToHex(blob);
+        try (FileOutputStream fos = new FileOutputStream(f)) {
+            fos.write(hex.getBytes(StandardCharsets.US_ASCII));
+        } catch (IOException e) {
+            log("   dump write failed: " + e.getMessage());
+            return;
+        }
+        lastDumpHex = hex;
+        lastDumpFile = f;
+        log("   dump written: " + f.getAbsolutePath()
+                + " (" + responseCount + " response(s), " + blob.length + " byte(s))");
+        ui.post(() -> {
+            btnCopyDump.setEnabled(true);
+            btnShareDump.setEnabled(true);
+        });
+    }
+
+    /** Clipboard, same pattern as MainActivity.copyCrashLog(). */
+    private void copyDump() {
+        if (lastDumpHex == null) {
+            Toast.makeText(this, "No dump captured yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("ODA dump", lastDumpHex));
+        Toast.makeText(this, "Dump copied, " + lastDumpHex.length() + " hex chars", Toast.LENGTH_SHORT).show();
+    }
+
+    /** Plain text, into whatever the user picks. No FileProvider needed - same pattern as MainActivity.shareCrashLog(). */
+    private void shareDump() {
+        if (lastDumpHex == null) {
+            Toast.makeText(this, "No dump captured yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_SUBJECT, lastDumpFile != null ? lastDumpFile.getName() : "ODA dump");
+        send.putExtra(Intent.EXTRA_TEXT, lastDumpHex);
+        try {
+            startActivity(Intent.createChooser(send, "Share ODA dump"));
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No app to share to - use Copy instead", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private static int sw(byte[] r) {
