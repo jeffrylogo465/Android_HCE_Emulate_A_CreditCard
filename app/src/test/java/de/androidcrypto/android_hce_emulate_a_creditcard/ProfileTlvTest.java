@@ -1,5 +1,6 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -128,5 +129,53 @@ public class ProfileTlvTest {
 
         String amex = new ProfileAmex().scriptConstants()[0];
         assertTrue("Amex directory names no kernel: " + amex, amex.contains("9F2A0104"));
+    }
+
+    /** One-byte-tag value by hex substring: tag, then a one-byte length, then that many value bytes. */
+    private static String tagValue1(String hex, String tagHex) {
+        int at = hex.indexOf(tagHex);
+        assertTrue(tagHex + " not found in " + hex, at >= 0);
+        int len = Integer.parseInt(hex.substring(at + tagHex.length(), at + tagHex.length() + 2), 16);
+        int from = at + tagHex.length() + 2;
+        return hex.substring(from, from + len * 2);
+    }
+
+    /**
+     * F03: ProfileMastercard.selectApp and ProfileAmex.selectApp build the
+     * FCI from the AID actually selected and the label argument - 84 is the
+     * AID, 5F2D the label - instead of baking both into a hand-typed
+     * constant. Checked for both profiles, since the fix is the same change
+     * made twice, not shared code.
+     */
+    @Test
+    public void f03_fciCarriesTheSelectedAidAndTheGivenLabel_mastercard() {
+        CardProfile p = new ProfileMastercard();
+        String aid = "A0000000041010";
+
+        String body1 = body(p.selectApp(aid, "HELLO")[0]);
+        assertEquals(aid, tagValue1(body1, "84"));
+        assertEquals(Hex.toHex("HELLO".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body1, "5F2D"));
+
+        String body2 = body(p.selectApp(aid, "WORLD")[0]);
+        assertEquals("a different label must change 5F2D",
+                Hex.toHex("WORLD".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body2, "5F2D"));
+    }
+
+    @Test
+    public void f03_fciCarriesTheSelectedAidAndTheGivenLabel_amex() {
+        CardProfile p = new ProfileAmex();
+        String aid = "A00000002501";
+
+        String body1 = body(p.selectApp(aid, "HELLO")[0]);
+        assertEquals(aid, tagValue1(body1, "84"));
+        assertEquals(Hex.toHex("HELLO".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body1, "5F2D"));
+
+        String body2 = body(p.selectApp(aid, "WORLD")[0]);
+        assertEquals("a different label must change 5F2D",
+                Hex.toHex("WORLD".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body2, "5F2D"));
     }
 }
