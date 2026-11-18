@@ -255,19 +255,26 @@ public final class OdaVerifier {
      * Whether the AFL's 4th byte (the count of records, from "first", that
      * are involved in offline data authentication - Book 3 10.3) is read
      * literally (true, the default) or ignored in favour of treating every
-     * record in [first, last] as an ODA record (count = last - first + 1).
+     * record in [first, last] as an ODA record regardless of its value.
      *
      * The redundancy argument for defaulting to the literal reading: Book 3
      * never requires a card to put a record in an SFI's AFL range that is
      * NOT used for ODA - there is no other reason for a record to be there
      * at all, since the AFL range outside of READ RECORD's own use is only
      * ever consulted for ODA. So on every real card we have seen, byte 4
-     * already equals last-first+1, and the two readings agree; the literal
-     * reading is kept as the one Book 3 actually specifies, with the
-     * [first,last] reading available behind this switch for a captured dump
-     * where the two disagree - e.g. a card that puts a record in the AFL for
-     * READ RECORD only, outside of any ODA use, which byte 4 would then
-     * correctly exclude but the switch's alternate reading would not.
+     * already names the full [first,last] range, and the two readings
+     * agree; the literal reading is kept as the one Book 3 actually
+     * specifies, with the [first,last] reading available behind this
+     * switch for a captured dump where the two disagree.
+     *
+     * A 4th byte of 0 means [first,last] EITHER WAY, literal or not: Book 3
+     * does not spend a whole AFL entry on zero ODA records with no other
+     * purpose, and buildStaticData() would otherwise contribute nothing for
+     * such an entry despite real cards shipping 0 here routinely - treating
+     * 0 as "the AFL's own range decides" rather than "no records" is what
+     * keeps the literal reading from silently dropping an entry this way.
+     * A nonzero byte 4 still only narrows [first,last] from the front and
+     * can never widen it past last - see buildStaticData()'s own doc.
      */
     static final boolean COUNT_FROM_FOURTH_BYTE = true;
 
@@ -290,12 +297,15 @@ public final class OdaVerifier {
      * them on what the AFL "actually says" for the same dump.
      *
      * The records read are always bounded to [first, last] - the entry's
-     * own named range - never past it: COUNT_FROM_FOURTH_BYTE only ever
-     * narrows that range from the front (an entry can flag fewer of its
-     * own records for ODA than it names for READ RECORD), it never widens
-     * it. A 4th byte larger than last-first+1 would otherwise read straight
-     * into whatever follows the entry - another entry, or an appended AID
-     * list - which is a record that was never really named by this one.
+     * own named range - never past it: a nonzero 4th byte (COUNT_FROM_
+     * FOURTH_BYTE) only ever narrows that range from the front (an entry
+     * can flag fewer of its own records for ODA than it names for READ
+     * RECORD), it never widens it, and a 4th byte of 0 means the entry's
+     * full [first,last] range, not zero records - see that constant's own
+     * doc on why. A 4th byte larger than last-first+1 would otherwise read
+     * straight into whatever follows the entry - another entry, or an
+     * appended AID list - which is a record that was never really named
+     * by this one.
      *
      * @param sdaTagList tag 9F4A, null when the card has none
      * @return the bytes, or null when a flagged record is missing or malformed
@@ -308,7 +318,7 @@ public final class OdaVerifier {
             int first = afl[i + 1] & 0xFF;
             int last = afl[i + 2] & 0xFF;
             int count = COUNT_FROM_FOURTH_BYTE ? (afl[i + 3] & 0xFF) : (last - first + 1);
-            int upTo = Math.min(last, first + count - 1);
+            int upTo = (count == 0) ? last : Math.min(last, first + count - 1);
             for (int r = first; r <= upTo; r++) {
                 byte[] rec = records.read(sfi, r);
                 if (rec == null) return null;
