@@ -17,8 +17,12 @@ Java 8 source level, minSdk 21, compileSdk 34, package
   resulting terminal log (e.g. `term-new*.log`) and say what happened.
 - EMV is byte-exact. Length bytes, tag order and FCI construction must match the
   existing tests. Do not "tidy" byte arrays.
-- `res/xml/apduservice.xml` and the AID strings in `res/values/strings.xml` are
-  load-bearing. The PPSE AID 325041592E5359532E4444463031 must not change.
+- `res/xml/apduservice.xml`'s literal AIDs are load-bearing - every AID the
+  app can advertise (buildPpse() etc.) must have a filter there, or Android
+  never routes the APDU to the service. The PPSE AID
+  325041592E5359532E4444463031 must not change. (res/values/strings.xml's
+  AID strings are not load-bearing - apduservice.xml uses literal AIDs, not
+  string refs.)
 - `app/src/test` is the source of truth for expected APDU bytes. If behavior
   changes, update the test in the same commit and say why.
 
