@@ -402,6 +402,7 @@ public class ReaderActivity extends AppCompatActivity implements NfcAdapter.Read
                             && looksLikeAfl(Arrays.copyOfRange(rest, 0, 4))) {
                         afl = Arrays.copyOfRange(rest, 0, 4);
                         rTrack2 = bcd(Arrays.copyOfRange(rest, 4, rest.length));
+                        log("   dump: AFL truncated to 4, remainder reclassified as track2");
                     } else {
                         rTrack2 = bcd(rest);
                     }
