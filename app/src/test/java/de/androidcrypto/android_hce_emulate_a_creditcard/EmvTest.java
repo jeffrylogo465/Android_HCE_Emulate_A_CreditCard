@@ -88,6 +88,32 @@ public class EmvTest {
         assertEquals(0x18, Emv.findTag(tpl, 0x82)[0] & 0xFF);
     }
 
+    // ---------------------------------------------------------- clearOdaKeepSda
+
+    /**
+     * Same three bits as clearOda() (DDA 0x20, issuer auth 0x04, CDA 0x01),
+     * minus SDA (0x40) - the one caller, mastercardGpoFromCard(), claims SDA
+     * on purpose (see Profiles.AIP_MC and term-new6.log) so it must survive.
+     * 0x7D is SDA | DDA | CV | TRM | issuer auth | CDA; expected 0x58
+     * (SDA | CV | TRM).
+     */
+    @Test
+    public void clearOdaKeepSdaStripsTheOtherThree() {
+        byte[] tpl = Emv.hex("770A82027D00940408010100");
+        Emv.clearOdaKeepSda(tpl);
+        byte[] aip = Emv.findTag(tpl, 0x82);
+        assertEquals(0x58, aip[0] & 0xFF);
+    }
+
+    /** SDA alone (0x40) must come back exactly as it went in. */
+    @Test
+    public void clearOdaKeepSdaLeavesSdaAlone() {
+        byte[] tpl = Emv.hex("770A82025800940408010100");
+        Emv.clearOdaKeepSda(tpl);
+        byte[] aip = Emv.findTag(tpl, 0x82);
+        assertEquals(0x58, aip[0] & 0xFF);
+    }
+
     // -------------------------------------------------------------- stripAcTags
 
     /** Format 1 has no inner TLVs, so it comes back as the same bytes. */

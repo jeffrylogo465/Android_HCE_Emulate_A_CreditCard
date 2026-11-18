@@ -131,6 +131,12 @@ final class Emv {
      * no real key can produce - so an AIP that claims any of the four buys a
      * failed ODA attempt and a TVR bit rather than a clean start.
      *
+     * Every caller here is serving a captured or hand-typed AIP (the
+     * captured-replay branch, the synthetic/boxed-AIP branch) - a claim this
+     * engine has no chain to back, SDA included, so this mask keeps clearing
+     * all four. See clearOdaKeepSda() for the one caller - the built-in
+     * Mastercard script - that claims SDA on purpose instead.
+     *
      * FIX: this used to clear 0x01 only, so SDA and DDA survived and a captured
      * card replayed its own claims verbatim.
      *
@@ -145,6 +151,28 @@ final class Emv {
      */
     static void clearOda(byte[] tpl) {
         editAipByte1(tpl, b -> (byte) (b & ~0x65));
+    }
+
+    /**
+     * Clear DDA, Issuer Authentication and CDA from the AIP of a GPO
+     * template, in place - the same three bits as clearOda(), minus SDA
+     * (0x40).
+     *
+     * clearOda() strips SDA along with the other three because every one of
+     * its callers is serving a captured or hand-typed AIP this engine has no
+     * chain to back. Profiles.AIP_MC is different: it is this app's own
+     * built-in Mastercard script, not a captured claim, and it claims SDA on
+     * purpose - see its own doc and term-new6.log, where a real Mastercard
+     * contactless kernel read the AIP right after GPO and, finding no CAM
+     * claimed at all (the old, fully-cleared AIP), terminated the tap before
+     * a single READ RECORD. ShadowApduService.mastercardGpoFromCard() is the
+     * one caller that wants SDA to survive the same clear-then-setCdcvm
+     * pipeline every other GPO builder runs, so it gets its own mask here
+     * instead of widening clearOda()'s and silently changing what every
+     * captured/boxed AIP is served with too.
+     */
+    static void clearOdaKeepSda(byte[] tpl) {
+        editAipByte1(tpl, b -> (byte) (b & ~0x25));
     }
 
     /**

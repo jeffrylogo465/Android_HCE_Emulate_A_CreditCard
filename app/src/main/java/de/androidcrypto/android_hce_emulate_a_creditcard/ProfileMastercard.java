@@ -30,11 +30,11 @@ public final class ProfileMastercard implements CardProfile {
             "6F46840E325041592E5359532E4444463031A534BF0C3161184F07A0000000041010500A4D617374657263617264870101"
           + "61154F07A000000004306050074D41455354524F870102";
 
-    private static final String FCI =
-            "6F198407A0000000041010A50E500C434849502042617365203031";
+    private static final String AID_MAESTRO = "A0000000043060";
 
-    private static final String MAESTRO_FCI =
-            "6F198407A0000000043060A50E500C434849502042617365203031";
+    /** F03: label text these two entries carried verbatim before the FCI
+     *  became built from the selectApp() label argument instead. */
+    private static final String DEFAULT_LABEL = "CHIP Base 01";
 
     // The reference card's own IAD. Byte 2 is the CVN: 0x10 = 16, so SKD.
     private static final String IAD = "0110A000092400000102000000000000FF";
@@ -91,15 +91,18 @@ public final class ProfileMastercard implements CardProfile {
     }
 
     /**
-     * `label` is deliberately unused. FCI/MAESTRO_FCI are the replayed
-     * plastic's own bytes, label included (see the class comment) - not
-     * parameterised, not rebuilt from whatever the box holds. Only the AID
-     * selects which of the two scripted entries answers.
+     * F03: the FCI is now built from each entry's own AID and the label
+     * argument (Profiles.selectedFci: 84 = the AID, 50 = the label),
+     * instead of baked verbatim into FCI/MAESTRO_FCI. `aid` is still
+     * unused - it never told the two lines apart (each is keyed on its own
+     * literal SELECT prefix) - only `label` now flows through, into both.
      */
     @Override public String[] selectApp(String aid, String label) {
         return new String[]{
-                "00A4040007A0000000041010=" + FCI + "9000",
-                "00A4040007A0000000043060=" + MAESTRO_FCI + "9000",
+                "00A4040007A0000000041010=" + Profiles.hex(Profiles.selectedFci(
+                        defaultAid(), label, null)) + "9000",
+                "00A4040007A0000000043060=" + Profiles.hex(Profiles.selectedFci(
+                        AID_MAESTRO, label, null)) + "9000",
         };
     }
 
@@ -107,8 +110,15 @@ public final class ProfileMastercard implements CardProfile {
         return Profiles.gpoMastercard(atc, arqc);
     }
 
-    // For TlvValidator. Its own directory and both FCIs.
+    // For TlvValidator. The directory is still hand-typed; both FCIs are
+    // built now (see selectApp()), same as ProfileVisa's own scriptConstants()
+    // - a representative label, not a hand-length bug TlvValidator could
+    // catch, but kept for the same nested-structure sanity check Visa keeps.
     @Override public String[] scriptConstants() {
-        return new String[]{PPSE, FCI, MAESTRO_FCI};
+        return new String[]{
+                PPSE,
+                Profiles.hex(Profiles.selectedFci(defaultAid(), DEFAULT_LABEL, null)),
+                Profiles.hex(Profiles.selectedFci(AID_MAESTRO, DEFAULT_LABEL, null)),
+        };
     }
 }

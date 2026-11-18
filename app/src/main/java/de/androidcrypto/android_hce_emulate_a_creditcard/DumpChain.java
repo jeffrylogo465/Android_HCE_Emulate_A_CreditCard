@@ -116,7 +116,7 @@ public final class DumpChain {
         }
 
         byte[] afl = flat.get(0x94);
-        if (afl.length % 4 != 0) return Result.fail("AFL length is not a multiple of 4");
+        if (!Afl.wellFormed(afl)) return Result.fail("AFL is not a well-formed run of 4-byte entries");
 
         if (templates70.size() > countAflRecords(afl)) {
             return Result.fail("AFL names " + countAflRecords(afl)
@@ -125,7 +125,7 @@ public final class DumpChain {
 
         Map<String, byte[]> records = new HashMap<>();
         int next = 0;
-        for (int i = 0; i < afl.length; i += 4) {
+        for (int i = 0; i + 4 <= afl.length; i = Afl.afterEntry(afl, i)) {
             int sfi = (afl[i] & 0xFF) >> 3;
             int first = afl[i + 1] & 0xFF;
             int last = afl[i + 2] & 0xFF;
@@ -162,9 +162,12 @@ public final class DumpChain {
         return Result.ok(c);
     }
 
+    /** Uses Afl.afterEntry(), not a bare i+=4 - see that class's own doc. */
     private static int countAflRecords(byte[] afl) {
         int n = 0;
-        for (int i = 0; i < afl.length; i += 4) n += (afl[i + 2] & 0xFF) - (afl[i + 1] & 0xFF) + 1;
+        for (int i = 0; i + 4 <= afl.length; i = Afl.afterEntry(afl, i)) {
+            n += (afl[i + 2] & 0xFF) - (afl[i + 1] & 0xFF) + 1;
+        }
         return n;
     }
 

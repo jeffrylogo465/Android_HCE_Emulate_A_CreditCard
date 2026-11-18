@@ -55,8 +55,9 @@ public final class ProfileAmex implements CardProfile {
     private static final String PPSE =
             "6F34840E325041592E5359532E4444463031A522BF0C1F611D4F06A00000002501500C414D455820426173652030318701019F2A0104";
 
-    private static final String FCI =
-            "6F1F8406A00000002501A515500C414D455820426173652030318701019F2A0104";
+    /** F03: label text this entry carried verbatim before the FCI became
+     *  built from the selectApp() label argument instead. */
+    private static final String DEFAULT_LABEL = "AMEX Base 01";
 
     private static final String AIP = "1880";
 
@@ -134,9 +135,16 @@ public final class ProfileAmex implements CardProfile {
         return Profiles.selectPpse(PPSE);
     }
 
-    /** `label` is deliberately unused - FCI is byte-exact, label included. See ProfileMastercard's selectApp(). */
+    /**
+     * F03: the FCI is now built from the AID actually selected and the
+     * label argument (Profiles.selectedFci: 84 = the AID, 50 = the
+     * label), instead of baked verbatim. 9F2A (kernel 4) is passed through
+     * as the extra tag - Amex still needs it, Mastercard carries none.
+     * `aid` is still unused - this profile has only one entry.
+     */
     @Override public String[] selectApp(String aid, String label) {
-        return new String[]{"00A4040006A00000002501=" + FCI + "9000"};
+        return new String[]{"00A4040006A00000002501=" + Profiles.hex(Profiles.selectedFci(
+                defaultAid(), label, Profiles.tlv(0x9F2A, new byte[]{0x04}))) + "9000"};
     }
 
     @Override public String gpo(String atc, String arqc) {
@@ -152,6 +160,10 @@ public final class ProfileAmex implements CardProfile {
      * build stops with "cannot implement scriptConstants() in CardProfile".
      */
     @Override public String[] scriptConstants() {
-        return new String[]{PPSE, FCI};
+        return new String[]{
+                PPSE,
+                Profiles.hex(Profiles.selectedFci(defaultAid(), DEFAULT_LABEL,
+                        Profiles.tlv(0x9F2A, new byte[]{0x04}))),
+        };
     }
 }

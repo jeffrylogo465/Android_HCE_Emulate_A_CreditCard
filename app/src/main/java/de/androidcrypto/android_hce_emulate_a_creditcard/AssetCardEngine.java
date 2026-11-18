@@ -487,9 +487,16 @@ final class AssetCardEngine {
         if ((p2 & 0x07) != 0x04) return sw("6A86");
         int sfi = p2 >> 3;
 
+        // Afl.afterEntry() - not a bare i+=4 - so a trailing, length-prefixed
+        // AID list after the last real entry (the same non-spec shape
+        // ShadowApduService's AFL_MC_PROBE_WITH_AID/aflContains() use) is
+        // skipped rather than misread as further entries (see Afl's own
+        // doc). Getting this wrong either falsely admits a record outside
+        // the real AFL, or misaligns every entry after the AID list so a
+        // legitimately named record is wrongly refused with 6A83.
         byte[] a = Hex.hex(currentAfl());
         boolean inAfl = false;
-        for (int i = 0; i + 4 <= a.length; i += 4) {
+        for (int i = 0; i + 4 <= a.length; i = Afl.afterEntry(a, i)) {
             if (((a[i] & 0xFF) >> 3) == sfi && rec >= (a[i + 1] & 0xFF) && rec <= (a[i + 2] & 0xFF)) {
                 inAfl = true;
             }

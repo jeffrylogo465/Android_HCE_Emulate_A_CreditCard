@@ -314,7 +314,7 @@ public class OdaVerifierTest {
         Map<String, byte[]> m = new HashMap<>();
         m.put("1/1", new byte[]{0x70, 0x03, 0x5A, 0x01, 0x11});          // SFI 1: strip 70 03
         m.put("1/2", new byte[]{0x70, 0x02, 0x5F, 0x24});
-        m.put("2/1", new byte[]{0x70, 0x01, 0x07});                      // flagged count 0 below
+        m.put("2/1", new byte[]{0x70, 0x01, 0x07});                      // flagged: 4th byte 0 below (full range)
         m.put("11/1", new byte[]{0x77, 0x02, 0x09, 0x09});               // SFI 11: whole record
         return m;
     }
@@ -330,13 +330,73 @@ public class OdaVerifierTest {
 
     @Test
     public void staticData_flaggedRecordsOnly_stripsTemplate_aipAfterRecords() {
-        // SFI1 recs 1-2 (2 flagged), SFI2 rec 1 (0 flagged), SFI11 rec 1 (1 flagged)
+        // SFI1 recs 1-2 (2 flagged), SFI2 rec 1 (4th byte 0 - the entry's
+        // full range, record 1, not zero records), SFI11 rec 1 (1 flagged)
         byte[] afl = {0x08, 0x01, 0x02, 0x02, 0x10, 0x01, 0x01, 0x00, 0x58, 0x01, 0x01, 0x01};
         byte[] aip = {0x18, 0x00};
         byte[] got = OdaVerifier.buildStaticData(afl, source(records()), aip, new byte[]{(byte) 0x82});
-        // 11 content bytes, right-padded with 0x00 to 16 (STATIC_DATA_PAD).
-        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00, 0, 0, 0, 0, 0};
+        // 12 content bytes, right-padded with 0x00 to 16 (STATIC_DATA_PAD).
+        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x07, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00, 0, 0, 0, 0};
         assertArrayEquals(want, got);
+    }
+
+    /**
+     * Same three entries and expected output as
+     * staticData_flaggedRecordsOnly_stripsTemplate_aipAfterRecords(), but
+     * with a 5-byte RID spliced in, length-prefixed, between entry 1 and
+     * entry 2 - the same non-spec appended-AID-list shape DumpChain.parse()
+     * already accepts into DumpChain.afl (see that class's own doc), which
+     * is exactly the afl this method is fed for a loaded dump via
+     * verifySda(). Before buildStaticData() shared the one AFL walk, this
+     * would have misread the spliced bytes as a bogus further entry and
+     * corrupted the hash input (or thrown it out via a spurious "missing
+     * record").
+     */
+    @Test
+    public void staticData_aflWithAppendedAid_sameResultAsWithoutIt() {
+        byte[] afl = {0x08, 0x01, 0x02, 0x02, 0x05, (byte) 0xA0, 0x00, 0x00, 0x00, 0x03,
+                0x10, 0x01, 0x01, 0x00, 0x58, 0x01, 0x01, 0x01};
+        byte[] aip = {0x18, 0x00};
+        byte[] got = OdaVerifier.buildStaticData(afl, source(records()), aip, new byte[]{(byte) 0x82});
+        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x07, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00, 0, 0, 0, 0};
+        assertArrayEquals(want, got);
+    }
+
+    /**
+     * Requested directly: a 4th byte of 0 must mean the entry's full
+     * [first,last] range, byte-identical to the same entry with the 4th
+     * byte spelling that range out explicitly (02 = last-first+1 here) -
+     * not zero records, which is what the bound in buildStaticData()'s own
+     * doc would otherwise give a 0.
+     */
+    @Test
+    public void staticData_fourthByteZero_isFirstToLast_sameAsExplicitCount() {
+        byte[] afl0 = {0x08, 0x01, 0x02, 0x00};
+        byte[] afl2 = {0x08, 0x01, 0x02, 0x02};
+        byte[] got0 = OdaVerifier.buildStaticData(afl0, source(records()), null, null);
+        byte[] got2 = OdaVerifier.buildStaticData(afl2, source(records()), null, null);
+        assertArrayEquals(new byte[]{0x5A, 0x01, 0x11, 0x5F, 0x24, 0, 0, 0}, got0);
+        assertArrayEquals(got2, got0);
+    }
+
+    /**
+     * The AFL's 4th byte (ODA count, COUNT_FROM_FOURTH_BYTE) can only ever
+     * narrow an entry's own [first, last] range from the front, never widen
+     * it: a 4th byte of 5 on an entry that only names record 1 (first=last=1)
+     * must still read just record 1, not reach for records 2-5, which this
+     * entry never named at all - whether or not records.read() would even
+     * return something for them. Before this bound, byte 4 alone decided
+     * the loop's end and this entry would have tried (and failed, since
+     * none of 2-5 exist here) to read four records it had no business
+     * naming.
+     */
+    @Test
+    public void staticData_fourthByteNeverReadsPastLast() {
+        Map<String, byte[]> m = new HashMap<>();
+        m.put("1/1", new byte[]{0x70, 0x03, 0x5A, 0x01, 0x11});
+        byte[] afl = {0x08, 0x01, 0x01, 0x05}; // SFI 1, first=last=1, 4th byte claims 5
+        byte[] got = OdaVerifier.buildStaticData(afl, source(m), new byte[]{0x18, 0x00}, null);
+        assertArrayEquals(new byte[]{0x5A, 0x01, 0x11, 0, 0, 0, 0, 0}, got);
     }
 
     @Test

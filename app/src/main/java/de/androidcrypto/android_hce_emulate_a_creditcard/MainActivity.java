@@ -1,6 +1,7 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import android.app.AlertDialog;
+import android.app.role.RoleManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -8,6 +9,7 @@ import android.content.SharedPreferences;
 import android.nfc.NfcAdapter;
 import android.nfc.NfcManager;
 import android.nfc.cardemulation.CardEmulation;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.Editable;
@@ -21,6 +23,8 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -110,6 +114,20 @@ public class MainActivity extends AppCompatActivity {
             "AMEX", "A00000002501", "1880", "", "001C" };
 
     private static final String ASKED_DEFAULT = "asked_default";
+    private static final String ASKED_WALLET_ROLE = "asked_wallet_role";
+
+    /**
+     * RoleManager.ROLE_WALLET does not exist in this app's compileSdk 34
+     * android.jar - verified with javap: the only public role constants
+     * at API 34 are ASSISTANT, BROWSER, CALL_REDIRECTION, CALL_SCREENING,
+     * DIALER, EMERGENCY, HOME, NOTES, SMS. isRoleAvailable()/isRoleHeld()/
+     * createRequestRoleIntent() all take a plain role-name String, not an
+     * enum, so this is hand-typed rather than left unimplemented - but it
+     * is UNVERIFIED against a real device/OS release: isRoleAvailable()
+     * may simply return false everywhere this runs, in which case nothing
+     * here ever fires and nothing says so.
+     */
+    private static final String ROLE_WALLET = "android.app.role.WALLET";
 
     private static final String[][] VARIANTS = {
             {"0", "CDOL, AIP, ATC, IAD  -  input order 0"},
@@ -156,6 +174,11 @@ public class MainActivity extends AppCompatActivity {
 
     private SharedPreferences prefs;
     private final List<CardAdapter.CardModel> cards = new ArrayList<>();
+
+    /** Registered in onCreate, before the activity is started - the result
+     *  is a no-op either way: RoleManager's own system UI is what the user
+     *  answers, this app never reads the result code back. */
+    private ActivityResultLauncher<Intent> walletRoleLauncher;
 
     /** Test-only reads of the in-memory card list - no XML id reaches these. */
     CardAdapter.CardModel cardAt(int i) { return cards.get(i); }
@@ -265,6 +288,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Must be registered before the activity is STARTED, so onCreate is
+        // the only place this can go - androidx throws if this runs any
+        // later. The callback is a no-op: the wallet-role request is a
+        // fire-and-forget system prompt, not something this app branches on.
+        walletRoleLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(), result -> { });
+
         // File, not clipboard. The old inline handler wrote the trace to the
         // clipboard and killed the process, which works while this activity is
         // in front - but a tap crash happens on the way to the background, when
@@ -275,6 +305,7 @@ public class MainActivity extends AppCompatActivity {
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
         prefs = Prefs.get(this);
+        maybeRequestWalletRole();
 
         pager = findViewById(R.id.pager);
         txtCount = findViewById(R.id.txtCount);
@@ -2977,6 +3008,42 @@ public class MainActivity extends AppCompatActivity {
                 startActivity(new Intent(Settings.ACTION_NFC_PAYMENT_SETTINGS));
             } catch (ActivityNotFoundException ignored) { }
         }
+    }
+
+    /**
+     * One-shot: asks Android's own ROLE_WALLET prompt (the system "set as
+     * default wallet app" dialog, API 29+) at most once per install, never
+     * on a later launch or resume even if the user declines or dismisses
+     * it. Deliberately independent of isDefaultPayment()/maybeAskDefault()
+     * above - the wallet role (Quick Access Wallet / wallet tile) and the
+     * NFC default-payment-app role are two different platform concepts,
+     * and this app wants both without conflating them.
+     *
+     * The ask-once decision lives in markWalletRoleAsked() so it is
+     * testable without a RoleManager (or an ActivityResultLauncher) to
+     * mock - see that method's own doc.
+     */
+    private void maybeRequestWalletRole() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        RoleManager rm = getSystemService(RoleManager.class);
+        if (rm == null) return;
+        if (!rm.isRoleAvailable(ROLE_WALLET)) return;
+        if (rm.isRoleHeld(ROLE_WALLET)) return;
+        if (!markWalletRoleAsked()) return;
+        walletRoleLauncher.launch(rm.createRequestRoleIntent(ROLE_WALLET));
+    }
+
+    /**
+     * True (and marks ASKED_WALLET_ROLE so every later call returns false)
+     * the first time this runs after a fresh install/Prefs.reset(); false
+     * every time after. Split out from maybeRequestWalletRole() itself so
+     * the ask-once gate is a plain prefs read/write a test can call
+     * directly, with no RoleManager or launcher involved at all.
+     */
+    boolean markWalletRoleAsked() {
+        if (prefs.getBoolean(ASKED_WALLET_ROLE, false)) return false;
+        prefs.edit().putBoolean(ASKED_WALLET_ROLE, true).apply();
+        return true;
     }
 
     private void maybeAskDefault() {

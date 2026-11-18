@@ -1,5 +1,6 @@
 package de.androidcrypto.android_hce_emulate_a_creditcard;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -128,5 +129,75 @@ public class ProfileTlvTest {
 
         String amex = new ProfileAmex().scriptConstants()[0];
         assertTrue("Amex directory names no kernel: " + amex, amex.contains("9F2A0104"));
+    }
+
+    /**
+     * One-byte-tag value by hex substring: tag, then a one-byte length, then
+     * that many value bytes. Matches only at an even index (a real byte
+     * boundary) - an odd-index hit is a tag straddling two unrelated bytes
+     * by coincidence, e.g. "50" matching across "A5" and a following "0F"
+     * length byte, which is exactly the false match this guards against.
+     */
+    private static String tagValue1(String hex, String tagHex) {
+        int at = -1;
+        int from = 0;
+        while (true) {
+            int i = hex.indexOf(tagHex, from);
+            assertTrue(tagHex + " not found at a byte boundary in " + hex, i >= 0);
+            if (i % 2 == 0) { at = i; break; }
+            from = i + 1;
+        }
+        int len = Integer.parseInt(hex.substring(at + tagHex.length(), at + tagHex.length() + 2), 16);
+        int valAt = at + tagHex.length() + 2;
+        return hex.substring(valAt, valAt + len * 2);
+    }
+
+    /**
+     * F03: ProfileMastercard.selectApp and ProfileAmex.selectApp build the
+     * FCI from the AID actually selected and the label argument - 84 is the
+     * AID, 50 the label - instead of baking both into a hand-typed
+     * constant. 5F2D is Language Preference, not the label - always "en",
+     * matching AssetCardEngine:360, regardless of what label is passed.
+     * Checked for both profiles, since the fix is the same change made
+     * twice, not shared code.
+     */
+    @Test
+    public void f03_fciCarriesTheSelectedAidAndTheGivenLabel_mastercard() {
+        CardProfile p = new ProfileMastercard();
+        String aid = "A0000000041010";
+
+        String body1 = body(p.selectApp(aid, "HELLO")[0]);
+        assertEquals(aid, tagValue1(body1, "84"));
+        assertEquals(Hex.toHex("HELLO".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body1, "50"));
+        assertEquals("5F2D must be the language, not the label", "656E",
+                tagValue1(body1, "5F2D"));
+
+        String body2 = body(p.selectApp(aid, "WORLD")[0]);
+        assertEquals("a different label must change 50",
+                Hex.toHex("WORLD".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body2, "50"));
+        assertEquals("5F2D must stay \"en\" regardless of the label", "656E",
+                tagValue1(body2, "5F2D"));
+    }
+
+    @Test
+    public void f03_fciCarriesTheSelectedAidAndTheGivenLabel_amex() {
+        CardProfile p = new ProfileAmex();
+        String aid = "A00000002501";
+
+        String body1 = body(p.selectApp(aid, "HELLO")[0]);
+        assertEquals(aid, tagValue1(body1, "84"));
+        assertEquals(Hex.toHex("HELLO".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body1, "50"));
+        assertEquals("5F2D must be the language, not the label", "656E",
+                tagValue1(body1, "5F2D"));
+
+        String body2 = body(p.selectApp(aid, "WORLD")[0]);
+        assertEquals("a different label must change 50",
+                Hex.toHex("WORLD".getBytes(java.nio.charset.StandardCharsets.US_ASCII)),
+                tagValue1(body2, "50"));
+        assertEquals("5F2D must stay \"en\" regardless of the label", "656E",
+                tagValue1(body2, "5F2D"));
     }
 }

@@ -995,12 +995,31 @@ public class ShadowApduService extends HostApduService {
         recsSinceSelect = 0;
     }
 
-    /** True when the AFL names this SFI and record. Each entry is 4 bytes. */
+    /**
+     * True when the AFL names this SFI and record.
+     *
+     * Each entry starts with the standard 4 bytes (SFI/start/end/ODA count).
+     * This also tolerates one appended length-prefixed field after an entry
+     * - a single length byte plus that many bytes, e.g. mastercardGpoFromCard()'s
+     * experimental AFL that appends an AID after the SFI 1/rec 1 entry
+     * (08 01 01 01 07 A0000000041010). That trailing AID is NOT a second EMV
+     * AFL entry - a real kernel's own 4-byte walk would misread it as one (07
+     * A0 00 00 as SFI 0 records 0xA0-0x00, then 00 41 01 0 left over, 13 bytes
+     * not a multiple of 4). This walk only has to not trip over those bytes
+     * itself while checking entry 1; it does not make the appended AID a
+     * second real entry.
+     */
     private static boolean aflContains(byte[] afl, int sfi, int rec) {
-        for (int i = 0; i + 4 <= afl.length; i += 4) {
+        int i = 0;
+        while (i + 4 <= afl.length) {
             if (((afl[i] & 0xFF) >> 3) == sfi
                     && rec >= (afl[i + 1] & 0xFF) && rec <= (afl[i + 2] & 0xFF)) {
                 return true;
+            }
+            i += 4;
+            if (i < afl.length) {
+                int len = afl[i] & 0xFF;
+                i += 1 + len;
             }
         }
         return false;
@@ -1777,6 +1796,60 @@ public class ShadowApduService extends HostApduService {
     }
 
     /**
+     * The Mastercard GPO, built from the card's own state instead of
+     * replayed from the canned script line: 77 { 82 aip, 94 afl }.
+     *
+     * term-new6.log is why this exists: a real Mastercard contactless kernel
+     * reads the AIP right after GPO, and with the old, fully-cleared AIP
+     * (no SDA/DDA/CDA at all) it judged the card had no CAM and ended the
+     * tap there - before a single READ RECORD. The script's canned GPO line
+     * (Profiles.gpoMastercard(), built once from the old AIP_MC) could not
+     * fix that on its own without this method, because scriptMatch() serves
+     * it byte for byte; this method is called instead of using those bytes,
+     * for the GPO only - PPSE and SELECT still come from the script.
+     *
+     * 82: Profiles.aipMc() (now claiming SDA on purpose - see that constant's
+     * own doc) through Emv.clearOdaKeepSda() then Emv.setCdcvm() - the same
+     * two-step edit the captured-replay and synthetic/boxed-AIP branches run
+     * on their own AIPs in gpo(), just with clearOda()'s SDA-stripping mask
+     * swapped for the one sibling that leaves SDA alone, because this AIP is
+     * this app's own deliberate claim, not a captured one. Byte 2 is now
+     * 0x40, EMV mode only (see AIP_MC's own doc), so the served AIP is 5A40.
+     *
+     * 94: EXPERIMENTAL, Mastercard-only, and NOT a spec-valid AFL -
+     * 08 01 01 01 07 A0000000041010 instead of Profiles.aflOneRaw()'s plain
+     * 08 01 01 00. This is a deliberate malformed-input probe against the
+     * same reader term-new6.log came from, after that reader took the clean
+     * one-entry AFL and still sent no READ RECORD: entry 1 now claims one
+     * offline-auth record instead of none, and the selected AID is appended
+     * after it with a length byte, on the chance a kernel that stalled on
+     * the plain AFL reads further into tag 94 than the first 4 bytes.
+     * A real kernel's own 4-byte-entry walk does not parse that tail as "an
+     * AID" - it is 13 bytes total, not a multiple of 4, so whatever a given
+     * kernel does with the overhang past entry 1 is exactly what this probe
+     * is for. AFL_RAW/AFL_ONE and every other profile's AFL are untouched;
+     * aflContains() tolerates the appended bytes so this app's own READ
+     * RECORD gate still honours entry 1 (see that method's doc).
+     *
+     * 9F6B is deliberately NOT sent here any more: it is an MSD track 2
+     * equivalent, this profile is EMV mode only (byte 2 of the AIP above
+     * says so), and serving it was steering a terminal down this card's
+     * unfinished MSD path instead of the EMV one it can actually attempt.
+     */
+    private static final String AFL_MC_PROBE_WITH_AID = "0801010107A0000000041010";
+
+    private byte[] mastercardGpoFromCard() {
+        byte[] wrap = tlv(0x77, tlv(0x82, Profiles.aipMc()));
+        Emv.clearOdaKeepSda(wrap);
+        Emv.setCdcvm(wrap);
+        byte[] aip = capturedAip(wrap);
+
+        return tlv(0x77, cat(
+                tlv(0x82, aip),
+                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID))));
+    }
+
+    /**
      * SFI/record that carries the skeleton, as "ssrr" hex.
      *
      * Falls back to the first AFL entry, then to SFI 1 rec 1.
@@ -2001,6 +2074,19 @@ public class ShadowApduService extends HostApduService {
                         tap("-- msd: gpo format 1 aip=" + bytesToHex(capturedAip(body))
                                 + " afl=" + bytesToHex(Arrays.copyOfRange(body, 2, body.length))
                                 + " payload=" + body.length + "B " + bytesToHex(body));
+                    } else if (readTag(body, new int[]{0}) == 0x77
+                            && findTag(body, 0x9F26) == null) {
+                        // Format 2, no AC in it yet - the Mastercard shape
+                        // (Visa's qVSDC script always carries 9F26/9F27, MSD
+                        // is format 1 and already handled above). Build the
+                        // response from the card instead of replaying the
+                        // canned line - see mastercardGpoFromCard()'s own doc
+                        // and term-new6.log for why the canned AIP alone
+                        // stalled a real terminal before READ RECORD.
+                        body = mastercardGpoFromCard();
+                        tap("-- script: GPO built from the card, not replayed | aip="
+                                + bytesToHex(findTag(body, 0x82))
+                                + " afl=" + bytesToHex(findTag(body, 0x94)));
                     }
                     byte[] sa = capturedAip(body);
                     if (sa != null && sa.length >= 2) {
