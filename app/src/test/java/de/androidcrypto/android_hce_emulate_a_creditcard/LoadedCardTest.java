@@ -160,7 +160,7 @@ public class LoadedCardTest {
 
         assertEquals("1234560012345608", c.tag("5A"));
         assertEquals("1234560012345608", c.pan());
-        assertEquals("291231", c.tag("5F24")); // YYMM + a defaulted day of 31
+        assertEquals("291231", c.tag("5F24")); // YYMM + December's real last day, 31
         assertEquals("291231", c.expiry());
         assertEquals("01", c.tag("5F34"));
         assertEquals("1234560012345608D2912201", c.tag("57")); // PAN, D, YYMM, SVC
@@ -172,6 +172,26 @@ public class LoadedCardTest {
         assertTrue(c.warnings().contains("92"));
         assertTrue(c.warnings().contains("9F46"));
         assertTrue(c.warnings().contains("ICCKEY"));
+    }
+
+    /**
+     * A bare track 2's derived 5F24 picks the real last day of the month,
+     * not a flat 31 - LoadedCard.lastDayOfMonth()'s own doc on the YY
+     * leap rule (2000+YY, divisible-by-4 alone is exact across the whole
+     * century this app will ever see a card year in).
+     */
+    @Test
+    public void bareTrack2_expiryDay_isTheRealLastDayOfTheMonth() {
+        // April (30 days) - not 31.
+        assertEquals("250430", LoadedCard.parse("1234560012345608=2504201\n").tag("5F24"));
+        // February, leap year (2024 % 4 == 0) - 29, not 28 or 31.
+        assertEquals("240229", LoadedCard.parse("1234560012345608=2402201\n").tag("5F24"));
+        // February, non-leap year (2025 % 4 != 0) - 28.
+        assertEquals("250228", LoadedCard.parse("1234560012345608=2502201\n").tag("5F24"));
+        // 2000 itself is a leap year under the full Gregorian rule (the
+        // divisible-by-400 exception to the divisible-by-100 exception),
+        // same answer as the simpler divisible-by-4 rule this app uses.
+        assertEquals("000229", LoadedCard.parse("1234560012345608=0002201\n").tag("5F24"));
     }
 
     /** A PAN with an odd digit count pads 5A with a trailing F, same as any other BCD field. */

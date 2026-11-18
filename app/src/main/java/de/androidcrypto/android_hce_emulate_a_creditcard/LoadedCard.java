@@ -192,10 +192,12 @@ final class LoadedCard {
     /**
      * A bare track 2 line - PAN D YYMMSVC[discretionary], no tag= prefix -
      * derives exactly the fields a real dump hands over and nothing it
-     * does not: 5A (PAN, BCD-padded), 5F24 (YYMM plus a defaulted day of
-     * 31 - track 2 carries no day), 57 (the full track 2 equivalent data:
-     * PAN, field separator D, YYMM, service code, discretionary, BCD-
-     * padded) and 5F34 (01, since track 2 carries no PAN sequence number).
+     * does not: 5A (PAN, BCD-padded), 5F24 (YYMM plus the real last day of
+     * that month - track 2 carries no day, and a real card's own 5F24
+     * always does hold the actual expiry date, which issuers set to the
+     * last day of the month), 57 (the full track 2 equivalent data: PAN,
+     * field separator D, YYMM, service code, discretionary, BCD-padded)
+     * and 5F34 (01, since track 2 carries no PAN sequence number).
      *
      * Applied directly into the tag map, same as any other line - a later
      * explicit 5A/5F24/57/5F34 line further down the block overwrites it,
@@ -213,12 +215,43 @@ final class LoadedCard {
         String discretionary = tail.substring(7);
 
         tags.put("5A", pan.length() % 2 == 0 ? pan : pan + "F");
-        tags.put("5F24", yymm + "31");
+        tags.put("5F24", yymm + lastDayOfMonth(yymm));
         tags.put("5F34", "01");
 
         String t2 = pan + "D" + yymm + serviceCode + discretionary;
         if (t2.length() % 2 != 0) t2 = t2 + "F";
         tags.put("57", t2);
+    }
+
+    /**
+     * The real last day of yymm's month - "31", "30", or "28"/"29" for
+     * February with the Gregorian leap rule on 2000+YY (every card year
+     * this app will ever see a bare track 2 for falls in that one century,
+     * so the divisible-by-100-except-divisible-by-400 exception never
+     * actually matters here - divisible-by-4 alone is exact across the
+     * whole 2000-2099 range, 2000 itself included). A month outside 01-12
+     * falls through to "31" rather than throwing - applyBareTrack2()'s own
+     * caller (the BARE_TRACK2 regex) does not itself bound-check the month,
+     * and a day digit at all beats refusing an otherwise-parseable card
+     * over a field track 2 never carried in the first place.
+     */
+    private static String lastDayOfMonth(String yymm) {
+        int mm;
+        try {
+            mm = Integer.parseInt(yymm.substring(2, 4));
+        } catch (NumberFormatException notDigits) {
+            return "31";
+        }
+        switch (mm) {
+            case 4: case 6: case 9: case 11:
+                return "30";
+            case 2:
+                int yy = Integer.parseInt(yymm.substring(0, 2));
+                boolean leap = (2000 + yy) % 4 == 0;
+                return leap ? "29" : "28";
+            default:
+                return "31";
+        }
     }
 
     /** This card's own value for an EMV tag, or null - never the shared profile's. */
