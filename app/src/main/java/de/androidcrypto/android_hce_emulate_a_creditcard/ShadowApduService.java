@@ -2314,6 +2314,17 @@ public class ShadowApduService extends HostApduService {
         byte[] raw = rawGpo();
         boolean msd = isMsd();
 
+        boolean replay = raw != null && raw.length >= 4;
+        tap("-- gpo branch=" + (replay ? "replay" : "builder")
+                + " framing=" + ((replay && (raw[0] & 0xFF) == 0x80) ? "80" : "77")
+                + " msd=" + msd);
+        if (raw != null) {
+            String blob = bytesToHex(raw);
+            for (int i = 0; i < blob.length(); i += 512) {
+                tap("-- replay blob " + i + ": " + blob.substring(i, Math.min(blob.length(), i + 512)));
+            }
+        }
+
         if (raw != null && raw.length >= 4) {
             int[] q = new int[1];
             int outer = readTag(raw, q);
