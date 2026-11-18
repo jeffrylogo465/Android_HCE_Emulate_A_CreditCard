@@ -200,4 +200,26 @@ public class ProfileTlvTest {
         assertEquals("5F2D must stay \"en\" regardless of the label", "656E",
                 tagValue1(body2, "5F2D"));
     }
+
+    /**
+     * Profiles.selectedFci() now advertises 9F38 (the PDOL) so the terminal's
+     * GPO carries a PDOL-built 83 instead of the ARQC-only path. The value is
+     * ShadowApduService.CDOL1 itself, not a hand-typed copy, so the two
+     * cannot drift apart. everyScriptConstantBalances() already proves the
+     * outer TLV lengths stay correct with the new field inserted; this test
+     * is only about the field's presence and content.
+     */
+    @Test
+    public void f03_fciCarries9F38WithTheStandardPdol_mastercard() {
+        CardProfile p = new ProfileMastercard();
+        String body = body(p.selectApp("A0000000041010", "HELLO")[0]);
+        assertEquals(ShadowApduService.CDOL1, tagValue1(body, "9F38"));
+    }
+
+    @Test
+    public void f03_fciCarries9F38WithTheStandardPdol_amex() {
+        CardProfile p = new ProfileAmex();
+        String body = body(p.selectApp("A00000002501", "HELLO")[0]);
+        assertEquals(ShadowApduService.CDOL1, tagValue1(body, "9F38"));
+    }
 }

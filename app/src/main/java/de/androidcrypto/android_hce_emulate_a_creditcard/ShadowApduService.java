@@ -150,7 +150,9 @@ public class ShadowApduService extends HostApduService {
      * nothing. Typing into them changed the preview and not the card.
      */
     private static final String PDOL    = "9F02069F03069F1A0295055F2A029A039C019F3704";
-    private static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
+    // Package-visible: Profiles.selectedFci() advertises this same box as 9F38
+    // and references this constant directly so the two cannot drift apart.
+    static final String CDOL1   = "9F02069F03069F1A0295055F2A029A039C019F3704";
     private static final String CDOL2   = "9F02069F03069F1A0295055F2A029A039C019F37049F3403";
 
     /**

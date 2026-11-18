@@ -205,6 +205,7 @@ public final class Profiles {
         byte[] prop = cat(
                 tlv(0x50, l.getBytes(StandardCharsets.US_ASCII)),
                 tlv(0x5F2D, Hex.hex("656E")),
+                tlv(0x9F38, Hex.hex(ShadowApduService.CDOL1)),
                 tlv(0x87, new byte[]{0x01}));
         if (extra != null) prop = cat(prop, extra);
         return tlv(0x6F, cat(tlv(0x84, Hex.hex(aidHex)), tlv(0xA5, prop)));
