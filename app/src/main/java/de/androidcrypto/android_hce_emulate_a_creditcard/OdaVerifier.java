@@ -278,13 +278,24 @@ public final class OdaVerifier {
      * exactly tag 82, then (when STATIC_DATA_PAD) 0x00 bytes up to a multiple
      * of 8. The AFL itself is not hashed.
      *
+     * The AFL walk goes through DumpChain.aflWellFormed()/afterAflEntry()
+     * rather than a bare "i += 4" loop: afl here is routinely a dump's own
+     * tag 94 (DumpChain.afl, passed straight through verifySda()), which
+     * DumpChain.parse() already allows to carry a trailing, length-prefixed
+     * AID list after its real entries (see that class's own doc). A flat
+     * 4-byte walk would misread those bytes as a bogus further entry and
+     * either read the wrong records into the hash or throw records.read()
+     * at an SFI/record that was never really named - sharing DumpChain's
+     * walk instead of a second copy keeps the two from disagreeing on what
+     * the AFL "actually says" for the same dump.
+     *
      * @param sdaTagList tag 9F4A, null when the card has none
      * @return the bytes, or null when a flagged record is missing or malformed
      */
     public static byte[] buildStaticData(byte[] afl, RecordSource records, byte[] aip, byte[] sdaTagList) {
-        if (afl.length % 4 != 0) return null;
+        if (!DumpChain.aflWellFormed(afl)) return null;
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (int i = 0; i < afl.length; i += 4) {
+        for (int i = 0; i + 4 <= afl.length; i = DumpChain.afterAflEntry(afl, i)) {
             int sfi = (afl[i] & 0xFF) >> 3;
             int first = afl[i + 1] & 0xFF;
             int last = afl[i + 2] & 0xFF;

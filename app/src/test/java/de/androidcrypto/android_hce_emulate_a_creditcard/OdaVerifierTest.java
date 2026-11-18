@@ -339,6 +339,28 @@ public class OdaVerifierTest {
         assertArrayEquals(want, got);
     }
 
+    /**
+     * Same three entries and expected output as
+     * staticData_flaggedRecordsOnly_stripsTemplate_aipAfterRecords(), but
+     * with a 5-byte RID spliced in, length-prefixed, between entry 1 and
+     * entry 2 - the same non-spec appended-AID-list shape DumpChain.parse()
+     * already accepts into DumpChain.afl (see that class's own doc), which
+     * is exactly the afl this method is fed for a loaded dump via
+     * verifySda(). Before buildStaticData() shared DumpChain's
+     * afterAflEntry()/aflWellFormed() walk, this would have misread the
+     * spliced bytes as a bogus further entry and corrupted the hash input
+     * (or thrown it out via a spurious "missing record").
+     */
+    @Test
+    public void staticData_aflWithAppendedAid_sameResultAsWithoutIt() {
+        byte[] afl = {0x08, 0x01, 0x02, 0x02, 0x05, (byte) 0xA0, 0x00, 0x00, 0x00, 0x03,
+                0x10, 0x01, 0x01, 0x00, 0x58, 0x01, 0x01, 0x01};
+        byte[] aip = {0x18, 0x00};
+        byte[] got = OdaVerifier.buildStaticData(afl, source(records()), aip, new byte[]{(byte) 0x82});
+        byte[] want = {0x5A, 0x01, 0x11, 0x5F, 0x24, 0x77, 0x02, 0x09, 0x09, 0x18, 0x00, 0, 0, 0, 0, 0};
+        assertArrayEquals(want, got);
+    }
+
     @Test
     public void staticData_noTagList_noAip() {
         byte[] afl = {0x08, 0x01, 0x01, 0x01};

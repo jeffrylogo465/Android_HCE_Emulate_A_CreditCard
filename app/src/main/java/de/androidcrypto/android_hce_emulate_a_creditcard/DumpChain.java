@@ -189,8 +189,12 @@ public final class DumpChain {
      * mistake the AID list for. This class's AFLs are not that constrained
      * (see DumpChainTest/AssetCardEngineDumpTest's own multi-entry AFLs),
      * so the check here is required, not optional.
+     *
+     * Package-visible so OdaVerifier.buildStaticData() - which walks the
+     * same dump-sourced AFL for the same reason - shares this walk instead
+     * of carrying a second, driftable copy of it.
      */
-    private static int afterAflEntry(byte[] afl, int i) {
+    static int afterAflEntry(byte[] afl, int i) {
         int next = i + 4;
         if (next + 4 <= afl.length) {
             int first = afl[next + 1] & 0xFF;
@@ -209,8 +213,10 @@ public final class DumpChain {
      * followed by one appended field, see {@link #afterAflEntry} - that
      * lands exactly on the AFL's own end. Anything that overruns or falls
      * short is malformed.
+     *
+     * Package-visible - see {@link #afterAflEntry}'s own doc on why.
      */
-    private static boolean aflWellFormed(byte[] afl) {
+    static boolean aflWellFormed(byte[] afl) {
         int i = 0;
         while (i < afl.length) {
             if (i + 4 > afl.length) return false;
