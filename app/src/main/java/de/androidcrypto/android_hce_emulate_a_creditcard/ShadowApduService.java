@@ -995,12 +995,31 @@ public class ShadowApduService extends HostApduService {
         recsSinceSelect = 0;
     }
 
-    /** True when the AFL names this SFI and record. Each entry is 4 bytes. */
+    /**
+     * True when the AFL names this SFI and record.
+     *
+     * Each entry starts with the standard 4 bytes (SFI/start/end/ODA count).
+     * This also tolerates one appended length-prefixed field after an entry
+     * - a single length byte plus that many bytes, e.g. mastercardGpoFromCard()'s
+     * experimental AFL that appends an AID after the SFI 1/rec 1 entry
+     * (08 01 01 01 07 A0000000041010). That trailing AID is NOT a second EMV
+     * AFL entry - a real kernel's own 4-byte walk would misread it as one (07
+     * A0 00 00 as SFI 0 records 0xA0-0x00, then 00 41 01 0 left over, 13 bytes
+     * not a multiple of 4). This walk only has to not trip over those bytes
+     * itself while checking entry 1; it does not make the appended AID a
+     * second real entry.
+     */
     private static boolean aflContains(byte[] afl, int sfi, int rec) {
-        for (int i = 0; i + 4 <= afl.length; i += 4) {
+        int i = 0;
+        while (i + 4 <= afl.length) {
             if (((afl[i] & 0xFF) >> 3) == sfi
                     && rec >= (afl[i + 1] & 0xFF) && rec <= (afl[i + 2] & 0xFF)) {
                 return true;
+            }
+            i += 4;
+            if (i < afl.length) {
+                int len = afl[i] & 0xFF;
+                i += 1 + len;
             }
         }
         return false;
@@ -1796,9 +1815,20 @@ public class ShadowApduService extends HostApduService {
      * swapped for the one sibling that leaves SDA alone, because this AIP is
      * this app's own deliberate claim, not a captured one.
      *
-     * 94: the one-entry AFL constant every Mastercard GPO serves (SFI 1,
-     * record 1 to 1, none for offline auth) - Profiles.aflOneRaw(), not a
-     * second hand-typed copy.
+     * 94: EXPERIMENTAL, Mastercard-only, and NOT a spec-valid AFL -
+     * 08 01 01 01 07 A0000000041010 instead of Profiles.aflOneRaw()'s plain
+     * 08 01 01 00. This is a deliberate malformed-input probe against the
+     * same reader term-new6.log came from, after that reader took the clean
+     * one-entry AFL and still sent no READ RECORD: entry 1 now claims one
+     * offline-auth record instead of none, and the selected AID is appended
+     * after it with a length byte, on the chance a kernel that stalled on
+     * the plain AFL reads further into tag 94 than the first 4 bytes.
+     * A real kernel's own 4-byte-entry walk does not parse that tail as "an
+     * AID" - it is 13 bytes total, not a multiple of 4, so whatever a given
+     * kernel does with the overhang past entry 1 is exactly what this probe
+     * is for. AFL_RAW/AFL_ONE and every other profile's AFL are untouched;
+     * aflContains() tolerates the appended bytes so this app's own READ
+     * RECORD gate still honours entry 1 (see that method's doc).
      *
      * 9F6B: msdRecord()'s own track 2 equivalent for this slot - 9F6B first
      * (Mastercard's own tag), falling back to 57 (the shape some hand-typed
@@ -1806,6 +1836,8 @@ public class ShadowApduService extends HostApduService {
      * skeleton is configured at all, so a bare slot still serves a real
      * track rather than an empty tag.
      */
+    private static final String AFL_MC_PROBE_WITH_AID = "0801010107A0000000041010";
+
     private byte[] mastercardGpoFromCard() {
         byte[] wrap = tlv(0x77, tlv(0x82, Profiles.aipMc()));
         Emv.clearOdaKeepSda(wrap);
@@ -1819,7 +1851,7 @@ public class ShadowApduService extends HostApduService {
 
         return tlv(0x77, cat(
                 tlv(0x82, aip),
-                tlv(0x94, Profiles.aflOneRaw()),
+                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID)),
                 tlv(0x9F6B, t2)));
     }
 
