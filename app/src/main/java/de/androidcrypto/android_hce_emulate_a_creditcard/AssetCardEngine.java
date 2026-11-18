@@ -487,33 +487,18 @@ final class AssetCardEngine {
         if ((p2 & 0x07) != 0x04) return sw("6A86");
         int sfi = p2 >> 3;
 
-        // Flat 4-byte hops, but a trailing, length-prefixed AID list after
-        // the last real entry (the same non-spec shape ShadowApduService's
-        // AFL_MC_PROBE_WITH_AID/aflContains() use) is skipped rather than
-        // misread as further entries: the 4 bytes right after an entry are
-        // only trusted as another entry when they pass the same last>=first
-        // test a real entry must pass anyway (see DumpChain.afterAflEntry(),
-        // which this mirrors - that class's AFLs are genuinely multi-entry,
-        // unlike aflContains()'s one caller, so the same unconditional skip
-        // would mis-walk them). Getting this wrong either falsely admits a
-        // record outside the real AFL, or misaligns every entry after the
-        // AID list so a legitimately named record is wrongly refused with
-        // 6A83.
+        // Afl.afterEntry() - not a bare i+=4 - so a trailing, length-prefixed
+        // AID list after the last real entry (the same non-spec shape
+        // ShadowApduService's AFL_MC_PROBE_WITH_AID/aflContains() use) is
+        // skipped rather than misread as further entries (see Afl's own
+        // doc). Getting this wrong either falsely admits a record outside
+        // the real AFL, or misaligns every entry after the AID list so a
+        // legitimately named record is wrongly refused with 6A83.
         byte[] a = Hex.hex(currentAfl());
         boolean inAfl = false;
-        int i = 0;
-        while (i + 4 <= a.length) {
+        for (int i = 0; i + 4 <= a.length; i = Afl.afterEntry(a, i)) {
             if (((a[i] & 0xFF) >> 3) == sfi && rec >= (a[i + 1] & 0xFF) && rec <= (a[i + 2] & 0xFF)) {
                 inAfl = true;
-            }
-            int next = i + 4;
-            if (next + 4 <= a.length && (a[next + 2] & 0xFF) >= (a[next + 1] & 0xFF)) {
-                i = next; // looks like a real entry - let the loop read it as one
-            } else if (next < a.length) {
-                int len = a[next] & 0xFF;
-                i = next + 1 + len;
-            } else {
-                i = next;
             }
         }
         if (!inAfl) return sw("6A83");

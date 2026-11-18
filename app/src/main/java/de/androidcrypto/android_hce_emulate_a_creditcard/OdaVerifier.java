@@ -278,29 +278,38 @@ public final class OdaVerifier {
      * exactly tag 82, then (when STATIC_DATA_PAD) 0x00 bytes up to a multiple
      * of 8. The AFL itself is not hashed.
      *
-     * The AFL walk goes through DumpChain.aflWellFormed()/afterAflEntry()
-     * rather than a bare "i += 4" loop: afl here is routinely a dump's own
-     * tag 94 (DumpChain.afl, passed straight through verifySda()), which
+     * The AFL walk goes through Afl.wellFormed()/afterEntry() rather than a
+     * bare "i += 4" loop: afl here is routinely a dump's own tag 94
+     * (DumpChain.afl, passed straight through verifySda()), which
      * DumpChain.parse() already allows to carry a trailing, length-prefixed
-     * AID list after its real entries (see that class's own doc). A flat
-     * 4-byte walk would misread those bytes as a bogus further entry and
-     * either read the wrong records into the hash or throw records.read()
-     * at an SFI/record that was never really named - sharing DumpChain's
-     * walk instead of a second copy keeps the two from disagreeing on what
-     * the AFL "actually says" for the same dump.
+     * AID list after its real entries (see Afl's own doc). A flat 4-byte
+     * walk would misread those bytes as a bogus further entry and either
+     * read the wrong records into the hash or throw records.read() at an
+     * SFI/record that was never really named - sharing the one walk every
+     * other AFL-reading class uses keeps this method from disagreeing with
+     * them on what the AFL "actually says" for the same dump.
+     *
+     * The records read are always bounded to [first, last] - the entry's
+     * own named range - never past it: COUNT_FROM_FOURTH_BYTE only ever
+     * narrows that range from the front (an entry can flag fewer of its
+     * own records for ODA than it names for READ RECORD), it never widens
+     * it. A 4th byte larger than last-first+1 would otherwise read straight
+     * into whatever follows the entry - another entry, or an appended AID
+     * list - which is a record that was never really named by this one.
      *
      * @param sdaTagList tag 9F4A, null when the card has none
      * @return the bytes, or null when a flagged record is missing or malformed
      */
     public static byte[] buildStaticData(byte[] afl, RecordSource records, byte[] aip, byte[] sdaTagList) {
-        if (!DumpChain.aflWellFormed(afl)) return null;
+        if (!Afl.wellFormed(afl)) return null;
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (int i = 0; i + 4 <= afl.length; i = DumpChain.afterAflEntry(afl, i)) {
+        for (int i = 0; i + 4 <= afl.length; i = Afl.afterEntry(afl, i)) {
             int sfi = (afl[i] & 0xFF) >> 3;
             int first = afl[i + 1] & 0xFF;
             int last = afl[i + 2] & 0xFF;
             int count = COUNT_FROM_FOURTH_BYTE ? (afl[i + 3] & 0xFF) : (last - first + 1);
-            for (int r = first; r < first + count; r++) {
+            int upTo = Math.min(last, first + count - 1);
+            for (int r = first; r <= upTo; r++) {
                 byte[] rec = records.read(sfi, r);
                 if (rec == null) return null;
                 if (sfi >= 1 && sfi <= 10) {

@@ -116,7 +116,7 @@ public final class DumpChain {
         }
 
         byte[] afl = flat.get(0x94);
-        if (!aflWellFormed(afl)) return Result.fail("AFL is not a well-formed run of 4-byte entries");
+        if (!Afl.wellFormed(afl)) return Result.fail("AFL is not a well-formed run of 4-byte entries");
 
         if (templates70.size() > countAflRecords(afl)) {
             return Result.fail("AFL names " + countAflRecords(afl)
@@ -125,7 +125,7 @@ public final class DumpChain {
 
         Map<String, byte[]> records = new HashMap<>();
         int next = 0;
-        for (int i = 0; i + 4 <= afl.length; i = afterAflEntry(afl, i)) {
+        for (int i = 0; i + 4 <= afl.length; i = Afl.afterEntry(afl, i)) {
             int sfi = (afl[i] & 0xFF) >> 3;
             int first = afl[i + 1] & 0xFF;
             int last = afl[i + 2] & 0xFF;
@@ -162,67 +162,13 @@ public final class DumpChain {
         return Result.ok(c);
     }
 
+    /** Uses Afl.afterEntry(), not a bare i+=4 - see that class's own doc. */
     private static int countAflRecords(byte[] afl) {
         int n = 0;
-        for (int i = 0; i + 4 <= afl.length; i = afterAflEntry(afl, i)) {
+        for (int i = 0; i + 4 <= afl.length; i = Afl.afterEntry(afl, i)) {
             n += (afl[i + 2] & 0xFF) - (afl[i + 1] & 0xFF) + 1;
         }
         return n;
-    }
-
-    /**
-     * The index of the next AFL entry after the 4-byte one starting at
-     * {@code i}. Usually that is just i+4 - most AFLs are nothing but a run
-     * of real entries, like profile.json's own three, and i+4 is the next
-     * one. But a real dump's AFL can also carry a trailing, length-prefixed
-     * AID list after its last real entry - the same non-spec shape
-     * ShadowApduService's AFL_MC_PROBE_WITH_AID/aflContains() use - so
-     * i+4's own bytes are checked before trusting them as another entry:
-     * a real AFL entry always has last >= first (DumpChain.parse() itself
-     * fails any entry where that is not true), so when the 4 bytes at i+4
-     * fail that test, or there are not even 4 of them left, they are not a
-     * second entry at all - they are one length byte plus that many bytes
-     * of appended AID data to skip instead.
-     *
-     * aflContains() does not need this check: its only caller always has
-     * exactly one real entry, so there is never a genuine second entry to
-     * mistake the AID list for. This class's AFLs are not that constrained
-     * (see DumpChainTest/AssetCardEngineDumpTest's own multi-entry AFLs),
-     * so the check here is required, not optional.
-     *
-     * Package-visible so OdaVerifier.buildStaticData() - which walks the
-     * same dump-sourced AFL for the same reason - shares this walk instead
-     * of carrying a second, driftable copy of it.
-     */
-    static int afterAflEntry(byte[] afl, int i) {
-        int next = i + 4;
-        if (next + 4 <= afl.length) {
-            int first = afl[next + 1] & 0xFF;
-            int last = afl[next + 2] & 0xFF;
-            if (last >= first) return next; // looks like a real entry - let the walk read it as one
-        }
-        if (next < afl.length) {
-            int len = afl[next] & 0xFF;
-            next += 1 + len;
-        }
-        return next;
-    }
-
-    /**
-     * True when the AFL is a run of valid 4-byte entries - each optionally
-     * followed by one appended field, see {@link #afterAflEntry} - that
-     * lands exactly on the AFL's own end. Anything that overruns or falls
-     * short is malformed.
-     *
-     * Package-visible - see {@link #afterAflEntry}'s own doc on why.
-     */
-    static boolean aflWellFormed(byte[] afl) {
-        int i = 0;
-        while (i < afl.length) {
-            if (i + 4 > afl.length) return false;
-            i = afterAflEntry(afl, i);
-        }
-        return true;
     }
 
     private static String tagName(int t) { return String.format("%02X", t); }

@@ -361,6 +361,26 @@ public class OdaVerifierTest {
         assertArrayEquals(want, got);
     }
 
+    /**
+     * The AFL's 4th byte (ODA count, COUNT_FROM_FOURTH_BYTE) can only ever
+     * narrow an entry's own [first, last] range from the front, never widen
+     * it: a 4th byte of 5 on an entry that only names record 1 (first=last=1)
+     * must still read just record 1, not reach for records 2-5, which this
+     * entry never named at all - whether or not records.read() would even
+     * return something for them. Before this bound, byte 4 alone decided
+     * the loop's end and this entry would have tried (and failed, since
+     * none of 2-5 exist here) to read four records it had no business
+     * naming.
+     */
+    @Test
+    public void staticData_fourthByteNeverReadsPastLast() {
+        Map<String, byte[]> m = new HashMap<>();
+        m.put("1/1", new byte[]{0x70, 0x03, 0x5A, 0x01, 0x11});
+        byte[] afl = {0x08, 0x01, 0x01, 0x05}; // SFI 1, first=last=1, 4th byte claims 5
+        byte[] got = OdaVerifier.buildStaticData(afl, source(m), new byte[]{0x18, 0x00}, null);
+        assertArrayEquals(new byte[]{0x5A, 0x01, 0x11, 0, 0, 0, 0, 0}, got);
+    }
+
     @Test
     public void staticData_noTagList_noAip() {
         byte[] afl = {0x08, 0x01, 0x01, 0x01};
