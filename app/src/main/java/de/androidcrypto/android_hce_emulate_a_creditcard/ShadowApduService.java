@@ -1797,7 +1797,7 @@ public class ShadowApduService extends HostApduService {
 
     /**
      * The Mastercard GPO, built from the card's own state instead of
-     * replayed from the canned script line: 77 { 82 aip, 94 afl, 9F6B track2 }.
+     * replayed from the canned script line: 77 { 82 aip, 94 afl }.
      *
      * term-new6.log is why this exists: a real Mastercard contactless kernel
      * reads the AIP right after GPO, and with the old, fully-cleared AIP
@@ -1813,7 +1813,8 @@ public class ShadowApduService extends HostApduService {
      * two-step edit the captured-replay and synthetic/boxed-AIP branches run
      * on their own AIPs in gpo(), just with clearOda()'s SDA-stripping mask
      * swapped for the one sibling that leaves SDA alone, because this AIP is
-     * this app's own deliberate claim, not a captured one.
+     * this app's own deliberate claim, not a captured one. Byte 2 is now
+     * 0x40, EMV mode only (see AIP_MC's own doc), so the served AIP is 5A40.
      *
      * 94: EXPERIMENTAL, Mastercard-only, and NOT a spec-valid AFL -
      * 08 01 01 01 07 A0000000041010 instead of Profiles.aflOneRaw()'s plain
@@ -1830,11 +1831,10 @@ public class ShadowApduService extends HostApduService {
      * aflContains() tolerates the appended bytes so this app's own READ
      * RECORD gate still honours entry 1 (see that method's doc).
      *
-     * 9F6B: msdRecord()'s own track 2 equivalent for this slot - 9F6B first
-     * (Mastercard's own tag), falling back to 57 (the shape some hand-typed
-     * skeletons use) and finally to the live track2() field when no
-     * skeleton is configured at all, so a bare slot still serves a real
-     * track rather than an empty tag.
+     * 9F6B is deliberately NOT sent here any more: it is an MSD track 2
+     * equivalent, this profile is EMV mode only (byte 2 of the AIP above
+     * says so), and serving it was steering a terminal down this card's
+     * unfinished MSD path instead of the EMV one it can actually attempt.
      */
     private static final String AFL_MC_PROBE_WITH_AID = "0801010107A0000000041010";
 
@@ -1844,15 +1844,9 @@ public class ShadowApduService extends HostApduService {
         Emv.setCdcvm(wrap);
         byte[] aip = capturedAip(wrap);
 
-        byte[] rec = msdRecord();
-        byte[] t2 = rec == null ? null : findTag(rec, 0x9F6B);
-        if (t2 == null && rec != null) t2 = findTag(rec, 0x57);
-        if (t2 == null) t2 = track2();
-
         return tlv(0x77, cat(
                 tlv(0x82, aip),
-                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID)),
-                tlv(0x9F6B, t2)));
+                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID))));
     }
 
     /**
@@ -2092,8 +2086,7 @@ public class ShadowApduService extends HostApduService {
                         body = mastercardGpoFromCard();
                         tap("-- script: GPO built from the card, not replayed | aip="
                                 + bytesToHex(findTag(body, 0x82))
-                                + " afl=" + bytesToHex(findTag(body, 0x94))
-                                + " track2=" + bytesToHex(findTag(body, 0x9F6B)));
+                                + " afl=" + bytesToHex(findTag(body, 0x94)));
                     }
                     byte[] sa = capturedAip(body);
                     if (sa != null && sa.length >= 2) {

@@ -13,7 +13,7 @@ public final class Profiles {
 
     private static final String PPSE = "325041592E5359532E4444463031";
 
-    // Mastercard AIP 58 80. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
+    // Mastercard AIP 58 40. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
     // 0x08 TRM 0x04 issuer auth 0x02 on-device CVM 0x01 CDA.
     // 0x58 = SDA + CV + TRM. DDA, issuer auth and CDA stay clear - a clone
     // cannot do a real DDA/CDA signature and has no ARPC to answer issuer
@@ -30,9 +30,14 @@ public final class Profiles {
     // this bit fixes. Emv.clearOda() no longer strips this bit for exactly
     // this reason - see its own doc.
     //
-    // Byte 2 b8 is "EMV mode supported" and stays on; the MSD path masks it
-    // in the service.
-    private static final String AIP_MC = "5880";
+    // Byte 2 is now 0x40, EMV mode only - b8 (mag-stripe) clear, b7 (EMV
+    // mode) set, the same pattern AIP_VISA already uses for qVSDC below.
+    // It had been 0x80 (b8 set), which steered a terminal down this card's
+    // unfinished MSD path; this profile is EMV mode only, so b8 has nothing
+    // to claim and b7 is what a Mastercard EMV-mode kernel actually checks.
+    // The MSD path still masks byte 2 of its own separately-served AIP in
+    // the service and does not go through this constant.
+    private static final String AIP_MC = "5840";
 
     // Visa 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM.
     //

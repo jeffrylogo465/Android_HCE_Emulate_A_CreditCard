@@ -3,6 +3,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
@@ -395,10 +396,15 @@ public class ShadowApduServicePpseTest {
      * ended the tap there - before a single READ RECORD (term-new6.log).
      * The default profile script's canned GPO line for Mastercard's shape
      * (format 2, no AC yet) is no longer served verbatim:
-     * mastercardGpoFromCard() builds 82/94/9F6B fresh instead, and this is
+     * mastercardGpoFromCard() builds 82/94 fresh instead, and this is
      * what a terminal receives with the default script still armed - no
      * disableDefaultProfileScript() here, unlike the synthetic-branch tests
      * above.
+     *
+     * 9F6B must NOT be in this GPO: this profile is EMV mode only (AIP byte
+     * 2 is 0x40, not the old MSD-steering 0x80 - see Profiles.AIP_MC's own
+     * doc), and 9F6B is an MSD track 2 equivalent that has no business in
+     * an EMV-mode response.
      */
     @Test
     public void scriptedMastercardGpo_isBuiltFromTheCard_notReplayed() {
@@ -413,7 +419,8 @@ public class ShadowApduServicePpseTest {
         byte[] body = Hex.hex(gpo.substring(0, gpo.length() - 4));
         assertNotNull("82 (AIP) missing", Emv.findTag(body, 0x82));
         assertNotNull("94 (AFL) missing", Emv.findTag(body, 0x94));
-        assertNotNull("9F6B (track 2) missing", Emv.findTag(body, 0x9F6B));
+        assertNull("9F6B (track 2) must not be served - EMV mode only now",
+                Emv.findTag(body, 0x9F6B));
 
         byte[] aip = Emv.findTag(body, 0x82);
         int b1 = aip[0] & 0xFF;
@@ -421,5 +428,8 @@ public class ShadowApduServicePpseTest {
         assertEquals("DDA bit (0x20) must stay clear", 0, b1 & 0x20);
         assertEquals("CDA bit (0x01) must stay clear", 0, b1 & 0x01);
         assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+
+        int b2 = aip[1] & 0xFF;
+        assertEquals("byte 2 must be exactly 0x40 - EMV mode only", 0x40, b2);
     }
 }
