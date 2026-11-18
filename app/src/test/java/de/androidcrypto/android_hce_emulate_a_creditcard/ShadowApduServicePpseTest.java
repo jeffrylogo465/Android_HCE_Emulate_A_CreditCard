@@ -401,10 +401,24 @@ public class ShadowApduServicePpseTest {
      * disableDefaultProfileScript() here, unlike the synthetic-branch tests
      * above.
      *
-     * 9F6B must NOT be in this GPO: this profile is EMV mode only (AIP byte
-     * 2 is 0x40, not the old MSD-steering 0x80 - see Profiles.AIP_MC's own
-     * doc), and 9F6B is an MSD track 2 equivalent that has no business in
-     * an EMV-mode response.
+     * SDA IS NO LONGER CLAIMED. Claiming it (AIP_MC 5840) got a real kernel
+     * past the no-CAM stop above and, once 9F38 reached the FCI, into a
+     * PDOL-driven GPO - but every tap since (term-new9.log, term-new10.log)
+     * still stalled at the same place, GPO answered 9000 and no READ RECORD
+     * followed. Profiles.AIP_MC is back to 1800 (no ODA bit at all, byte 2
+     * clear) to isolate whether the unbacked SDA claim is itself what a
+     * later check now rejects, now that the PDOL round trip is not the
+     * blocker. clearOdaKeepSda()/setCdcvm() still run on top of that, so
+     * the served byte 1 is CV + TRM + CDCVM (0x1A), not the bare 0x18.
+     *
+     * 94 (AFL) is the plain one-entry SFI-1-record-1 shape too -
+     * AFL_MC_PROBE_WITH_AID dropped its non-spec appended-AID-list tail for
+     * the same reason: no tap ever showed a kernel reading past the first
+     * 4 bytes, so the probe bought nothing and is gone.
+     *
+     * 9F6B must NOT be in this GPO: this profile is EMV mode only, and 9F6B
+     * is an MSD track 2 equivalent that has no business in an EMV-mode
+     * response.
      */
     @Test
     public void scriptedMastercardGpo_isBuiltFromTheCard_notReplayed() {
@@ -424,12 +438,18 @@ public class ShadowApduServicePpseTest {
 
         byte[] aip = Emv.findTag(body, 0x82);
         int b1 = aip[0] & 0xFF;
-        assertEquals("SDA bit (0x40) must be claimed", 0x40, b1 & 0x40);
+        assertEquals("SDA bit (0x40) must not be claimed", 0, b1 & 0x40);
         assertEquals("DDA bit (0x20) must stay clear", 0, b1 & 0x20);
         assertEquals("CDA bit (0x01) must stay clear", 0, b1 & 0x01);
         assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x1A - 0x18 survivors plus the CDCVM bit", 0x1A, b1);
 
         int b2 = aip[1] & 0xFF;
-        assertEquals("byte 2 must be exactly 0x40 - EMV mode only", 0x40, b2);
+        assertEquals("byte 2 must be exactly 0x00 - no mag-stripe, no EMV-mode claim",
+                0x00, b2);
+
+        byte[] afl = Emv.findTag(body, 0x94);
+        assertEquals("AFL must be the plain one-entry shape, no appended AID tail",
+                "08010100", Hex.toHex(afl));
     }
 }

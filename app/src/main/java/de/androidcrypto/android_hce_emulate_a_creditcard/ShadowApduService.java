@@ -1810,35 +1810,41 @@ public class ShadowApduService extends HostApduService {
      * it byte for byte; this method is called instead of using those bytes,
      * for the GPO only - PPSE and SELECT still come from the script.
      *
-     * 82: Profiles.aipMc() (now claiming SDA on purpose - see that constant's
-     * own doc) through Emv.clearOdaKeepSda() then Emv.setCdcvm() - the same
-     * two-step edit the captured-replay and synthetic/boxed-AIP branches run
-     * on their own AIPs in gpo(), just with clearOda()'s SDA-stripping mask
-     * swapped for the one sibling that leaves SDA alone, because this AIP is
-     * this app's own deliberate claim, not a captured one. Byte 2 is now
-     * 0x40, EMV mode only (see AIP_MC's own doc), so the served AIP is 5A40.
+     * 82: Profiles.aipMc() through Emv.clearOdaKeepSda() then
+     * Emv.setCdcvm() - the same two-step edit the captured-replay and
+     * synthetic/boxed-AIP branches run on their own AIPs in gpo(), just with
+     * clearOda()'s SDA-stripping mask swapped for the one sibling that
+     * leaves SDA alone, because this AIP is this app's own deliberate claim,
+     * not a captured one.
      *
-     * 94: EXPERIMENTAL, Mastercard-only, and NOT a spec-valid AFL -
-     * 08 01 01 01 07 A0000000041010 instead of Profiles.aflOneRaw()'s plain
-     * 08 01 01 00. This is a deliberate malformed-input probe against the
-     * same reader term-new6.log came from, after that reader took the clean
-     * one-entry AFL and still sent no READ RECORD: entry 1 now claims one
-     * offline-auth record instead of none, and the selected AID is appended
-     * after it with a length byte, on the chance a kernel that stalled on
-     * the plain AFL reads further into tag 94 than the first 4 bytes.
-     * A real kernel's own 4-byte-entry walk does not parse that tail as "an
-     * AID" - it is 13 bytes total, not a multiple of 4, so whatever a given
-     * kernel does with the overhang past entry 1 is exactly what this probe
-     * is for. AFL_RAW/AFL_ONE and every other profile's AFL are untouched;
-     * aflContains() tolerates the appended bytes so this app's own READ
-     * RECORD gate still honours entry 1 (see that method's doc).
+     * AIP_MC ITSELF IS BACK TO 1800 (see that constant's own doc) - no ODA
+     * bit claimed at all, byte 2 all clear. Claiming SDA (5840, the
+     * intermediate value term-new6.log through term-new10.log ran with) got
+     * a real Mastercard kernel past the immediate no-CAM stop and, once
+     * 9F38 reached the FCI, into a PDOL-driven GPO - but every tap since
+     * still stalled at the same point, GPO answered 9000 and no READ RECORD
+     * followed. Reverting the AIP claim isolates whether the unbacked SDA
+     * bit is itself the new rejection once the PDOL round trip stopped
+     * being the blocker. clearOdaKeepSda()/setCdcvm() still run on top of
+     * whatever AIP_MC holds, so the actually-served byte 1 is CV + TRM +
+     * CDCVM (0x1A), not the bare 0x18.
      *
-     * 9F6B is deliberately NOT sent here any more: it is an MSD track 2
-     * equivalent, this profile is EMV mode only (byte 2 of the AIP above
-     * says so), and serving it was steering a terminal down this card's
-     * unfinished MSD path instead of the EMV one it can actually attempt.
+     * 94: AFL_MC_PROBE_WITH_AID is now the plain, spec-valid one-entry AFL -
+     * 08 01 01 00, SFI 1, record 1 to 1, no offline-auth records - with the
+     * non-spec appended-AID-list tail (07 A0000000041010) dropped. That tail
+     * was the same malformed-input probe this method's name still carries:
+     * on the chance a kernel that stalled on the plain AFL read further into
+     * tag 94 than the first 4 bytes. No tap has shown any sign that was ever
+     * read; dropping it alongside the AIP revert narrows the GPO back to
+     * exactly what a plain card would send.
+     *
+     * 9F6B is still NOT sent here: it is an MSD track 2 equivalent and this
+     * profile is EMV mode only. A served GPO that still carries it (or looks
+     * otherwise unchanged across taps) is not coming from this method -
+     * capturedAip()/findTag() on the actual bytes in the tap log is the way
+     * to confirm what went out, not a visual "looks the same."
      */
-    private static final String AFL_MC_PROBE_WITH_AID = "0801010107A0000000041010";
+    private static final String AFL_MC_PROBE_WITH_AID = "08010100";
 
     private byte[] mastercardGpoFromCard() {
         byte[] wrap = tlv(0x77, tlv(0x82, Profiles.aipMc()));

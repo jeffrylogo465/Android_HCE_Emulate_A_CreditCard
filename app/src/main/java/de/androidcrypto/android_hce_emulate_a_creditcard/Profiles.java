@@ -13,31 +13,23 @@ public final class Profiles {
 
     private static final String PPSE = "325041592E5359532E4444463031";
 
-    // Mastercard AIP 58 40. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
+    // Mastercard AIP 18 00. Byte 1: 0x80 RFU 0x40 SDA 0x20 DDA 0x10 CV
     // 0x08 TRM 0x04 issuer auth 0x02 on-device CVM 0x01 CDA.
-    // 0x58 = SDA + CV + TRM. DDA, issuer auth and CDA stay clear - a clone
-    // cannot do a real DDA/CDA signature and has no ARPC to answer issuer
-    // auth with, so those three still buy nothing but a failed check.
+    // 0x18 = CV + TRM only - no ODA bit, no CDCVM. Byte 2 is 0x00: neither
+    // the mag-stripe bit nor the EMV-mode bit.
     //
-    // SDA (0x40) IS CLAIMED ON PURPOSE despite this clone having no SDA
-    // chain either - see term-new6.log: a real Mastercard contactless
-    // kernel reads the AIP right after GPO and, with every ODA bit clear
-    // (the old 0x18), decided this card offered no CAM at all and ended the
-    // tap there, before a single READ RECORD. Claiming SDA gets the kernel
-    // past that check; the SDA signature itself is a separate, later
-    // failure (a TVR bit and a forced-online) rather than an immediate
-    // stop with no records read, which is the actual, reproducible failure
-    // this bit fixes. Emv.clearOda() no longer strips this bit for exactly
-    // this reason - see its own doc.
-    //
-    // Byte 2 is now 0x40, EMV mode only - b8 (mag-stripe) clear, b7 (EMV
-    // mode) set, the same pattern AIP_VISA already uses for qVSDC below.
-    // It had been 0x80 (b8 set), which steered a terminal down this card's
-    // unfinished MSD path; this profile is EMV mode only, so b8 has nothing
-    // to claim and b7 is what a Mastercard EMV-mode kernel actually checks.
-    // The MSD path still masks byte 2 of its own separately-served AIP in
-    // the service and does not go through this constant.
-    private static final String AIP_MC = "5840";
+    // REVERTED FROM THE SDA-CLAIMING 5840 (term-new6.log / term-new9.log /
+    // term-new10.log): claiming SDA got a real Mastercard contactless
+    // kernel past its immediate "no CAM at all" stop and into a PDOL-driven
+    // GPO once 9F38 was added to the FCI (term-new10.log), but every tap
+    // since has still stalled at the same place - GPO answered 9000, no
+    // READ RECORD ever follows. This constant and AFL_MC_PROBE_WITH_AID's
+    // non-spec AID suffix (see that constant) are the two remaining
+    // deliberate deviations from a plain card on this path; going back to
+    // 1800 here isolates whether the claimed-but-unbacked SDA bit itself is
+    // what a later check in the kernel is now rejecting, now that the PDOL
+    // round trip is no longer the blocker.
+    private static final String AIP_MC = "1800";
 
     // Visa 58 00. b8 is mag-stripe, b7 is qVSDC. 0x58 = qVSDC + CV + TRM.
     //
