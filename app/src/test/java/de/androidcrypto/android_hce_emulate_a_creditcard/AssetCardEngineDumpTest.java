@@ -251,4 +251,54 @@ public class AssetCardEngineDumpTest {
         eng.loadDump(dumpBlob(true), cas);
         assertEquals(OdaVerifier.Step.CA_KEY, eng.lastDumpVerify().failedStep);
     }
+
+    // ------------------------------------------------- AFL with an appended AID list
+
+    /**
+     * ShadowApduService's AFL_MC_PROBE_WITH_AID (Mastercard-only, GPO-built)
+     * is not the only place this non-spec shape can show up: a captured
+     * dump's own AFL can carry the same thing - an entry followed by a
+     * length-prefixed AID - and both DumpChain.parse() and
+     * AssetCardEngine.readRecord() must step over it the same way
+     * ShadowApduService's aflContains() does, not misread it as further
+     * 4-byte entries.
+     *
+     * The AID (05 A000000003, a 5-byte RID) is spliced in right after the
+     * first of profile.json's own three AFL entries - not at the end - so a
+     * naive flat 4-byte walk doesn't just misread it as one bogus entry; it
+     * loses alignment for every entry after it. In particular the third
+     * entry (SFI 3, records 1-2) falls off the end of a naive walk's last
+     * 4-byte chunk entirely (18 bytes total, 18/4 has a remainder), so a
+     * walk that doesn't skip the AID field would wrongly 6A83 SFI 3's own
+     * records, not just fail to reject bytes that aren't really there.
+     */
+    @Test
+    public void dumpAflWithAppendedAid_resolvesItsOwnRecords_6A83sOutsideThem() throws Exception {
+        String aflWithAid = "08020200" + "05A000000003" + "10010200" + "18010201";
+
+        byte[] blob = Tlv.cat(
+                Tlv.t(0x84, Hex.hex(tags.get("84"))),
+                allRecordsInAflOrder(),
+                Tlv.t(0x77, Tlv.cat(Tlv.t(0x82, Hex.hex(aip)), Tlv.t(0x94, Hex.hex(aflWithAid)))));
+
+        eng.loadDump(blob, null);
+        send(SELECT_AID);
+        send(GPO);
+
+        // SFI 1 rec 2 (before the appended AID), SFI 2 rec 1/2 and SFI 3
+        // rec 1/2 (both after it) all still resolve to their own bytes.
+        assertEquals(Hex.toHex(record("1:2")) + "9000", send("00B2020C00"));
+        assertEquals(Hex.toHex(record("2:1")) + "9000", send("00B2011400"));
+        assertEquals(Hex.toHex(record("2:2")) + "9000", send("00B2021400"));
+        assertEquals(Hex.toHex(record("3:1")) + "9000", send("00B2011C00"));
+        assertEquals(Hex.toHex(record("3:2")) + "9000", send("00B2021C00"));
+
+        // SFI 1 rec 1 is genuinely outside the AFL (entry 1 only names
+        // rec 2-2).
+        assertEquals("6A83", send("00B2010C00"));
+        // SFI 0 is not named anywhere in the real AFL either - a walk that
+        // misreads the appended AID's bytes as a bogus wide-range SFI 0
+        // entry must not let this through.
+        assertEquals("6A83", send("00B2050400"));
+    }
 }
