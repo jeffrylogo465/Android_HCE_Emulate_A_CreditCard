@@ -2,6 +2,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -130,6 +131,19 @@ public class LoadedCardTest {
         assertEquals("", c.discretionary());
     }
 
+    /**
+     * The three bytes at the service-code offset are hex-valid (so an
+     * explicit 57 line passes parse()'s own Hex.hex() check) but not all
+     * decimal digits - "A0A", not "301" - so serviceCode() must say null
+     * rather than hand back three bytes that are not a real service code.
+     */
+    @Test
+    public void serviceCode_nonDigitBytes_isNullNotServed() {
+        LoadedCard c = LoadedCard.parse(
+                "5A=1234560012345608\n5F24=291231\n57=1234560012345608D2912A0A1234\n");
+        assertNull(c.serviceCode());
+    }
+
     @Test
     public void missingIccKey_loadsWithAWarningAndNoIccKey() {
         String block = goodBlock().replaceAll("(?m)^ICCKEY=.*\\n", "");
@@ -147,6 +161,35 @@ public class LoadedCardTest {
         LoadedCard c = LoadedCard.parse(block);
         assertTrue(c.warnings().toString(), c.warnings().contains("8F"));
         assertTrue(c.warnings().toString(), c.warnings().contains("ICCKEY"));
+    }
+
+    /**
+     * 84's RID says Mastercard; the PAN's own leading digit (4...) says
+     * Visa. A real card never carries this pair, but it still serves - a
+     * warning, not the refusal PAN/expiry get.
+     */
+    @Test
+    public void aidRidDisagreesWithPanScheme_isWarnedNotRefused() {
+        LoadedCard c = LoadedCard.parse(
+                "5A=4111111111111111\n5F24=291231\n84=A0000000041010\n");
+        boolean warned = false;
+        for (String w : c.warnings()) if (w.startsWith("AID/PAN mismatch")) warned = true;
+        assertTrue(c.warnings().toString(), warned);
+    }
+
+    /** Same AID, a PAN whose leading digits actually are Mastercard's (51-55) - no mismatch warning. */
+    @Test
+    public void aidRidAgreesWithPanScheme_noMismatchWarning() {
+        LoadedCard c = LoadedCard.parse(
+                "5A=5412345678901234\n5F24=291231\n84=A0000000041010\n");
+        for (String w : c.warnings()) assertFalse(w, w.startsWith("AID/PAN mismatch"));
+    }
+
+    /** No 84 at all - nothing to cross-check, so no mismatch warning either way. */
+    @Test
+    public void noAid_noMismatchWarning() {
+        LoadedCard c = LoadedCard.parse("5A=4111111111111111\n5F24=291231\n");
+        for (String w : c.warnings()) assertFalse(w, w.startsWith("AID/PAN mismatch"));
     }
 
     /**

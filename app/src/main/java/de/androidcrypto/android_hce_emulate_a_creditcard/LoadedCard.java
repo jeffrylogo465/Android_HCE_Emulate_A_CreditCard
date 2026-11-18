@@ -148,6 +148,19 @@ final class LoadedCard {
         for (String t : WARN_TAGS) if (!tags.containsKey(t)) warnings.add(t);
         if (iccKeyHex == null) warnings.add("ICCKEY");
 
+        // Mismatch, not a refusal - see the class doc's split between what
+        // is required and what is merely worth flagging. Both 84 and 5A
+        // are read straight out of the tag map (not pan(), an instance
+        // method - this still is one) with the same trailing-F BCD strip.
+        String aidHex = tags.get("84");
+        if (aidHex != null) {
+            Brands.Network aidNet = Brands.networkFromAid(aidHex);
+            Brands.Network panNet = Brands.networkFromPan(stripBcdPad(tags.get("5A")));
+            if (aidNet != Brands.Network.UNKNOWN && panNet != Brands.Network.UNKNOWN && aidNet != panNet) {
+                warnings.add("AID/PAN mismatch (AID " + aidNet + ", PAN " + panNet + ")");
+            }
+        }
+
         BigInteger modulus = null;
         BigInteger privateExponent = null;
         if (iccKeyHex != null) {
@@ -261,10 +274,11 @@ final class LoadedCard {
      * The PAN out of tag 5A, with BCD's single trailing 'F' pad nibble
      * stripped for an odd-length PAN, or null if this card has no 5A.
      */
-    String pan() {
-        String v = tag("5A");
-        if (v == null) return null;
-        return v.endsWith("F") ? v.substring(0, v.length() - 1) : v;
+    String pan() { return stripBcdPad(tag("5A")); }
+
+    /** BCD's single trailing 'F' pad nibble stripped, or v (even v == null) unchanged. */
+    private static String stripBcdPad(String v) {
+        return (v != null && v.endsWith("F")) ? v.substring(0, v.length() - 1) : v;
     }
 
     /** Expiry out of tag 5F24 (YYMMDD, already the exact digits), or null. */
@@ -278,10 +292,19 @@ final class LoadedCard {
      * YYMM, SVC, discretionary) rather than kept as separate fields - one
      * source of truth whether 57 came from an explicit line or was derived
      * from a bare track 2. Null/empty when this card has no 57.
+     *
+     * The three bytes at the service-code offset are validated as digits
+     * before being handed back - an explicit, hand-typed 57 is hex-
+     * validated at parse time (Hex.hex() in parse()) but not shape-checked
+     * against where track2Rest() expects the service code to sit, so a
+     * malformed or mis-sliced 57 could otherwise hand a caller three bytes
+     * that are not a service code at all rather than saying so.
      */
     String serviceCode() {
         String rest = track2Rest(); // YYMM + SVC + discretionary
-        return rest == null || rest.length() < 7 ? null : rest.substring(4, 7);
+        if (rest == null || rest.length() < 7) return null;
+        String sc = rest.substring(4, 7);
+        return sc.matches("\\d{3}") ? sc : null;
     }
 
     String discretionary() {

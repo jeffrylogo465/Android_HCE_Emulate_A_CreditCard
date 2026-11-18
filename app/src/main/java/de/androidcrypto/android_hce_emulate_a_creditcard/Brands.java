@@ -130,17 +130,30 @@ public final class Brands {
     // ------------------------------------------------------------------ network
 
     public static Network network(String aid, String pan) {
-        if (aid != null) {
-            String a = aid.toUpperCase(Locale.US).replaceAll("[^0-9A-F]", "");
-            if (a.startsWith("A000000152")) return Network.DISCOVER;
-            if (a.startsWith("A000000003")) return Network.VISA;
-            if (a.startsWith("A000000004")) return Network.MASTERCARD;
-            if (a.startsWith("A000000025")) return Network.AMEX;
-            if (a.startsWith("A000000065")) return Network.JCB;
-            if (a.startsWith("A000000333")) return Network.UNIONPAY;
-            if (a.startsWith("A000000324")) return Network.DINERS;
-        }
-        return networkFromPan(pan);
+        Network byAid = networkFromAid(aid);
+        return byAid != Network.UNKNOWN ? byAid : networkFromPan(pan);
+    }
+
+    /**
+     * The network an AID's RID implies, UNKNOWN if aid is null or its RID
+     * is not one of the schemes here. Split out of network() so a caller
+     * that wants the AID's OWN answer - not network()'s "prefer the AID,
+     * fall back to the PAN" blend - can get it without losing the PAN
+     * fallback for everyone else (LoadedCard.parse()'s AID/PAN scheme
+     * cross-check needs exactly this; network() itself still calls this
+     * and falls through to networkFromPan() the same way it always has).
+     */
+    public static Network networkFromAid(String aid) {
+        if (aid == null) return Network.UNKNOWN;
+        String a = aid.toUpperCase(Locale.US).replaceAll("[^0-9A-F]", "");
+        if (a.startsWith("A000000152")) return Network.DISCOVER;
+        if (a.startsWith("A000000003")) return Network.VISA;
+        if (a.startsWith("A000000004")) return Network.MASTERCARD;
+        if (a.startsWith("A000000025")) return Network.AMEX;
+        if (a.startsWith("A000000065")) return Network.JCB;
+        if (a.startsWith("A000000333")) return Network.UNIONPAY;
+        if (a.startsWith("A000000324")) return Network.DINERS;
+        return Network.UNKNOWN;
     }
 
     public static Network networkFromPan(String pan) {
