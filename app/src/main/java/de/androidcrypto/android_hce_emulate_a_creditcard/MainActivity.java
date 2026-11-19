@@ -821,7 +821,7 @@ public class MainActivity extends AppCompatActivity {
         if (newNet || t(etAtc).isEmpty()) etAtc.setText(f[4]);
         if (shape && (t(etMsd).isEmpty() || t(etMsd).equals(prevMsd))) etMsd.setText(msdDefault(net));
         if (shape && (t(etCid).isEmpty() || t(etCid).equalsIgnoreCase(prevCid))) etCid.setText(cidDefault(net));
-        if (newNet) etAfl.setText("");
+        if (newNet) { aflDirty = false; etAfl.setText(""); }
         if (prefs.getString(key(current, "script"), "").trim().isEmpty()) etScript.setText("");
 
         String[] known = knownFor(pan);
@@ -1046,6 +1046,7 @@ public class MainActivity extends AppCompatActivity {
         applyProfile(d[0], net);
 
         binding = true;
+        aflDirty = false;
         etAfl.setText("");
         binding = false;
         collect();
@@ -3266,6 +3267,7 @@ public class MainActivity extends AppCompatActivity {
         if (!iad.isEmpty()) etIad.setText(iad);
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
+        aflDirty = false;
         etAfl.setText("");
         etCid.setText("");
         etScript.setText("");
