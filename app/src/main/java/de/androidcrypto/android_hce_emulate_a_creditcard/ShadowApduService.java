@@ -1983,6 +1983,13 @@ public class ShadowApduService extends HostApduService {
 
             tap(">> " + bytesToHex(apdu));
 
+            String sm = null;
+            if ((ins & 0xFF) == 0xA8) {
+                sm = useScript() ? scriptMatch(apdu) : null;
+                tap("-- gpo path: "
+                        + (sm != null ? "script" : rawGpo() != null ? "replay" : "builder"));
+            }
+
             // The mrautio test card from assets/profile.json, when switched on.
             // It answers the whole tap itself, so none of the script, MAC and
             // prefs-driven machinery below runs for it.
