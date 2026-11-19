@@ -2074,7 +2074,12 @@ public class ShadowApduService extends HostApduService {
             else if (ins == 0xAE) nGens++;
             else if (ins == 0x2A) nCccs++;
 
-            String hit = useScript() ? scriptMatch(apdu) : null;
+            String hit;
+            if ((ins & 0xFF) == 0xA8) {
+                hit = sm;
+            } else {
+                hit = useScript() ? scriptMatch(apdu) : null;
+            }
             if (hit != null) {
                 scriptHits++;
 
