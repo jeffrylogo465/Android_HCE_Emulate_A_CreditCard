@@ -1153,6 +1153,15 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // A different PAN is a different card - a dirty flag from editing
+        // the PREVIOUS one must not survive onto this one. The same PAN
+        // re-applied (e.g. a second, corrected block) keeps the flag, so
+        // the guard below still means something - see that guard's own doc.
+        if (!digits(t(etPan)).equals(pan)) {
+            aipDirty = false;
+            aflDirty = false;
+        }
+
         dumping = true;
 
         String expiry6 = c.expiry();

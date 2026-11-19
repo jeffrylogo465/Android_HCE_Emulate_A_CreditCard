@@ -136,6 +136,39 @@ public class MainActivityCardLoadTest {
     }
 
     /**
+     * A card block with a DIFFERENT PAN is a different card - the typed AFL
+     * must NOT survive this time, unlike the same-PAN case above. The PAN
+     * compare runs before etPan is overwritten (MainActivity.java, right
+     * before applyCardBlock()'s own binding=true block).
+     */
+    @Test
+    public void typedAflIsResetByACardBlockOnADifferentPan() {
+        String block1 = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=08010100\n"
+                + "9F27=80\n"
+                + "9F36=0005\n";
+        type(etTrack2, block1);
+        assertEquals("08010100", etAfl.getText().toString().toUpperCase());
+
+        type(etAfl, "DEADBEEF");
+
+        String block2 = "5A=5555555555557777\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=10020200\n"
+                + "9F27=80\n"
+                + "9F36=0006\n";
+        type(etTrack2, block2);
+
+        assertEquals("a different PAN's own AFL must win - the old typed value is stale",
+                "10020200", etAfl.getText().toString().toUpperCase());
+    }
+
+    /**
      * applyDump()'s bare-track2 path (MainActivity.java ~1049) has no guard
      * at all - a bare track 2 carries no AFL, so it always clears the box
      * and resets aflDirty, even over a value the user just typed. Proves
