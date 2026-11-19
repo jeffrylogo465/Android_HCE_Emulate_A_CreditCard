@@ -3,6 +3,7 @@ package de.androidcrypto.android_hce_emulate_a_creditcard;
 import android.content.SharedPreferences;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -236,6 +237,17 @@ public class ShadowApduService extends HostApduService {
      * Set at the top of processCommandApdu, cleared in onDeactivated.
      */
     private boolean tapOpen;
+
+    /**
+     * How many APDUs this tap has seen, and when the last one arrived
+     * (SystemClock.elapsedRealtime(), so a suspend/resume can't skew it the
+     * way System.currentTimeMillis() could). Both reset on the first APDU
+     * of a tap alongside tapOpen, both read by onDeactivated() to tell a
+     * terminal-initiated DESELECT (a real decision) apart from the field
+     * just dropping (LINK_LOSS) - see that method's own doc.
+     */
+    private int apduCount;
+    private long lastApduAt;
 
     private byte[] txnAip;
     private String txnAtc;
@@ -1947,6 +1959,7 @@ public class ShadowApduService extends HostApduService {
             // the whole tap on the previous tap's counters and slot.
             if (!tapOpen) {
                 tapOpen = true;
+                apduCount = 0;
                 clearLog();
                 resetTransaction();
                 seedAtcFromCapture();
@@ -1966,6 +1979,9 @@ public class ShadowApduService extends HostApduService {
                         + " floor=" + p("atcfloor", "-"));
                 popup(nameLine());
             }
+
+            apduCount++;
+            lastApduAt = SystemClock.elapsedRealtime();
 
             // The PDOL data is needed before the script is evaluated, because
             // the profile's own gpo() MACs over it. See txnPdol.
@@ -3342,6 +3358,13 @@ public class ShadowApduService extends HostApduService {
             if (!t.isEmpty()) {
                 try {
                     TapLog.append(this, slot, "!! verdict: " + v);
+                } catch (Throwable ignored) { }
+                try {
+                    TapLog.append(this, slot, "-- deactivated reason=" + reason
+                            + " (" + (reason == DEACTIVATION_DESELECTED ? "DESELECTED"
+                                    : reason == DEACTIVATION_LINK_LOSS ? "LINK_LOSS" : "OTHER") + ")"
+                            + " apdus=" + apduCount
+                            + " sinceLastApdu=" + (SystemClock.elapsedRealtime() - lastApduAt) + "ms");
                 } catch (Throwable ignored) { }
             }
         } catch (Throwable ignored) { }
