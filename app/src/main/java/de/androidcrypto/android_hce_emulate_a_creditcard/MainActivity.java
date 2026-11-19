@@ -208,6 +208,9 @@ public class MainActivity extends AppCompatActivity {
     private boolean dumping = false;
     private boolean suppressResumeStatus = false;
 
+    /** Set true the moment the user edits etAfl/etAip by hand; not read anywhere yet. */
+    private boolean aflDirty, aipDirty;
+
     private String appliedProfile = "";
 
     /** One scan at a time. A second press cancels instead of stacking threads. */
@@ -282,6 +285,14 @@ public class MainActivity extends AppCompatActivity {
     private void scheduleCollect() {
         ui.removeCallbacks(collectNow);
         ui.postDelayed(collectNow, 250);
+    }
+
+    /** A TextWatcher reduced to the one method most listeners here actually need. */
+    private static class SimpleWatcher implements TextWatcher {
+        public final void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+        public final void onTextChanged(CharSequence s, int a, int b, int c) { }
+        public final void afterTextChanged(Editable s) { after(); }
+        void after() { }
     }
 
     @Override
@@ -409,6 +420,9 @@ public class MainActivity extends AppCompatActivity {
                     ? "Forced offline TC - the terminal gets an approve, no online check"
                     : "Offline TC force off - the ladder decides");
         });
+
+        etAfl.addTextChangedListener(new SimpleWatcher() { void after() { aflDirty = true; } });
+        etAip.addTextChangedListener(new SimpleWatcher() { void after() { aipDirty = true; } });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
