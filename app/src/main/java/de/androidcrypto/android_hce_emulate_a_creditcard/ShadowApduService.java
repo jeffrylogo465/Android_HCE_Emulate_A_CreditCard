@@ -1857,6 +1857,8 @@ public class ShadowApduService extends HostApduService {
         Emv.setCdcvm(wrap);
         byte[] aip = capturedAip(wrap);
 
+        tap("-- gpo mc box=" + p("aip", "") + " served=" + bytesToHex(aip));
+
         return tlv(0x77, cat(
                 tlv(0x82, aip),
                 tlv(0x94, hex(AFL_MC_PROBE_WITH_AID))));
