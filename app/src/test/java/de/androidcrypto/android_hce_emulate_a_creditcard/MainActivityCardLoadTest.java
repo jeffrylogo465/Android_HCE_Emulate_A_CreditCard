@@ -101,6 +101,66 @@ public class MainActivityCardLoadTest {
                 c.certWarning.contains("9F46") && c.certWarning.contains("ICCKEY"));
     }
 
+    /**
+     * The other half of the guard the test above does not touch: once the
+     * user has hand-edited etAfl, a SECOND card block (same PAN/network,
+     * different 94) must not clobber that typed value. Only applyCardBlock()
+     * reads aflDirty/aipDirty (MainActivity.java ~1178) - this is the one
+     * test that actually exercises the guard, not just its absence.
+     */
+    @Test
+    public void typedAflSurvives_aSecondCardBlockOnTheSamePan() {
+        String block1 = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=08010100\n"
+                + "9F27=80\n"
+                + "9F36=0005\n";
+        type(etTrack2, block1);
+        assertEquals("08010100", etAfl.getText().toString().toUpperCase());
+
+        type(etAfl, "DEADBEEF");
+
+        String block2 = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=10020200\n"
+                + "9F27=80\n"
+                + "9F36=0006\n";
+        type(etTrack2, block2);
+
+        assertEquals("the user's typed AFL must survive the second block",
+                "DEADBEEF", etAfl.getText().toString().toUpperCase());
+    }
+
+    /**
+     * applyDump()'s bare-track2 path (MainActivity.java ~1049) has no guard
+     * at all - a bare track 2 carries no AFL, so it always clears the box
+     * and resets aflDirty, even over a value the user just typed. Proves
+     * that reset is unconditional, the opposite of applyCardBlock()'s.
+     */
+    @Test
+    public void aDirtyAflIsStillClearedByABareTrack2() {
+        String block = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=08010100\n"
+                + "9F27=80\n"
+                + "9F36=0005\n";
+        type(etTrack2, block);
+
+        type(etAfl, "DEADBEEF");
+        assertEquals("DEADBEEF", etAfl.getText().toString().toUpperCase());
+
+        type(etTrack2, "5555555555554444=29122015678");
+
+        assertEquals("a bare track 2 always clears the AFL box, dirty or not",
+                "", etAfl.getText().toString());
+    }
+
     /** The task's own test: the tile shows the card after save. */
     @Test
     public void tileShowsTheCardAfterSave() {

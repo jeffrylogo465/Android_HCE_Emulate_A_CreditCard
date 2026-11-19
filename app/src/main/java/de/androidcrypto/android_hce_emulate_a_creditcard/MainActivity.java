@@ -1617,6 +1617,11 @@ public class MainActivity extends AppCompatActivity {
         binding = true;
         current = i;
 
+        // A different slot is a different card - the previous slot's hand
+        // edits must not suppress this slot's own stored aip/afl below.
+        aipDirty = false;
+        aflDirty = false;
+
         // The fallbacks have to come from the profile, not from a constant. The
         // untouched test in applyProfile() compares against the network's own
         // default, so a Visa card whose AIP fell back to a hardcoded 1880 would
@@ -3265,6 +3270,7 @@ public class MainActivity extends AppCompatActivity {
         etDiscretionary.setText(disc);
         etAid.setText(aid);
         if (!iad.isEmpty()) etIad.setText(iad);
+        aipDirty = false;
         if (!aip.isEmpty()) etAip.setText(aip);
         if (!atc.isEmpty()) etAtc.setText(nextAtc(atc));
         aflDirty = false;
