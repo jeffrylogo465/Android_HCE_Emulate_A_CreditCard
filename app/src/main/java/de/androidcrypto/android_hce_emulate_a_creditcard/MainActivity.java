@@ -421,8 +421,12 @@ public class MainActivity extends AppCompatActivity {
                     : "Offline TC force off - the ladder decides");
         });
 
-        etAfl.addTextChangedListener(new SimpleWatcher() { void after() { aflDirty = true; } });
-        etAip.addTextChangedListener(new SimpleWatcher() { void after() { aipDirty = true; } });
+        etAfl.addTextChangedListener(new SimpleWatcher() {
+            void after() { if (!binding) aflDirty = true; }
+        });
+        etAip.addTextChangedListener(new SimpleWatcher() {
+            void after() { if (!binding) aipDirty = true; }
+        });
 
         TextWatcher watcher = new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
@@ -1170,8 +1174,8 @@ public class MainActivity extends AppCompatActivity {
         // defaults - only when the block actually supplied them.
         binding = true;
         if (c.aid() != null) etAid.setText(c.aid());
-        if (c.tag("82") != null) etAip.setText(c.tag("82"));
-        if (c.tag("94") != null) etAfl.setText(c.tag("94"));
+        if (c.tag("82") != null && !aipDirty) etAip.setText(c.tag("82"));
+        if (c.tag("94") != null && !aflDirty) etAfl.setText(c.tag("94"));
         if (c.tag("9F27") != null) etCid.setText(c.tag("9F27"));
         if (c.tag("9F36") != null) etAtc.setText(c.tag("9F36"));
         if (c.acKey() != null) etMkac.setText(c.acKey());
