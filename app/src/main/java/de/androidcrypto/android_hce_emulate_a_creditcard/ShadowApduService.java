@@ -1810,12 +1810,15 @@ public class ShadowApduService extends HostApduService {
      * it byte for byte; this method is called instead of using those bytes,
      * for the GPO only - PPSE and SELECT still come from the script.
      *
-     * 82: Profiles.aipMc() through Emv.clearOdaKeepSda() then
-     * Emv.setCdcvm() - the same two-step edit the captured-replay and
+     * 82: the "aip" box when it holds at least one valid byte pair, else
+     * Profiles.aipMc() - same hexBox() fallback shape as the synthetic/boxed-
+     * AIP branch in gpo() (see capturedAip()'s caller there) - through
+     * Emv.clearOdaKeepSda() then Emv.setCdcvm(). That two-step edit runs on
+     * whichever base was picked, same as the captured-replay and
      * synthetic/boxed-AIP branches run on their own AIPs in gpo(), just with
      * clearOda()'s SDA-stripping mask swapped for the one sibling that
-     * leaves SDA alone, because this AIP is this app's own deliberate claim,
-     * not a captured one.
+     * leaves SDA alone, because this AIP is this app's own deliberate claim
+     * (typed or built-in), not a captured one.
      *
      * AIP_MC ITSELF IS BACK TO 1800 (see that constant's own doc) - no ODA
      * bit claimed at all, byte 2 all clear. Claiming SDA (5840, the
@@ -1847,7 +1850,9 @@ public class ShadowApduService extends HostApduService {
     private static final String AFL_MC_PROBE_WITH_AID = "08010100";
 
     private byte[] mastercardGpoFromCard() {
-        byte[] wrap = tlv(0x77, tlv(0x82, Profiles.aipMc()));
+        String boxed = hexBox("aip", "");
+        byte[] base = boxed.length() >= 4 ? hex(boxed) : Profiles.aipMc();
+        byte[] wrap = tlv(0x77, tlv(0x82, base));
         Emv.clearOdaKeepSda(wrap);
         Emv.setCdcvm(wrap);
         byte[] aip = capturedAip(wrap);

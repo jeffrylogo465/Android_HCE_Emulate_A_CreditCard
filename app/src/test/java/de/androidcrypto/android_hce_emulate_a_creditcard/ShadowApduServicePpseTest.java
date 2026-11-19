@@ -452,4 +452,40 @@ public class ShadowApduServicePpseTest {
         assertEquals("AFL must be the plain one-entry shape, no appended AID tail",
                 "08010100", Hex.toHex(afl));
     }
+
+    /**
+     * mastercardGpoFromCard() now honours a typed "aip" box the same way the
+     * synthetic/boxed-AIP branch in gpo() does, instead of always building
+     * from Profiles.aipMc(). The box value (0x7D00: every ODA bit plus
+     * CV/TRM set) is chosen to distinguish this method's own mask from
+     * clearOda()'s: clearOdaKeepSda() clears DDA/IssuerAuth/CDA (0x25) but
+     * leaves SDA (0x40) alone, so 0x7D survives as 0x58, and setCdcvm() then
+     * ORs in 0x02 - 0x5A, not the 0x1A the un-boxed default serves.
+     */
+    @Test
+    public void scriptedMastercardGpo_honoursATypedAipBox() {
+        Prefs.get(RuntimeEnvironment.getApplication()).edit()
+                .putString("card0_aip", "7D00").commit();
+        setProfile("MASTERCARD");
+        start();
+        send(SELECT_PPSE);
+        send(SELECT_A0000000041010);
+
+        String gpo = send("80A8000002830000");
+        assertTrue("GPO must not refuse: " + gpo, gpo.endsWith("9000"));
+
+        byte[] body = Hex.hex(gpo.substring(0, gpo.length() - 4));
+        byte[] aip = Emv.findTag(body, 0x82);
+        int b1 = aip[0] & 0xFF;
+
+        assertEquals("SDA bit (0x40) must survive - this mask keeps it", 0x40, b1 & 0x40);
+        assertEquals("DDA bit (0x20) must be cleared", 0, b1 & 0x20);
+        assertEquals("Issuer Authentication bit (0x04) must be cleared", 0, b1 & 0x04);
+        assertEquals("CDA bit (0x01) must be cleared", 0, b1 & 0x01);
+        assertEquals("CDCVM bit must be set", Emv.AIP_CDCVM, b1 & Emv.AIP_CDCVM);
+        assertEquals("0x5A - 0x7D's survivors plus the CDCVM bit", 0x5A, b1);
+
+        int b2 = aip[1] & 0xFF;
+        assertEquals("byte 2 comes from the box too, unmasked", 0x00, b2);
+    }
 }
