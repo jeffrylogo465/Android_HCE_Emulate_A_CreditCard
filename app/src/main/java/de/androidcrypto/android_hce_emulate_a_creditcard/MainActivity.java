@@ -458,6 +458,13 @@ public class MainActivity extends AppCompatActivity {
                 ui.removeCallbacksAndMessages(FILLER_TOKEN);
                 ui.postDelayed(() -> {
                     if (binding || dumping) return;
+                    // Read BEFORE autoFill() - for anything track2Like,
+                    // autoFill() runs its own identical "is this a track 2"
+                    // check first and already overwrites etPan with the
+                    // same new PAN applyDump() is about to see, so reading
+                    // etPan only after autoFill() always finds "unchanged"
+                    // and applyDump()'s own PAN-change reset never fires.
+                    String panBeforeAutoFill = digits(t(etPan));
                     autoFill();
                     maybeProfile();
 
@@ -474,7 +481,7 @@ public class MainActivity extends AppCompatActivity {
                     } else if (chainLike) {
                         applyChain(t2);
                     } else if (track2Like) {
-                        applyDump(t2);
+                        applyDump(t2, panBeforeAutoFill);
                     } else if (looksLikeCardBlock(t2)) {
                         applyCardBlock(t2);
                     }
@@ -1012,7 +1019,19 @@ public class MainActivity extends AppCompatActivity {
      * The CSC is remembered so a later reseed of the same PAN reuses it instead
      * of falling back to zeros.
      */
+    /** Convenience for the one other caller (the "Load" dialog), which runs before autoFill() ever touches etPan. */
     private void applyDump(String raw) {
+        applyDump(raw, digits(t(etPan)));
+    }
+
+    /**
+     * panBeforeAutoFill is the PAN this slot held before THIS filler pass
+     * started - not necessarily what etPan shows right now. For anything
+     * track2Like (this method's own precondition), autoFill() already ran
+     * first and already wrote the new PAN into etPan, so comparing against
+     * etPan here would always see "unchanged" - see the filler's own doc.
+     */
+    private void applyDump(String raw, String panBeforeAutoFill) {
         String[] d;
         try {
             d = parseDump(raw);
@@ -1025,6 +1044,14 @@ public class MainActivity extends AppCompatActivity {
         if (net.isEmpty()) {
             status("dump: " + d[0] + " is not a network this app serves", COL_STALE);
             return;
+        }
+
+        // Same PAN-change test as applyCardBlock() - a different PAN is a
+        // different card, so a dirty flag from editing the PREVIOUS one
+        // must not survive onto this one.
+        if (!panBeforeAutoFill.equals(d[0])) {
+            aipDirty = false;
+            aflDirty = false;
         }
 
         dumping = true;
@@ -1046,7 +1073,6 @@ public class MainActivity extends AppCompatActivity {
         applyProfile(d[0], net);
 
         binding = true;
-        aflDirty = false;
         etAfl.setText("");
         binding = false;
         collect();

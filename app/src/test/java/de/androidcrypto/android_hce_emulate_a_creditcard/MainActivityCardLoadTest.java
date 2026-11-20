@@ -169,13 +169,16 @@ public class MainActivityCardLoadTest {
     }
 
     /**
-     * applyDump()'s bare-track2 path (MainActivity.java ~1049) has no guard
-     * at all - a bare track 2 carries no AFL, so it always clears the box
-     * and resets aflDirty, even over a value the user just typed. Proves
-     * that reset is unconditional, the opposite of applyCardBlock()'s.
+     * applyDump()'s bare-track2 path (MainActivity.java ~1049) ALWAYS
+     * visually clears etAfl - a bare track 2 carries no AFL at all - but
+     * since 4896655/c561d16 that clear no longer resets aflDirty by itself;
+     * the same PAN-change test applyCardBlock() uses (MainActivity.java,
+     * right before applyDump()'s own binding=true block) decides that. Same
+     * PAN here, so the flag must survive the visible clear: proved by a
+     * follow-up card block on that same PAN finding the box still guarded.
      */
     @Test
-    public void aDirtyAflIsStillClearedByABareTrack2() {
+    public void aflDirtySurvivesABareTrack2OnTheSamePan() {
         String block = "5A=5555555555554444\n"
                 + "5F24=291231\n"
                 + "84=A0000000049999\n"
@@ -189,9 +192,56 @@ public class MainActivityCardLoadTest {
         assertEquals("DEADBEEF", etAfl.getText().toString().toUpperCase());
 
         type(etTrack2, "5555555555554444=29122015678");
-
-        assertEquals("a bare track 2 always clears the AFL box, dirty or not",
+        assertEquals("a bare track 2 always clears the AFL box visually",
                 "", etAfl.getText().toString());
+
+        String block2 = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=10020200\n"
+                + "9F27=80\n"
+                + "9F36=0006\n";
+        type(etTrack2, block2);
+
+        assertEquals("aflDirty must have survived the same-PAN bare track2 - "
+                        + "the box stays empty, not the new block's own 94",
+                "", etAfl.getText().toString());
+    }
+
+    /**
+     * The other half: a bare track2 on a DIFFERENT PAN resets aflDirty (same
+     * PAN-change test as above, this time actually tripping it), so a
+     * follow-up card block on THAT new PAN is free to fill its own 94 again.
+     */
+    @Test
+    public void aBareTrack2OnADifferentPanResetsAflDirty() {
+        String block = "5A=5555555555554444\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=08010100\n"
+                + "9F27=80\n"
+                + "9F36=0005\n";
+        type(etTrack2, block);
+
+        type(etAfl, "DEADBEEF");
+        assertEquals("DEADBEEF", etAfl.getText().toString().toUpperCase());
+
+        type(etTrack2, "5555555555557777=29122015678");
+        assertEquals("", etAfl.getText().toString());
+
+        String block2 = "5A=5555555555557777\n"
+                + "5F24=291231\n"
+                + "84=A0000000049999\n"
+                + "82=5800\n"
+                + "94=10020200\n"
+                + "9F27=80\n"
+                + "9F36=0006\n";
+        type(etTrack2, block2);
+
+        assertEquals("aflDirty must have been reset by the different-PAN bare track2",
+                "10020200", etAfl.getText().toString().toUpperCase());
     }
 
     /** The task's own test: the tile shows the card after save. */
