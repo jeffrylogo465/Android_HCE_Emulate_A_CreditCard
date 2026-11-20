@@ -1072,9 +1072,11 @@ public class MainActivity extends AppCompatActivity {
 
         applyProfile(d[0], net);
 
-        binding = true;
-        etAfl.setText("");
-        binding = false;
+        if (!aflDirty) {
+            binding = true;
+            etAfl.setText("");
+            binding = false;
+        }
         collect();
 
         // A bare track 2 never carries the certificate chain - reusing

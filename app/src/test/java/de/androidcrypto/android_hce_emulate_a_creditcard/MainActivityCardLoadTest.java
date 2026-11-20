@@ -169,13 +169,12 @@ public class MainActivityCardLoadTest {
     }
 
     /**
-     * applyDump()'s bare-track2 path (MainActivity.java ~1049) ALWAYS
-     * visually clears etAfl - a bare track 2 carries no AFL at all - but
-     * since 4896655/c561d16 that clear no longer resets aflDirty by itself;
-     * the same PAN-change test applyCardBlock() uses (MainActivity.java,
-     * right before applyDump()'s own binding=true block) decides that. Same
-     * PAN here, so the flag must survive the visible clear: proved by a
-     * follow-up card block on that same PAN finding the box still guarded.
+     * applyDump()'s bare-track2 path (MainActivity.java ~1075) now skips its
+     * own etAfl clear entirely when aflDirty is already true, instead of
+     * clearing the box visually and only guarding the flag. Same PAN here,
+     * so the flag survives (same PAN-change test applyCardBlock() uses) and
+     * the typed value must still be sitting in the box afterward, untouched
+     * by either the dump or a follow-up card block on that same PAN.
      */
     @Test
     public void aflDirtySurvivesABareTrack2OnTheSamePan() {
@@ -192,8 +191,8 @@ public class MainActivityCardLoadTest {
         assertEquals("DEADBEEF", etAfl.getText().toString().toUpperCase());
 
         type(etTrack2, "5555555555554444=29122015678");
-        assertEquals("a bare track 2 always clears the AFL box visually",
-                "", etAfl.getText().toString());
+        assertEquals("aflDirty survived the same-PAN bare track2 - the clear must be skipped",
+                "DEADBEEF", etAfl.getText().toString().toUpperCase());
 
         String block2 = "5A=5555555555554444\n"
                 + "5F24=291231\n"
@@ -204,9 +203,9 @@ public class MainActivityCardLoadTest {
                 + "9F36=0006\n";
         type(etTrack2, block2);
 
-        assertEquals("aflDirty must have survived the same-PAN bare track2 - "
-                        + "the box stays empty, not the new block's own 94",
-                "", etAfl.getText().toString());
+        assertEquals("aflDirty must have survived the same-PAN bare track2 too - "
+                        + "the typed value stays, not the new block's own 94",
+                "DEADBEEF", etAfl.getText().toString().toUpperCase());
     }
 
     /**
