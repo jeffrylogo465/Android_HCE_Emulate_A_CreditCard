@@ -2243,7 +2243,19 @@ public class ShadowApduService extends HostApduService {
         }
     }
 
+    /**
+     * Times selectInner() so a slow SELECT response - a real candidate for
+     * the reader cutting the field before a GPO ever arrives, see
+     * term_card0_log.txt's gate=OFF taps - is logged instead of assumed.
+     */
     private byte[] select(byte[] apdu) {
+        long t0 = SystemClock.elapsedRealtime();
+        byte[] out = selectInner(apdu);
+        tap("-- select duration=" + (SystemClock.elapsedRealtime() - t0) + "ms");
+        return out;
+    }
+
+    private byte[] selectInner(byte[] apdu) {
         int lc = lcOf(apdu);
         int off = dataOff(apdu);
         if (apdu.length < off + lc) return SW_MALFORMED;
@@ -2316,7 +2328,11 @@ public class ShadowApduService extends HostApduService {
                 tlv(0x8C, hex(isMsd() ? CDOL_MSD : dol("cdol1", CDOL1))),
                 tlv(0x9F11, new byte[]{0x01}),
                 tlv(0x9F12, label.getBytes(StandardCharsets.US_ASCII)),
-                tlv(0x9F2A, new byte[]{(byte) kernelFor(bytesToHex(name))}),
+                // EXPERIMENTAL: 03 (Visa qVSDC's kernel id), not kernelFor()'s
+                // own 02 for this AID's A000000004 RID - term-new12.log-era
+                // probe, see this method's own doc for why. PPSE's own 9F2A
+                // (oneAppPpse(), appEntry()) is untouched and still kernelFor().
+                tlv(0x9F2A, new byte[]{(byte) 0x03}),
                 tlv(0x9F38, hex(dol("pdol", PDOL))));
         byte[] inner = cat(tlv(0x84, name), tlv(0xA5, prop));
         return cat(tlv(0x6F, inner), SW_OK);
