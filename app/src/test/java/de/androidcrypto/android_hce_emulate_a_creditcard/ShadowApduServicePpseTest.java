@@ -416,9 +416,13 @@ public class ShadowApduServicePpseTest {
      * the same reason: no tap ever showed a kernel reading past the first
      * 4 bytes, so the probe bought nothing and is gone.
      *
-     * 9F6B must NOT be in this GPO: this profile is EMV mode only, and 9F6B
-     * is an MSD track 2 equivalent that has no business in an EMV-mode
-     * response.
+     * 9F6B IS back in this GPO. 7a74a93 added it, 0ad3dea dropped it when
+     * byte 2 went to 0x40 ("MSD track 2 equivalent, has no business in an
+     * EMV-mode response"), then 5be6324 added 9F38 - so no tap has ever
+     * carried 9F6B and 9F38 together. That reasoning is reopened: kernel 2
+     * lists 9F6B in the GPO response for both modes, and real M/Chip cards
+     * carry it regardless. Restored, sourced the same way 7a74a93 built it
+     * (msdRecord()'s 9F6B, then its 57, then a synthesized track2()).
      */
     @Test
     public void scriptedMastercardGpo_isBuiltFromTheCard_notReplayed() {
@@ -433,7 +437,7 @@ public class ShadowApduServicePpseTest {
         byte[] body = Hex.hex(gpo.substring(0, gpo.length() - 4));
         assertNotNull("82 (AIP) missing", Emv.findTag(body, 0x82));
         assertNotNull("94 (AFL) missing", Emv.findTag(body, 0x94));
-        assertNull("9F6B (track 2) must not be served - EMV mode only now",
+        assertNotNull("9F6B (track 2 equivalent) must be served - kernel 2 expects it in both modes",
                 Emv.findTag(body, 0x9F6B));
 
         byte[] aip = Emv.findTag(body, 0x82);

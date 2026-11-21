@@ -1874,9 +1874,15 @@ public class ShadowApduService extends HostApduService {
 
         tap("-- gpo mc box=" + p("aip", "") + " served=" + bytesToHex(aip));
 
+        byte[] rec = msdRecord();
+        byte[] t = rec == null ? null : findTag(rec, 0x9F6B);
+        if (t == null && rec != null) t = findTag(rec, 0x57);
+        if (t == null) t = track2();
+
         return tlv(0x77, cat(
                 tlv(0x82, aip),
-                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID))));
+                tlv(0x94, hex(AFL_MC_PROBE_WITH_AID)),
+                tlv(0x9F6B, t)));
     }
 
     /**
