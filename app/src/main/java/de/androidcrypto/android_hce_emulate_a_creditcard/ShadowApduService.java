@@ -411,6 +411,9 @@ public class ShadowApduService extends HostApduService {
      */
     private void tap(String s) {
         try {
+            Log.w(TAG, s);
+        } catch (Throwable ignored) { }
+        try {
             synchronized (tapLog) {
                 tapLog.append(s).append('\n');
                 if (tapLog.length() > 32000) tapLog.delete(0, 16000);
@@ -1945,6 +1948,7 @@ public class ShadowApduService extends HostApduService {
 
     @Override
     public byte[] processCommandApdu(byte[] apdu, Bundle extras) {
+        Log.w(TAG, "APDU ins=" + (apdu == null ? "null" : String.format("%02X", apdu[1] & 0xFF)));
         try {
             if (apdu == null || apdu.length < 4) return SW_MALFORMED;
 
@@ -3343,6 +3347,7 @@ public class ShadowApduService extends HostApduService {
      */
     @Override
     public void onDeactivated(int reason) {
+        Log.w(TAG, "onDeactivated enter reason=" + reason);
         final String t = logText();
         final String slot = sel();
         tapOpen = false;
